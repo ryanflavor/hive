@@ -174,12 +174,58 @@ def get_current_window_target() -> str | None:
     pane_id = get_current_pane_id()
     if not pane_id:
         return None
-    # Query which window this pane belongs to
     r = _run(
         ["display-message", "-t", pane_id, "-p", "#{session_name}:#{window_index}"],
         check=False,
     )
     return r.stdout.strip() or None
+
+
+def get_current_session_name() -> str | None:
+    """Get the tmux session name for the calling pane."""
+    pane_id = get_current_pane_id()
+    if not pane_id:
+        return None
+    r = _run(
+        ["display-message", "-t", pane_id, "-p", "#{session_name}"],
+        check=False,
+    )
+    return r.stdout.strip() or None
+
+
+def get_current_window_index() -> str | None:
+    """Get the window index for the calling pane."""
+    pane_id = get_current_pane_id()
+    if not pane_id:
+        return None
+    r = _run(
+        ["display-message", "-t", pane_id, "-p", "#{window_index}"],
+        check=False,
+    )
+    return r.stdout.strip() or None
+
+
+@dataclass
+class PaneInfo:
+    pane_id: str
+    title: str
+
+
+def list_panes_with_titles(target: str) -> list[PaneInfo]:
+    """List all panes in a window with their IDs and titles."""
+    r = _run(
+        ["list-panes", "-t", target, "-F", "#{pane_id}\t#{pane_title}"],
+        check=False,
+    )
+    result = []
+    for line in r.stdout.strip().split("\n"):
+        if not line:
+            continue
+        parts = line.split("\t", 1)
+        pane_id = parts[0]
+        title = parts[1] if len(parts) > 1 else ""
+        result.append(PaneInfo(pane_id=pane_id, title=title))
+    return result
 
 
 # --- Utility ---

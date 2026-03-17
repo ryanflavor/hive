@@ -2,7 +2,7 @@
 
 tmux-based multi-agent collaboration framework for [Factory](https://factory.ai)'s `droid` CLI.
 
-Spawn multiple droid agents in tmux panes, orchestrate them via CLI, and communicate through the filesystem.
+Spawn multiple droid agents in tmux panes, orchestrate them via CLI, inject short control messages inline via tmux, and persist workflow state in a workspace.
 
 ## Architecture
 
@@ -14,9 +14,9 @@ Spawn multiple droid agents in tmux panes, orchestrate them via CLI, and communi
 └──────────────┴──────────────┘
 
 orchestrator ──hive spawn──→ tmux split-window → droid TUI
-orchestrator ──hive type───→ send_keys → agent stdin
+orchestrator ──hive send───→ tmux send_keys → inline <HIVE ...> message
 orchestrator ──hive capture─→ capture_pane → agent stdout
-agents ────────filesystem───→ workspace/tasks/ & workspace/results/
+agents ────────workspace────→ artifacts/ + status/
 ```
 
 ## Install
@@ -30,18 +30,20 @@ pipx install git+https://github.com/notdp/hive.git
 ## Usage
 
 ```bash
-# Create a team (from inside tmux)
-hive create my-team -d "code review"
+# Create a team + workspace
+hive create my-team -d "code review" --workspace /tmp/hive-demo
 
 # Spawn agents
 hive spawn claude -t my-team -m "custom:claude-opus-4-6"
 hive spawn gpt -t my-team -m "custom:gpt-5.3-codex"
 
 # Send a task
-hive type claude "Review the PR diff and write findings to /tmp/results.md" -t my-team
+hive send claude "Review the PR diff and write findings to the workspace artifact" -t my-team
 
 # Monitor
-hive status -t my-team
+hive who -t my-team
+hive status-show -t my-team -w /tmp/hive-demo
+hive wait-status claude -t my-team -w /tmp/hive-demo --state done
 hive capture claude -t my-team
 
 # Interrupt / cleanup
@@ -55,24 +57,25 @@ hive delete my-team
 |---------|-------------|
 | `hive create <team>` | Create a team + optional workspace |
 | `hive spawn <agent>` | Spawn a droid agent in a new tmux pane |
-| `hive type <agent> "text"` | Send a prompt to an agent |
+| `hive type <agent> "text"` | Send a raw prompt directly to an agent (debug / escape hatch) |
+| `hive send <agent> "text"` | Deliver an inline `<HIVE ...>` message to an agent |
+| `hive who` / `hive status` | Show team presence and published statuses |
+| `hive status-set` / `hive status-show` | Publish and read workflow state snapshots |
+| `hive wait-status` | Poll until an agent publishes the expected state |
 | `hive capture <agent>` | Read agent's pane output |
-| `hive status` | Show team and agent status (JSON) |
 | `hive interrupt <agent>` | Press Escape in agent's pane |
-| `hive wait <agent> <tag>` | Poll until sentinel file appears |
-| `hive comment` | GitHub PR comment operations |
 | `hive delete <team>` | Kill agents + remove team data |
 
 ## Workspace
 
-When created with `--workspace`, hive initializes a filesystem workspace for structured agent communication:
+When created with `--workspace`, hive initializes a workspace for durable workflow state and large artifacts:
 
 ```
 workspace/
-├── state/          # Key-value state files
-├── tasks/          # Task files written by orchestrator
-├── results/        # Result files + .done sentinels from agents
-└── comments/       # GitHub comment tracking
+├── state/          # Shared key-value state files
+├── presence/       # Team presence snapshots from `hive who` / `hive status`
+├── status/         # Per-agent workflow status snapshots
+└── artifacts/      # Large payloads exchanged by path
 ```
 
 ## Environment Variables
@@ -85,7 +88,7 @@ workspace/
 
 ## How It Works
 
-Hive takes the same approach as Claude Code's Agent Teams: interactive TUI agents in tmux panes, controlled via `send_keys`, communicating through the filesystem. No JSON-RPC, no daemon — just tmux + files.
+Hive runs interactive `droid` sessions in tmux panes. Short coordination messages arrive inline as `<HIVE ...>` blocks via tmux `send_keys`; long payloads and durable completion signals live in workspace `artifacts/` and `status/`. No JSON-RPC, no daemon — just tmux + workspace files.
 
 Each spawned agent is a full `droid` TUI session. You can `tmux select-pane` to interact with any agent directly.
 

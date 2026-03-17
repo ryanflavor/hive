@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,23 +42,11 @@ def _resolve_model_id(model: str, settings: dict[str, Any]) -> str:
     return model
 
 
-def _set_model_in_settings(model: str) -> tuple[bool, str | None, str]:
-    """Set model in settings.json, returning restore state and resolved model ID."""
-    if not model or not SETTINGS_FILE.is_file():
-        return False, None, model
-
+def _load_settings() -> dict[str, Any]:
+    if not SETTINGS_FILE.is_file():
+        return {}
     with open(SETTINGS_FILE) as f:
-        settings = json.load(f)
-
-    target_id = _resolve_model_id(model, settings)
-    defaults = settings.setdefault("sessionDefaultSettings", {})
-    had_model_key = "model" in defaults
-    prev_model = defaults.get("model")
-    if prev_model != target_id:
-        defaults["model"] = target_id
-        with open(SETTINGS_FILE, "w") as f:
-            json.dump(settings, f, indent=2, ensure_ascii=False)
-    return had_model_key, prev_model, target_id
+        return json.load(f)
 
 
 def _encode_cwd(cwd: str) -> str:
@@ -77,9 +66,22 @@ def _list_sessions(cwd: str) -> set[str]:
     }
 
 
+def _session_settings_path(cwd: str, session_id: str) -> Path:
+    return SESSIONS_DIR / _encode_cwd(cwd) / f"{session_id}.settings.json"
+
+
+def _session_timestamp(cwd: str, session_id: str) -> float:
+    path = _session_settings_path(cwd, session_id)
+    try:
+        stat = path.stat()
+    except OSError:
+        return -1
+    return getattr(stat, "st_birthtime", stat.st_mtime)
+
+
 def _read_session_model(cwd: str, session_id: str) -> str | None:
     """Read the model from a session's settings.json."""
-    path = SESSIONS_DIR / _encode_cwd(cwd) / f"{session_id}.settings.json"
+    path = _session_settings_path(cwd, session_id)
     try:
         with open(path) as f:
             return json.load(f).get("model")
@@ -87,44 +89,50 @@ def _read_session_model(cwd: str, session_id: str) -> str | None:
         return None
 
 
+def _select_session_id(cwd: str, session_ids: set[str], model: str = "") -> str | None:
+    ordered = sorted(session_ids, key=lambda sid: (_session_timestamp(cwd, sid), sid), reverse=True)
+    if not ordered:
+        return None
+    if model:
+        for sid in ordered:
+            if _read_session_model(cwd, sid) == model:
+                return sid
+    return ordered[0]
+
+
+def detect_current_session_id(cwd: str, model: str = "") -> str | None:
+    """Best-effort lookup for the current droid session ID in a cwd."""
+    return _select_session_id(cwd, _list_sessions(cwd), model=model)
+
+
 def _detect_new_session(cwd: str, before: set[str], model: str = "") -> str | None:
     """Find a session UUID that appeared after spawn."""
     after = _list_sessions(cwd)
-    new = after - before
-    if not new:
-        return None
-    if len(new) == 1:
-        return new.pop()
-    if model:
-        for sid in sorted(new):
-            m = _read_session_model(cwd, sid)
-            if m == model:
-                return sid
-    return new.pop()
+    return _select_session_id(cwd, after - before, model=model)
 
 
-def _restore_model_in_settings(had_model_key: bool, prev_model: str | None) -> None:
-    """Restore previous model in settings.json."""
-    if not SETTINGS_FILE.is_file():
+def _write_runtime_settings_override(model: str) -> tuple[Path | None, str]:
+    """Create a process-local settings override for interactive droid spawn."""
+    if not model:
+        return None, model
+
+    settings = _load_settings()
+    target_id = _resolve_model_id(model, settings)
+    payload = {"sessionDefaultSettings": {"model": target_id}}
+
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tmp:
+        json.dump(payload, tmp, indent=2, ensure_ascii=False)
+        tmp.write("\n")
+        return Path(tmp.name), target_id
+
+
+def _cleanup_runtime_settings_override(path: Path | None) -> None:
+    if path is None:
         return
-
-    with open(SETTINGS_FILE) as f:
-        settings = json.load(f)
-
-    defaults = settings.setdefault("sessionDefaultSettings", {})
-    changed = False
-
-    if had_model_key:
-        if defaults.get("model") != prev_model:
-            defaults["model"] = prev_model
-            changed = True
-    elif "model" in defaults:
-        defaults.pop("model", None)
-        changed = True
-
-    if changed:
-        with open(SETTINGS_FILE, "w") as f:
-            json.dump(settings, f, indent=2, ensure_ascii=False)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
 
 
 @dataclass
@@ -163,9 +171,7 @@ class Agent:
 
         # Snapshot existing sessions to detect the new one after startup
         sessions_before = _list_sessions(cwd)
-
-        # Set model in settings.json before starting droid
-        had_model_key, prev_model, resolved_model = _set_model_in_settings(model)
+        runtime_settings_path, resolved_model = _write_runtime_settings_override(model)
 
         if is_first and not tmux.is_inside_tmux():
             pane_id = target_pane
@@ -175,9 +181,11 @@ class Agent:
         tmux.set_pane_title(pane_id, f"[{name}]")
         tmux.set_pane_border_color(pane_id, color)
 
-        cmd_parts = ["exec", DROID_BIN]
+        cmd_parts = ["exec", _shell_escape(DROID_BIN)]
+        if runtime_settings_path is not None:
+            cmd_parts.extend(["--settings", _shell_escape(str(runtime_settings_path))])
         if session_id:
-            cmd_parts.extend(["-r", session_id])
+            cmd_parts.extend(["-r", _shell_escape(session_id)])
 
         env_parts = [
             f"HIVE_TEAM_NAME={_shell_escape(team_name)}",
@@ -202,36 +210,42 @@ class Agent:
             session_id=session_id,
         )
 
-        if tmux.wait_for_text(pane_id, "for help", timeout=DROID_STARTUP_TIMEOUT):
-            # Droid is ready — detect session ID and restore model
-            detected_session = _detect_new_session(cwd, sessions_before, model=resolved_model)
-            if detected_session:
-                agent.session_id = detected_session
+        try:
+            if tmux.wait_for_text(pane_id, "for help", timeout=DROID_STARTUP_TIMEOUT):
+                detected_session = _detect_new_session(cwd, sessions_before, model=resolved_model)
+                if detected_session:
+                    agent.session_id = detected_session
 
-            _restore_model_in_settings(had_model_key, prev_model)
-            time.sleep(1)
+                time.sleep(1)
 
-            if skill and skill != "none":
-                tmux.send_keys(pane_id, f"/skill {skill}")
-                time.sleep(2)
+                if skill and skill != "none":
+                    agent.load_skill(skill)
 
-            # Only send hive bootstrap if using hive skill with a prompt
-            if skill == "hive" and prompt:
-                tmux.send_keys(pane_id,
-                    "I am a hive teammate. "
-                    "Run `hive read` to get my task, then execute it."
-                )
-        else:
-            # Droid didn't start in time — still restore settings
-            _restore_model_in_settings(had_model_key, prev_model)
+                if skill == "hive":
+                    tmux.send_keys(pane_id,
+                        "I am a hive teammate. "
+                        "Use `hive current`, `hive who`, `hive send`, and `hive status-set` to collaborate. "
+                        "Hive messages arrive inline as `<HIVE ...> ... </HIVE>` blocks."
+                    )
+                if prompt:
+                    tmux.send_keys(pane_id, prompt)
 
-        return agent
+            return agent
+        finally:
+            _cleanup_runtime_settings_override(runtime_settings_path)
 
     # --- Control ---
 
     def send(self, text: str) -> None:
         """Send a prompt to the droid TUI."""
         tmux.send_keys(self.pane_id, text)
+
+    def load_skill(self, skill_name: str) -> None:
+        """Load one additional droid skill in the pane."""
+        if not skill_name or skill_name == "none":
+            return
+        tmux.send_keys(self.pane_id, f"/skill {skill_name}")
+        time.sleep(2)
 
     def interrupt(self) -> None:
         """Press Escape to interrupt."""

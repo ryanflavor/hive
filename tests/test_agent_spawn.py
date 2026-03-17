@@ -2,9 +2,10 @@
 
 from hive.agent import (
     Agent,
+    _cleanup_runtime_settings_override,
     _detect_new_session,
-    _restore_model_in_settings,
-    _set_model_in_settings,
+    _write_runtime_settings_override,
+    detect_current_session_id,
 )
 import json
 
@@ -61,7 +62,55 @@ def test_spawn_passes_extra_env(monkeypatch):
     assert "/tmp/cr-test" in startup_cmd
 
 
-def test_set_model_in_settings(monkeypatch, tmp_path):
+def test_spawn_hive_bootstraps_and_sends_prompt(monkeypatch):
+    calls = _setup_tmux_mocks(monkeypatch)
+
+    Agent.spawn(
+        name="w1", team_name="t", target_pane="%0",
+        cwd="/tmp", is_first=True, skill="hive",
+        prompt="Please check your inbox.",
+    )
+
+    assert "/skill hive" in calls
+    assert any("Use `hive current`, `hive who`, `hive send`, and `hive status-set`" in c for c in calls)
+    assert any("<HIVE ...> ... </HIVE>" in c for c in calls)
+    assert "Please check your inbox." in calls
+
+
+def test_load_skill_sends_slash_command(monkeypatch):
+    calls = _setup_tmux_mocks(monkeypatch)
+    agent = Agent(name="w1", team_name="t", pane_id="%0")
+
+    agent.load_skill("cross-review")
+
+    assert calls == ["/skill cross-review"]
+
+
+def test_spawn_uses_runtime_settings_override(monkeypatch):
+    calls = _setup_tmux_mocks(monkeypatch)
+    cleaned: list[str] = []
+
+    monkeypatch.setattr(
+        "hive.agent._write_runtime_settings_override",
+        lambda _model: (__import__("pathlib").Path("/tmp/hive-runtime-settings.json"), "custom:Claude-Opus-4.6-0"),
+    )
+    monkeypatch.setattr(
+        "hive.agent._cleanup_runtime_settings_override",
+        lambda path: cleaned.append(str(path) if path else ""),
+    )
+
+    Agent.spawn(
+        name="w1", team_name="t", target_pane="%0",
+        model="custom:claude-opus-4-6", cwd="/tmp", is_first=True,
+        skill="none",
+    )
+
+    startup_cmd = calls[0]
+    assert "--settings '/tmp/hive-runtime-settings.json'" in startup_cmd
+    assert cleaned == ["/tmp/hive-runtime-settings.json"]
+
+
+def test_write_runtime_settings_override_resolves_custom_model(monkeypatch, tmp_path):
     settings_file = tmp_path / "settings.json"
     settings_file.write_text(json.dumps({
         "sessionDefaultSettings": {"model": "opus"},
@@ -71,50 +120,39 @@ def test_set_model_in_settings(monkeypatch, tmp_path):
     }))
     monkeypatch.setattr("hive.agent.SETTINGS_FILE", settings_file)
 
-    had_model_key, prev, resolved = _set_model_in_settings("custom:claude-opus-4-6")
-    assert had_model_key is True
-    assert prev == "opus"
+    runtime_path, resolved = _write_runtime_settings_override("custom:claude-opus-4-6")
     assert resolved == "custom:Claude-Opus-4.6-0"
+    assert runtime_path is not None
 
-    data = json.loads(settings_file.read_text())
-    assert data["sessionDefaultSettings"]["model"] == "custom:Claude-Opus-4.6-0"
+    data = json.loads(runtime_path.read_text())
+    assert data == {"sessionDefaultSettings": {"model": "custom:Claude-Opus-4.6-0"}}
 
-    _restore_model_in_settings(had_model_key, prev)
-    data = json.loads(settings_file.read_text())
-    assert data["sessionDefaultSettings"]["model"] == "opus"
+    original = json.loads(settings_file.read_text())
+    assert original["sessionDefaultSettings"]["model"] == "opus"
+
+    _cleanup_runtime_settings_override(runtime_path)
+    assert not runtime_path.exists()
 
 
-def test_set_model_noop_when_already_correct(monkeypatch, tmp_path):
+def test_write_runtime_settings_override_keeps_direct_model(monkeypatch, tmp_path):
     settings_file = tmp_path / "settings.json"
     settings_file.write_text(json.dumps({
         "sessionDefaultSettings": {"model": "custom:my-model"},
     }))
     monkeypatch.setattr("hive.agent.SETTINGS_FILE", settings_file)
 
-    mtime_before = settings_file.stat().st_mtime_ns
-    had_model_key, prev, resolved = _set_model_in_settings("custom:my-model")
-    mtime_after = settings_file.stat().st_mtime_ns
-
-    assert had_model_key is True
-    assert prev == "custom:my-model"
+    runtime_path, resolved = _write_runtime_settings_override("custom:my-model")
     assert resolved == "custom:my-model"
-    assert mtime_before == mtime_after  # file not rewritten
+    assert runtime_path is not None
+    data = json.loads(runtime_path.read_text())
+    assert data == {"sessionDefaultSettings": {"model": "custom:my-model"}}
+    _cleanup_runtime_settings_override(runtime_path)
 
 
-def test_restore_model_removes_temp_model_when_no_previous_key(monkeypatch, tmp_path):
-    settings_file = tmp_path / "settings.json"
-    settings_file.write_text(json.dumps({
-        "sessionDefaultSettings": {},
-    }))
-    monkeypatch.setattr("hive.agent.SETTINGS_FILE", settings_file)
-
-    had_model_key, prev, _ = _set_model_in_settings("custom:temp-model")
-    assert had_model_key is False
-    assert prev is None
-
-    _restore_model_in_settings(had_model_key, prev)
-    data = json.loads(settings_file.read_text())
-    assert "model" not in data["sessionDefaultSettings"]
+def test_write_runtime_settings_override_returns_none_when_model_empty():
+    runtime_path, resolved = _write_runtime_settings_override("")
+    assert runtime_path is None
+    assert resolved == ""
 
 
 def test_detect_new_session_matches_resolved_model_id(monkeypatch, tmp_path):
@@ -136,3 +174,21 @@ def test_detect_new_session_matches_resolved_model_id(monkeypatch, tmp_path):
 
     detected = _detect_new_session("/tmp/test", before, model="custom:Claude-Opus-4.6-0")
     assert detected == sid_a
+
+
+def test_detect_current_session_prefers_newest_session(monkeypatch):
+    monkeypatch.setattr("hive.agent._list_sessions", lambda _cwd: {"old", "new"})
+    monkeypatch.setattr("hive.agent._session_timestamp", lambda _cwd, sid: {"old": 1, "new": 2}[sid])
+
+    assert detect_current_session_id("/tmp/test") == "new"
+
+
+def test_detect_current_session_prefers_matching_model(monkeypatch):
+    monkeypatch.setattr("hive.agent._list_sessions", lambda _cwd: {"a", "b"})
+    monkeypatch.setattr("hive.agent._session_timestamp", lambda _cwd, sid: {"a": 1, "b": 2}[sid])
+    monkeypatch.setattr(
+        "hive.agent._read_session_model",
+        lambda _cwd, sid: {"a": "custom:Claude-Opus-4.6-0", "b": "custom:GPT-5.4-1"}[sid],
+    )
+
+    assert detect_current_session_id("/tmp/test", model="custom:Claude-Opus-4.6-0") == "a"

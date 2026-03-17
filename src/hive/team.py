@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import tmux
-from .agent import Agent
+from .agent import Agent, detect_current_session_id
 
 HIVE_HOME = Path(os.environ.get("HIVE_HOME", str(Path.home() / ".hive")))
 COLORS = ["green", "blue", "yellow", "red", "magenta", "cyan"]
@@ -20,10 +20,12 @@ class Team:
     name: str
     description: str = ""
     workspace: str = ""
-    lead_name: str = "team-lead"
+    lead_name: str = "orchestrator"
     agents: dict[str, Agent] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     lead_pane_id: str = ""
+    lead_session_id: str | None = None
+    tmux_session: str = ""
 
     @property
     def teams_dir(self) -> Path:
@@ -48,10 +50,16 @@ class Team:
         If inside tmux: use current window (split panes in-place).
         If outside tmux: create a new detached session.
         """
+        config_path = HIVE_HOME / "teams" / name / "config.json"
+        if config_path.exists():
+            raise ValueError(f"Team '{name}' already exists")
+
+        resolved_cwd = cwd or os.getcwd()
         team = cls(name=name, description=description, workspace=workspace)
 
         if tmux.is_inside_tmux():
             team.lead_pane_id = tmux.get_current_pane_id() or ""
+            team.lead_session_id = detect_current_session_id(resolved_cwd)
         else:
             if tmux.has_session(name):
                 raise ValueError(f"Team '{name}' already exists")
@@ -76,9 +84,11 @@ class Team:
             name=data["name"],
             description=data.get("description", ""),
             workspace=data.get("workspace", ""),
-            lead_name=data.get("leadName", "team-lead"),
+            lead_name=data.get("leadName", "orchestrator"),
             created_at=data.get("createdAt", 0),
             lead_pane_id=data.get("leadPaneId", ""),
+            lead_session_id=data.get("leadSessionId"),
+            tmux_session=data.get("tmuxSession", ""),
         )
 
         for member in data.get("members", []):
@@ -97,6 +107,20 @@ class Team:
 
         return team
 
+    def is_tmux_alive(self) -> bool:
+        """Check if the tmux environment this team was created in still exists.
+
+        Checks both session existence and lead pane liveness, because the same
+        session may outlive the window/panes where the team was created.
+        """
+        if not self.tmux_session:
+            return True  # Legacy teams without session binding are always "alive"
+        if not tmux.has_session(self.tmux_session):
+            return False
+        if self.lead_pane_id and not tmux.is_pane_alive(self.lead_pane_id):
+            return False
+        return True
+
     def save(self) -> None:
         """Save team config to disk."""
         data = {
@@ -105,12 +129,25 @@ class Team:
             "workspace": self.workspace,
             "leadName": self.lead_name,
             "leadPaneId": self.lead_pane_id,
+            "leadSessionId": self.lead_session_id,
+            "tmuxSession": self.tmux_session,
             "createdAt": self.created_at,
             "members": [a.to_dict() for a in self.agents.values()],
         }
         self.teams_dir.mkdir(parents=True, exist_ok=True)
         with open(self.config_path, "w") as f:
             json.dump(data, f, indent=2)
+
+    def lead_agent(self) -> Agent | None:
+        if not self.lead_pane_id:
+            return None
+        return Agent(
+            name=self.lead_name,
+            team_name=self.name,
+            pane_id=self.lead_pane_id,
+            cwd=os.getcwd(),
+            session_id=self.lead_session_id,
+        )
 
     # --- Agent management ---
 
@@ -122,6 +159,7 @@ class Team:
         color: str = "",
         cwd: str = "",
         skill: str = "hive",
+        workflow: str = "",
         extra_env: dict[str, str] | None = None,
     ) -> Agent:
         """Spawn a new agent in the team."""
@@ -167,6 +205,9 @@ class Team:
             extra_env=extra_env,
         )
 
+        if workflow:
+            agent.load_skill(workflow)
+
         self.agents[name] = agent
 
         # Layout and pane borders
@@ -183,6 +224,9 @@ class Team:
         return agent
 
     def get(self, name: str) -> Agent:
+        lead = self.lead_agent()
+        if lead is not None and name == lead.name:
+            return lead
         if name not in self.agents:
             raise KeyError(f"Agent '{name}' not found")
         return self.agents[name]
@@ -195,19 +239,32 @@ class Team:
 
     def status(self) -> dict:
         """Get team status."""
+        agents: dict[str, dict[str, object]] = {}
+        lead = self.lead_agent()
+        if lead is not None:
+            agents[lead.name] = {
+                "alive": lead.is_alive(),
+                "pane": lead.pane_id,
+                "model": lead.model,
+                "color": lead.color,
+                "sessionId": lead.session_id,
+            }
         return {
             "name": self.name,
             "description": self.description,
             "workspace": self.workspace,
             "agents": {
-                name: {
-                    "alive": agent.is_alive(),
-                    "pane": agent.pane_id,
-                    "model": agent.model,
-                    "color": agent.color,
-                    "sessionId": agent.session_id,
-                }
-                for name, agent in self.agents.items()
+                **agents,
+                **{
+                    name: {
+                        "alive": agent.is_alive(),
+                        "pane": agent.pane_id,
+                        "model": agent.model,
+                        "color": agent.color,
+                        "sessionId": agent.session_id,
+                    }
+                    for name, agent in self.agents.items()
+                },
             },
         }
 
