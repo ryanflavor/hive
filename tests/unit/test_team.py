@@ -12,14 +12,18 @@ def test_terminal_to_dict_uses_liveness(monkeypatch):
 def test_team_create_inside_tmux_tags_lead_and_detects_session(configure_hive_home, monkeypatch):
     configure_hive_home(tmux_inside=True, current_pane="%7")
     tagged = []
-    monkeypatch.setattr("hive.team.detect_current_session_id", lambda _cwd: "sess-123")
+    monkeypatch.setattr("hive.team.detect_current_session_id", lambda _cwd, model="", pane_id="": "sess-123")
+    monkeypatch.setattr("hive.team.tmux.get_current_session_name", lambda: "dev")
+    monkeypatch.setattr("hive.team.tmux.get_current_window_target", lambda: "dev:0")
     monkeypatch.setattr("hive.team.tmux.tag_pane", lambda *args: tagged.append(args))
 
     team = Team.create("team-a", description="demo", workspace="/tmp/ws")
 
     assert team.lead_pane_id == "%7"
     assert team.lead_session_id == "sess-123"
-    assert tagged == [("%7", "lead", "orchestrator", "team-a")]
+    assert team.tmux_session == "dev"
+    assert team.tmux_window == "dev:0"
+    assert tagged == [("%7", "agent", "orch", "team-a")]
 
 
 def test_team_create_outside_tmux_creates_session(configure_hive_home, monkeypatch):
@@ -56,6 +60,7 @@ def test_team_save_and_load_round_trip(configure_hive_home, monkeypatch):
         lead_pane_id="%0",
         lead_session_id="sess-1",
         tmux_session="dev",
+        tmux_window="dev:0",
     )
     team.agents["claude"] = Agent(name="claude", team_name="team-a", pane_id="%1", model="m1", color="cyan", cwd="/tmp")
     team.terminals["shell"] = Terminal(name="shell", pane_id="%2")
@@ -66,6 +71,7 @@ def test_team_save_and_load_round_trip(configure_hive_home, monkeypatch):
     assert loaded.name == "team-a"
     assert loaded.description == "demo"
     assert loaded.lead_session_id == "sess-1"
+    assert loaded.tmux_window == "dev:0"
     assert loaded.agents["claude"].pane_id == "%1"
     assert loaded.terminals["shell"].pane_id == "%2"
 
@@ -77,7 +83,7 @@ def test_team_lead_agent_uses_persisted_session_id(configure_hive_home):
     lead = team.lead_agent()
 
     assert lead is not None
-    assert lead.name == "orchestrator"
+    assert lead.name == "orch"
     assert lead.session_id == "sess-1"
 
 
@@ -143,7 +149,7 @@ def test_team_get_and_broadcast(configure_hive_home, monkeypatch):
     team = Team(name="team-a", lead_pane_id="%0")
     team.agents = {"claude": alive, "gpt": dead}
 
-    assert team.get("orchestrator").pane_id == "%0"
+    assert team.get("orch").pane_id == "%0"
     assert team.get("claude") is alive
     team.broadcast("hello", exclude="gpt")
     assert sent == [("claude", "hello")]
@@ -151,20 +157,57 @@ def test_team_get_and_broadcast(configure_hive_home, monkeypatch):
 
 def test_team_status_and_is_tmux_alive(configure_hive_home, monkeypatch):
     configure_hive_home()
+    monkeypatch.setattr("hive.team.tmux.get_pane_tty", lambda _pane: None)
+    monkeypatch.setattr("hive.team.core_hooks.resolve_session_record", lambda **_kwargs: None)
     monkeypatch.setattr("hive.team.tmux.has_session", lambda name: name == "dev")
     monkeypatch.setattr("hive.team.tmux.is_pane_alive", lambda pane: pane != "%dead")
+    monkeypatch.setattr(
+        "hive.team.tmux.get_pane_current_command",
+        lambda pane: {"%0": "python3.12", "%1": "droid", "%2": "zsh"}.get(pane, ""),
+    )
     team = Team(name="team-a", workspace="/tmp/ws", lead_pane_id="%0", lead_session_id="sess-1", tmux_session="dev")
     team.agents["claude"] = Agent(name="claude", team_name="team-a", pane_id="%1", model="m1", color="cyan")
     team.terminals["shell"] = Terminal(name="shell", pane_id="%2")
 
     payload = team.status()
 
-    assert payload["agents"]["orchestrator"]["sessionId"] == "sess-1"
-    assert payload["agents"]["claude"]["model"] == "m1"
-    assert payload["terminals"]["shell"]["pane"] == "%2"
+    assert payload["tmuxSession"] == "dev"
+    assert payload["tmuxWindow"] == ""
+    orch = next(member for member in payload["members"] if member["name"] == "orch")
+    claude = next(member for member in payload["members"] if member["name"] == "claude")
+    shell = next(member for member in payload["members"] if member["name"] == "shell")
+    assert orch["sessionId"] == "sess-1"
+    assert orch["role"] == "terminal"
+    assert claude["model"] == "m1"
+    assert claude["role"] == "agent"
+    assert shell["pane"] == "%2"
+    assert shell["role"] == "terminal"
     assert team.is_tmux_alive() is True
     team.lead_pane_id = "%dead"
     assert team.is_tmux_alive() is False
+
+
+def test_team_status_backfills_missing_session_ids_from_map(configure_hive_home, monkeypatch):
+    configure_hive_home()
+    monkeypatch.setattr("hive.team.tmux.is_pane_alive", lambda _pane: True)
+    monkeypatch.setattr("hive.team.tmux.get_pane_current_command", lambda pane: "droid" if pane == "%1" else "zsh")
+    monkeypatch.setattr("hive.team.tmux.get_pane_tty", lambda pane: {"%0": "/dev/ttys010", "%1": "/dev/ttys011"}.get(pane))
+    monkeypatch.setattr(
+        "hive.team.core_hooks.resolve_session_record",
+        lambda **kwargs: {"session_id": {"%0": "lead-sess", "%1": "agent-sess"}[kwargs["pane_id"]]},
+    )
+
+    team = Team(name="team-a", lead_pane_id="%0")
+    team.agents["claude"] = Agent(name="claude", team_name="team-a", pane_id="%1")
+
+    payload = team.status()
+
+    orch = next(member for member in payload["members"] if member["name"] == "orch")
+    claude = next(member for member in payload["members"] if member["name"] == "claude")
+    assert orch["sessionId"] == "lead-sess"
+    assert claude["sessionId"] == "agent-sess"
+    assert team.lead_session_id == "lead-sess"
+    assert team.agents["claude"].session_id == "agent-sess"
 
 
 def test_team_shutdown_and_cleanup(configure_hive_home, monkeypatch):

@@ -4,18 +4,112 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import shutil
 import sys
 import time
+from collections import defaultdict
 from pathlib import Path
 
 import click
 
 from . import bus
 from . import context as hive_context
+from . import core_hooks
+from . import notify_hook
+from . import notify_ui
+from . import plugin_manager
 from . import tmux
 from .agent import Agent
-from .team import HIVE_HOME, Team, Terminal
+from .team import HIVE_HOME, LEAD_AGENT_NAME, Team, Terminal
+
+
+_COMMAND_HELP_SECTIONS = {
+    "teams": "Context",
+    "team": "Context",
+    "use": "Context",
+    "init": "Team Setup",
+    "create": "Team Setup",
+    "delete": "Team Setup",
+    "spawn": "Team Setup",
+    "workflow": "Team Setup",
+    "send": "Communication",
+    "status": "Communication",
+    "status-set": "Communication",
+    "wait-status": "Communication",
+    "inject": "Pane Control",
+    "capture": "Pane Control",
+    "interrupt": "Pane Control",
+    "exec": "Pane Control",
+    "terminal": "Pane Control",
+    "plugin": "Extensions",
+    "notify": "User Attention",
+}
+_COMMAND_HELP_SECTION_ORDER = [
+    "Context",
+    "Team Setup",
+    "Communication",
+    "Pane Control",
+    "Extensions",
+    "User Attention",
+    "Other Commands",
+]
+_COMMAND_HELP_SECTION_DESCRIPTIONS = {
+    "Context": "Inspect or bind the current tmux window to a Hive team.",
+    "Team Setup": "Create teams and register panes for the current window.",
+    "Communication": "Exchange Hive messages and publish progress snapshots.",
+    "Pane Control": "Drive agent or terminal panes directly when needed.",
+    "Extensions": "Manage first-party Hive plugins that materialize Factory commands and skills.",
+    "User Attention": "Bring the human back to the right pane at the right time.",
+}
+_ROOT_HELP_EXAMPLES = '''# Inspect your team and current member
+hive team
+
+# Create a team from the current tmux window
+hive init
+
+# Show team overview
+hive team
+
+# Show published statuses only
+hive status
+
+# Send a structured Hive message to another member
+hive send <peer-name> "review this diff"
+
+# Run a command in a registered terminal pane
+hive exec term-1 "tail -f app.log"
+
+# Notify the user with a clear action
+hive notify "处理完成了，回来确认一下"'''
+
+
+class SectionedHelpGroup(click.Group):
+    def format_commands(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        sections: dict[str, list[tuple[str, str]]] = defaultdict(list)
+        for subcommand in self.list_commands(ctx):
+            cmd = self.get_command(ctx, subcommand)
+            if cmd is None or cmd.hidden:
+                continue
+            section = _COMMAND_HELP_SECTIONS.get(subcommand, "Other Commands")
+            sections[section].append((subcommand, cmd.get_short_help_str(formatter.width)))
+
+        for section in _COMMAND_HELP_SECTION_ORDER:
+            rows = sections.get(section)
+            if not rows:
+                continue
+            with formatter.section(section):
+                description = _COMMAND_HELP_SECTION_DESCRIPTIONS.get(section, "")
+                if description:
+                    formatter.write_text(description)
+                    formatter.write_paragraph()
+                formatter.write_dl(rows)
+
+    def format_epilog(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        with formatter.section("Examples"):
+            for block in _ROOT_HELP_EXAMPLES.split("\n\n"):
+                formatter.write(f"  {block.replace(chr(10), chr(10) + '  ')}\n")
+                formatter.write_paragraph()
 
 
 def _discover_tmux_binding() -> dict[str, str]:
@@ -23,6 +117,7 @@ def _discover_tmux_binding() -> dict[str, str]:
         return {}
     current_pane = tmux.get_current_pane_id()
     current_session = tmux.get_current_session_name()
+    current_window = tmux.get_current_window_target()
     if not current_pane:
         return {}
     root = HIVE_HOME / "teams"
@@ -37,24 +132,55 @@ def _discover_tmux_binding() -> dict[str, str]:
             continue
         if team.tmux_session and current_session and team.tmux_session != current_session:
             continue
+        if team.tmux_window and current_window and team.tmux_window != current_window:
+            continue
         if team.lead_pane_id == current_pane:
-            return {"team": team.name, "workspace": team.workspace, "agent": team.lead_name}
+            current_command = tmux.get_pane_current_command(current_pane) or ""
+            return {
+                "team": team.name,
+                "workspace": team.workspace,
+                "agent": team.lead_name,
+                "role": "agent" if current_command == "droid" else "terminal",
+                "pane": current_pane,
+                "tmuxSession": team.tmux_session,
+                "tmuxWindow": team.tmux_window,
+            }
         for name, agent in team.agents.items():
             if agent.pane_id == current_pane:
-                return {"team": team.name, "workspace": team.workspace, "agent": name}
+                return {
+                    "team": team.name,
+                    "workspace": team.workspace,
+                    "agent": name,
+                    "role": "agent",
+                    "pane": current_pane,
+                    "tmuxSession": team.tmux_session,
+                    "tmuxWindow": team.tmux_window,
+                }
         for name, terminal in team.terminals.items():
             if terminal.pane_id == current_pane:
-                return {"team": team.name, "workspace": team.workspace, "agent": name, "role": "terminal"}
+                return {
+                    "team": team.name,
+                    "workspace": team.workspace,
+                    "agent": name,
+                    "role": "terminal",
+                    "pane": current_pane,
+                    "tmuxSession": team.tmux_session,
+                    "tmuxWindow": team.tmux_window,
+                }
     return {}
 
 
 def _default_team() -> str | None:
     discovered = _discover_tmux_binding()
+    if tmux.is_inside_tmux():
+        return discovered.get("team")
     return os.environ.get("HIVE_TEAM_NAME") or discovered.get("team") or hive_context.load_current_context().get("team")
 
 
 def _default_agent() -> str | None:
     discovered = _discover_tmux_binding()
+    if tmux.is_inside_tmux():
+        return discovered.get("agent")
     return os.environ.get("HIVE_AGENT_NAME") or discovered.get("agent") or hive_context.load_current_context().get("agent")
 
 
@@ -66,7 +192,7 @@ def _require_team(team: str | None) -> str:
 
 
 def _resolve_sender(agent_name: str | None) -> str:
-    return agent_name or _default_agent() or "orchestrator"
+    return agent_name or _default_agent() or LEAD_AGENT_NAME
 
 
 def _load_team(team: str) -> Team:
@@ -75,6 +201,57 @@ def _load_team(team: str) -> Team:
     except FileNotFoundError:
         click.echo(f"Error: team '{team}' not found", err=True)
         sys.exit(1)
+
+
+def _ensure_team_matches_current_window(t: Team) -> None:
+    if not tmux.is_inside_tmux():
+        return
+    current_session = tmux.get_current_session_name() or ""
+    current_window = tmux.get_current_window_target() or ""
+    team_window = getattr(t, "tmux_window", "") or ""
+    team_session = getattr(t, "tmux_session", "") or ""
+    if not team_window:
+        _fail(f"team '{t.name}' is not bound to a tmux window")
+    if team_session and current_session and team_session != current_session:
+        _fail(
+            f"team '{t.name}' belongs to tmux session '{team_session}', not the current session '{current_session}'"
+        )
+    if current_window and team_window != current_window:
+        _fail(f"team '{t.name}' belongs to tmux window '{team_window}', not the current window '{current_window}'")
+
+
+def _resolve_scoped_team(team: str | None, *, required: bool = True) -> tuple[str | None, Team | None]:
+    if tmux.is_inside_tmux():
+        if team:
+            loaded = _load_team(team)
+            _ensure_team_matches_current_window(loaded)
+            return team, loaded
+        discovered = _discover_tmux_binding()
+        discovered_team = discovered.get("team")
+        if discovered_team:
+            return discovered_team, _load_team(discovered_team)
+        if required:
+            _fail("no Hive team is bound to this tmux window (run `hive init` in this window)")
+        return None, None
+
+    team_name = team or _default_team()
+    if not team_name:
+        if required:
+            _fail("--team/-t required (or set HIVE_TEAM_NAME, or run `hive use <team>`)")
+        return None, None
+    return team_name, _load_team(team_name)
+
+
+def _ensure_pane_in_scope(t: Team, pane_id: str) -> None:
+    if not pane_id:
+        return
+    pane_window = tmux.get_pane_window_target(pane_id) or ""
+    team_window = getattr(t, "tmux_window", "") or ""
+    if team_window and pane_window and pane_window != team_window:
+        _fail(f"pane '{pane_id}' is in tmux window '{pane_window}', not team '{t.name}' window '{team_window}'")
+    pane_team = tmux.get_pane_option(pane_id, "hive-team")
+    if pane_team and pane_team != t.name:
+        _fail(f"pane '{pane_id}' already belongs to team '{pane_team}'")
 
 
 def _fail(msg: str) -> None:
@@ -97,6 +274,24 @@ def _resolve_workspace(workspace: str, team: Team | None = None, required: bool 
     if required:
         _fail("workspace is required (use --workspace, set HIVE_WORKSPACE, or run `hive use <team>`)")
     return ""
+
+
+def _default_auto_workspace_path(session_name: str, window_index: str) -> Path:
+    return Path(f"/tmp/hive-{session_name}-{window_index}")
+
+
+def _team_default_auto_workspace_path(team: Team) -> Path | None:
+    if not team.tmux_session or not team.tmux_window or ":" not in team.tmux_window:
+        return None
+    window_index = team.tmux_window.rsplit(":", 1)[-1]
+    return _default_auto_workspace_path(team.tmux_session, window_index)
+
+
+def _team_uses_default_auto_workspace(team: Team) -> bool:
+    expected = _team_default_auto_workspace_path(team)
+    if expected is None or not team.workspace:
+        return False
+    return Path(team.workspace).expanduser() == expected
 
 
 def _remember_context(*, team: str = "", workspace: str = "", agent: str = "") -> None:
@@ -125,11 +320,36 @@ def _read_state(workspace: str, key: str, required: bool = True) -> str:
     return path.read_text().strip()
 
 
+def _filter_statuses_to_members(
+    statuses: dict[str, dict[str, object]],
+    members: list[dict[str, object]] | None,
+    *,
+    lead_name: str = "",
+) -> dict[str, dict[str, object]]:
+    if not members:
+        return statuses
+    names = {str(member.get("name", "")) for member in members if member.get("name")}
+    if lead_name:
+        names.add(lead_name)
+    return {name: payload for name, payload in statuses.items() if name in names}
+
+
 def _team_status_payload(t: Team) -> dict[str, object]:
     payload = t.status()
+    discovered = _discover_tmux_binding() if tmux.is_inside_tmux() else {}
+    if discovered.get("team") == t.name and discovered.get("agent"):
+        payload["self"] = str(discovered["agent"])
+    else:
+        ctx = hive_context.load_current_context()
+        if ctx.get("team") == t.name and ctx.get("agent"):
+            payload["self"] = str(ctx["agent"])
     ws = _resolve_workspace("", t, required=False)
     if ws:
-        payload["publishedStatuses"] = bus.read_all_statuses(ws)
+        payload["statuses"] = _filter_statuses_to_members(
+            bus.read_all_statuses(ws),
+            list(payload.get("members", [])),
+            lead_name=t.lead_name,
+        )
         bus.write_presence_snapshot(ws, payload)
     return payload
 
@@ -141,9 +361,18 @@ def _resolve_live_agent(t: Team | None, agent_name: str):
         agent = t.get(agent_name)
     except KeyError:
         _fail(f"agent '{agent_name}' is not registered in team '{t.name}'")
+    _ensure_pane_in_scope(t, getattr(agent, "pane_id", "") or "")
     if not agent.is_alive():
         _fail(f"agent '{agent_name}' is not alive")
     return agent
+
+
+def _resolve_target_pane() -> str:
+    current = tmux.get_current_pane_id()
+    if current:
+        return current
+    _fail("cannot determine target pane (run inside tmux)")
+    return ""
 
 
 def _format_hive_envelope(*, from_agent: str, to_agent: str, body: str, artifact: str = "") -> str:
@@ -167,10 +396,15 @@ def _status_matches(payload: dict[str, object] | None, state: str, metadata: dic
     return True
 
 
-@click.group()
-def cli():
-    """Hive: multi-agent collaboration for droid."""
-    pass
+@click.group(cls=SectionedHelpGroup)
+@click.pass_context
+def cli(ctx: click.Context):
+    """Hive - tmux-first multi-agent collaboration runtime."""
+    if ctx.resilient_parsing:
+        return
+    if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
+        return
+    core_hooks.ensure_session_locator_hook_installed()
 
 
 def _gc_dead_teams() -> None:
@@ -186,6 +420,8 @@ def _gc_dead_teams() -> None:
         except FileNotFoundError:
             continue
         if not team.is_tmux_alive():
+            if _team_uses_default_auto_workspace(team):
+                bus.reset_workspace(team.workspace)
             import shutil
             shutil.rmtree(path, ignore_errors=True)
             ctx = hive_context.load_current_context()
@@ -195,7 +431,7 @@ def _gc_dead_teams() -> None:
 
 @cli.command("teams")
 def teams_cmd():
-    """List known Hive teams (auto-cleans dead tmux sessions)."""
+    """List known teams."""
     _gc_dead_teams()
     root = HIVE_HOME / "teams"
     rows = []
@@ -211,14 +447,15 @@ def teams_cmd():
                 "name": team.name,
                 "workspace": team.workspace,
                 "tmuxSession": team.tmux_session,
+                "tmuxWindow": team.tmux_window,
                 "members": sorted({team.lead_name, *team.agents.keys()}),
             })
     click.echo(json.dumps(rows, indent=2, ensure_ascii=False))
 
 
-@cli.command("current")
+@cli.command("current", hidden=True)
 def current_cmd():
-    """Show the persisted Hive CLI context, with tmux auto-discovery when no team is bound."""
+    """Show current Hive context."""
     _gc_dead_teams()
     discovered = _discover_tmux_binding()
     if discovered.get("team"):
@@ -233,13 +470,12 @@ def current_cmd():
         click.echo(json.dumps(discovered, indent=2, ensure_ascii=False))
         return
     ctx = hive_context.load_current_context()
-    if ctx.get("team"):
+    if not tmux.is_inside_tmux() and ctx.get("team"):
         click.echo(json.dumps(ctx, indent=2, ensure_ascii=False))
         return
 
-    result: dict[str, object] = {**ctx, "team": None}
-
     if tmux.is_inside_tmux():
+        result: dict[str, object] = {"team": None}
         session_name = tmux.get_current_session_name()
         window_target = tmux.get_current_window_target()
         current_pane = tmux.get_current_pane_id()
@@ -262,6 +498,7 @@ def current_cmd():
         }
         result["hint"] = "No team bound. Run `hive init` to create one from this tmux window."
     else:
+        result = {**ctx, "team": None}
         result["tmux"] = None
         result["hint"] = "Not inside tmux. Start a tmux session first, then run `hive init`."
 
@@ -273,16 +510,17 @@ def current_cmd():
 @click.option("--workspace", "-w", default="", help="Workspace path override")
 @click.option("--agent", default="", help="Default agent name for standalone skill sessions")
 def use_cmd(team: str, workspace: str, agent: str):
-    """Persist a default Hive context so `/skill hive` can run without manual exports."""
+    """Bind the current context to a team."""
     loaded = _load_team(team)
+    _ensure_team_matches_current_window(loaded)
     resolved_workspace = workspace or loaded.workspace
-    _remember_context(team=team, workspace=resolved_workspace, agent=agent or "orchestrator")
+    _remember_context(team=team, workspace=resolved_workspace, agent=agent or LEAD_AGENT_NAME)
     click.echo(
         json.dumps(
             {
                 "team": team,
                 "workspace": resolved_workspace,
-                "agent": agent or "orchestrator",
+                "agent": agent or LEAD_AGENT_NAME,
             },
             indent=2,
             ensure_ascii=False,
@@ -290,27 +528,29 @@ def use_cmd(team: str, workspace: str, agent: str):
     )
 
 
-def _derive_agent_name(_title: str, index: int, seen: set[str]) -> str:
-    """Derive a deterministic short agent name from pane order, not title."""
-    fallback_words = [
-        "alpha", "bravo", "charlie", "delta", "echo", "foxtrot",
-        "golf", "hotel", "india", "juliet", "kilo", "lima",
-        "mike", "november", "oscar", "papa", "quebec", "romeo",
-        "sierra", "tango", "uniform", "victor", "whiskey", "xray",
-        "yankee", "zulu",
-    ]
-    fallback = fallback_words[index % len(fallback_words)]
-    suffix = index // len(fallback_words)
-    if suffix:
-        fallback = f"{fallback}-{suffix + 1}"
-    while fallback in seen:
-        index += 1
-        fallback = fallback_words[index % len(fallback_words)]
-        suffix = index // len(fallback_words)
-        if suffix:
-            fallback = f"{fallback}-{suffix + 1}"
-    seen.add(fallback)
-    return fallback
+_RANDOM_AGENT_NAMES = (
+    "yoyo", "lulu", "nini", "bobo", "kiki",
+    "dodo", "pipi", "toto", "momo", "coco",
+)
+
+
+def _names_used_in_window(panes: list[tmux.PaneInfo]) -> set[str]:
+    return {pane.agent.strip() for pane in panes if pane.agent.strip()}
+
+
+def _derive_agent_name(seen: set[str]) -> str:
+    """Pick a short random peer name while avoiding collisions in this window."""
+    available = [name for name in _RANDOM_AGENT_NAMES if name not in seen]
+    if available:
+        candidate = secrets.choice(available)
+    else:
+        suffix = 1
+        candidate = f"agent-{suffix}"
+        while candidate in seen:
+            suffix += 1
+            candidate = f"agent-{suffix}"
+    seen.add(candidate)
+    return candidate
 
 
 @cli.command("init")
@@ -318,7 +558,7 @@ def _derive_agent_name(_title: str, index: int, seen: set[str]) -> str:
 @click.option("--workspace", "-w", default="", help="Workspace path (default: /tmp/hive-<session>-<window>/)")
 @click.option("--notify/--no-notify", default=True, help="Push /skill hive + context to other panes")
 def init_cmd(name: str, workspace: str, notify: bool):
-    """Auto-discover tmux environment, create a team, register panes as agents."""
+    """Initialize a team from the current tmux window."""
     if not tmux.is_inside_tmux():
         _fail("hive init requires a tmux session. Start tmux first.")
 
@@ -333,8 +573,10 @@ def init_cmd(name: str, workspace: str, notify: bool):
     window_index = tmux.get_current_window_index() or "0"
     window_target = tmux.get_current_window_target()
 
-    team_name = name or session_name
-    ws = workspace or f"/tmp/hive-{session_name}-{window_index}"
+    team_name = name or f"{session_name}-{window_index}"
+    default_ws_path = _default_auto_workspace_path(session_name, window_index)
+    ws_path = Path(workspace).expanduser() if workspace else default_ws_path
+    ws = str(ws_path)
 
     panes = tmux.list_panes_full(window_target) if window_target else []
     current_pane = tmux.get_current_pane_id()
@@ -344,36 +586,40 @@ def init_cmd(name: str, workspace: str, notify: bool):
     except ValueError as e:
         _fail(str(e))
 
-    ws_path = Path(ws)
-    bus.init_workspace(ws_path)
+    if workspace:
+        bus.init_workspace(ws_path)
+    else:
+        bus.reset_workspace(ws_path)
     t.workspace = str(ws_path)
     t.tmux_session = session_name
-    t.lead_name = "orchestrator"
+    t.tmux_window = window_target or ""
+    t.lead_name = LEAD_AGENT_NAME
 
-    _remember_context(team=team_name, workspace=str(ws_path), agent="orchestrator")
+    _remember_context(team=team_name, workspace=str(ws_path), agent=LEAD_AGENT_NAME)
 
     _SHELL_CMDS = {"zsh", "bash", "fish", "sh", "dash", "ksh", "tcsh", "csh"}
 
-    seen_names: set[str] = {"orchestrator"}
+    seen_names = _names_used_in_window(panes)
+    seen_names.add(LEAD_AGENT_NAME)
     discovered = []
-    agent_index = 0
     term_index = 0
     for pane in panes:
+        if pane.team and pane.team != team_name:
+            _fail(f"pane '{pane.pane_id}' already belongs to team '{pane.team}'")
+        is_agent = pane.command not in _SHELL_CMDS
         is_current = pane.pane_id == current_pane
         if is_current:
             discovered.append({
                 "paneId": pane.pane_id,
-                "role": "lead",
-                "name": "orchestrator",
+                "role": "agent" if is_agent else "terminal",
+                "name": LEAD_AGENT_NAME,
                 "command": pane.command,
                 "isSelf": True,
             })
             continue
 
-        is_agent = pane.command not in _SHELL_CMDS
         if is_agent:
-            agent_name = _derive_agent_name(pane.title, agent_index, seen_names)
-            agent_index += 1
+            agent_name = _derive_agent_name(seen_names)
             agent = Agent(
                 name=agent_name,
                 team_name=team_name,
@@ -419,7 +665,7 @@ def init_cmd(name: str, workspace: str, notify: bool):
                 f"You are '{agent.name}' in hive team '{team_name}'. "
                 "Context is pre-bound. Hive messages will arrive inline as "
                 "`<HIVE ...> ... </HIVE>` blocks. "
-                "Use `hive who` to see teammates and `hive send <name> <message>` to reply."
+                "Use `hive team` to inspect the team and `hive send <name> <message>` to reply."
             )
 
     result = {
@@ -438,7 +684,7 @@ def init_cmd(name: str, workspace: str, notify: bool):
 @click.option("--reset-workspace", is_flag=True, help="Remove existing workspace before initialization")
 @click.option("--state", "state_entries", multiple=True, help="Initial state KEY=VALUE (repeatable)")
 def create(name: str, desc: str, workspace: str, reset_workspace: bool, state_entries: tuple[str, ...]):
-    """Create a new team."""
+    """Create a team."""
     if state_entries and not workspace:
         _fail("--state requires --workspace")
     if reset_workspace and not workspace:
@@ -454,9 +700,9 @@ def create(name: str, desc: str, workspace: str, reset_workspace: bool, state_en
                 (ws / "state" / key).write_text(value)
             t.workspace = str(ws)
             t.save()
-            _remember_context(team=name, workspace=str(ws), agent="orchestrator")
+            _remember_context(team=name, workspace=str(ws), agent=LEAD_AGENT_NAME)
         else:
-            _remember_context(team=name, agent="orchestrator")
+            _remember_context(team=name, agent=LEAD_AGENT_NAME)
         click.echo(f"Team '{name}' created.")
         if workspace:
             click.echo(f"Workspace initialized: {Path(workspace).expanduser()}")
@@ -470,7 +716,7 @@ def create(name: str, desc: str, workspace: str, reset_workspace: bool, state_en
 @click.option("--workspace", "-w", default="", help="Workspace path to remove")
 @click.option("--keep-workspace", is_flag=True, help="Keep workspace directory")
 def delete(name: str, workspace: str, keep_workspace: bool):
-    """Delete a team: kill agent panes + remove data."""
+    """Delete a team and clean up."""
     team_workspace = ""
     try:
         t = Team.load(name)
@@ -512,9 +758,9 @@ def delete(name: str, workspace: str, keep_workspace: bool):
 @click.option("--env", "-e", multiple=True, help="Extra env vars (KEY=VALUE, repeatable)")
 def spawn(agent_name: str, team: str | None, model: str, prompt: str,
           color: str, cwd: str, skill: str, workflow: str, env: tuple[str, ...]):
-    """Spawn an agent in a tmux pane."""
-    team = _require_team(team or _default_team())
-    t = _load_team(team)
+    """Spawn an agent pane."""
+    team_name, t = _resolve_scoped_team(team, required=True)
+    assert team_name is not None and t is not None
     extra_env = _parse_entries(env) if env else {}
     try:
         agent = t.spawn(
@@ -529,11 +775,11 @@ def spawn(agent_name: str, team: str | None, model: str, prompt: str,
         )
         hive_context.save_context_for_pane(
             agent.pane_id,
-            team=team,
+            team=team_name,
             workspace=_resolve_workspace("", t, required=False),
             agent=agent_name,
         )
-        _remember_context(team=team, workspace=_resolve_workspace("", t, required=False), agent="orchestrator")
+        _remember_context(team=team_name, workspace=_resolve_workspace("", t, required=False), agent=LEAD_AGENT_NAME)
         click.echo(f"Agent '{agent_name}' spawned in pane {agent.pane_id}")
     except ValueError as e:
         click.echo(f"Error: {e}", err=True)
@@ -542,7 +788,7 @@ def spawn(agent_name: str, team: str | None, model: str, prompt: str,
 
 @cli.group()
 def workflow():
-    """Workflow skill helpers layered on top of the base Hive skill."""
+    """Workflow helpers on top of Hive."""
     pass
 
 
@@ -552,9 +798,9 @@ def workflow():
 @click.option("--team", "-t", default=None, help="Team name")
 @click.option("--prompt", default="", help="Optional prompt to send after loading the workflow")
 def workflow_load(agent_name: str, workflow_name: str, team: str | None, prompt: str):
-    """Load an additional workflow skill into an existing Hive agent pane."""
-    team_name = _require_team(team or _default_team())
-    t = _load_team(team_name)
+    """Load a workflow into an existing agent pane."""
+    team_name, t = _resolve_scoped_team(team, required=True)
+    assert team_name is not None and t is not None
     agent = t.get(agent_name)
     agent.load_skill(workflow_name)
     if prompt:
@@ -579,9 +825,8 @@ def wait_status(
     timeout: int,
     interval: float,
 ):
-    """Wait until an agent's published status matches the requested state/metadata."""
-    team_name = team or _default_team()
-    t = _load_team(team_name) if team_name else None
+    """Wait for a matching published status."""
+    _, t = _resolve_scoped_team(team, required=tmux.is_inside_tmux())
     ws = _resolve_workspace(workspace, t, required=True)
     metadata = _parse_entries(metadata_entries)
 
@@ -596,9 +841,8 @@ def wait_status(
             return
 
         if t:
-            team_status = t.status().get("agents", {})
-            status_data = team_status.get(agent_name)
-            if status_data is not None and not status_data.get("alive", False):
+            member = next((m for m in list(t.status().get("members", [])) if m.get("name") == agent_name), None)
+            if member is not None and not member.get("alive", False):
                 click.echo(f"Error: {agent_name} is no longer alive", err=True)
                 try:
                     click.echo(t.get(agent_name).capture(30), err=True)
@@ -617,40 +861,47 @@ def wait_status(
         time.sleep(interval)
 
 
-@cli.command("type")
+@cli.command("inject")
+@click.argument("agent_name")
+@click.argument("text")
+@click.option("--team", "-t", default=None, help="Team name")
+def inject_cmd(agent_name: str, text: str, team: str | None):
+    """Debug: inject raw input into an agent pane."""
+    team_name, t = _resolve_scoped_team(team, required=True)
+    assert team_name is not None and t is not None
+    t.get(agent_name).send(text)
+    click.echo(f"Injected raw input into {agent_name}.")
+
+
+@cli.command("type", hidden=True)
 @click.argument("agent_name")
 @click.argument("text")
 @click.option("--team", "-t", default=None, help="Team name")
 def type_cmd(agent_name: str, text: str, team: str | None):
-    """Send a prompt directly to an agent's session."""
-    team = _require_team(team or _default_team())
-    t = _load_team(team)
-    t.get(agent_name).send(text)
-    click.echo(f"Prompt sent to {agent_name}.")
+    """Backward-compatible alias for `hive inject`."""
+    inject_cmd.callback(agent_name, text, team)  # type: ignore[attr-defined]
 
 
-@cli.command()
+@cli.command("team")
 @click.option("--team", "-t", default=None)
-def status(team: str | None):
-    """Show team presence plus any published collaboration statuses."""
-    team = _require_team(team or _default_team())
-    t = _load_team(team)
+def team_cmd(team: str | None):
+    """Show team overview."""
+    _, t = _resolve_scoped_team(team, required=True)
+    assert t is not None
     click.echo(json.dumps(_team_status_payload(t), indent=2, ensure_ascii=False))
 
 
-@cli.command()
+@cli.command(hidden=True)
 @click.option("--team", "-t", default=None)
 def who(team: str | None):
-    """Show who is present in the current hive team."""
-    team = _require_team(team or _default_team())
-    t = _load_team(team)
-    click.echo(json.dumps(_team_status_payload(t), indent=2, ensure_ascii=False))
+    """Backward-compatible alias for `hive team`."""
+    team_cmd.callback(team)  # type: ignore[attr-defined]
 
 
 @cli.command("status-set")
 @click.argument("state")
 @click.argument("summary", required=False, default="")
-@click.option("--agent", "agent_name", default=None, help="Agent name (default: $HIVE_AGENT_NAME or orchestrator)")
+@click.option("--agent", "agent_name", default=None, help=f"Agent name (default: $HIVE_AGENT_NAME or {LEAD_AGENT_NAME})")
 @click.option("--team", "-t", default=None, help="Team name")
 @click.option("--workspace", "-w", default="", help="Workspace path")
 @click.option("--meta", "metadata_entries", multiple=True, help="Metadata KEY=VALUE")
@@ -662,42 +913,81 @@ def status_set(
     workspace: str,
     metadata_entries: tuple[str, ...],
 ):
-    """Publish an agent collaboration status."""
-    team_name = team or _default_team()
-    t = _load_team(team_name) if team_name else None
+    """Publish a collaboration status."""
+    team_name, t = _resolve_scoped_team(team, required=tmux.is_inside_tmux())
     ws = _resolve_workspace(workspace, t, required=True)
+    sender = _resolve_sender(agent_name)
+    metadata = _parse_entries(metadata_entries)
     path = bus.write_status(
         ws,
-        _resolve_sender(agent_name),
+        sender,
         state=state,
         summary=summary,
-        metadata=_parse_entries(metadata_entries),
+        metadata=metadata,
     )
-    click.echo(path)
+    click.echo(
+        json.dumps(
+            {
+                "agent": sender,
+                "state": state,
+                "summary": summary,
+                "metadata": metadata,
+                "path": str(path),
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
 
 
-@cli.command("status-show")
+@cli.command("status")
 @click.option("--agent", "agent_name", default=None, help="Agent name")
 @click.option("--team", "-t", default=None, help="Team name")
 @click.option("--workspace", "-w", default="", help="Workspace path")
-def status_show(agent_name: str | None, team: str | None, workspace: str):
-    """Show published collaboration status for one agent or all agents."""
-    team_name = team or _default_team()
-    t = _load_team(team_name) if team_name else None
+def status_cmd(agent_name: str | None, team: str | None, workspace: str):
+    """Show published statuses only."""
+    if workspace and not team and not tmux.is_inside_tmux():
+        t = None
+    else:
+        _, t = _resolve_scoped_team(team, required=tmux.is_inside_tmux())
     ws = _resolve_workspace(workspace, t, required=True)
+    all_statuses = bus.read_all_statuses(ws)
+    filtered_statuses = _filter_statuses_to_members(
+        all_statuses,
+        list(t.status().get("members", [])) if t else None,
+        lead_name=t.lead_name if t else "",
+    )
     if agent_name:
-        payload = bus.read_status(ws, agent_name)
+        payload = filtered_statuses.get(agent_name)
         if payload is None:
             _fail(f"no published status for agent '{agent_name}'")
         click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
         return
-    click.echo(json.dumps(bus.read_all_statuses(ws), indent=2, ensure_ascii=False))
+    click.echo(json.dumps(filtered_statuses, indent=2, ensure_ascii=False))
+
+
+@cli.command("statuses", hidden=True)
+@click.option("--agent", "agent_name", default=None, help="Agent name")
+@click.option("--team", "-t", default=None, help="Team name")
+@click.option("--workspace", "-w", default="", help="Workspace path")
+def statuses_cmd(agent_name: str | None, team: str | None, workspace: str):
+    """Backward-compatible alias for `hive status`."""
+    status_cmd.callback(agent_name, team, workspace)  # type: ignore[attr-defined]
+
+
+@cli.command("status-show", hidden=True)
+@click.option("--agent", "agent_name", default=None, help="Agent name")
+@click.option("--team", "-t", default=None, help="Team name")
+@click.option("--workspace", "-w", default="", help="Workspace path")
+def status_show(agent_name: str | None, team: str | None, workspace: str):
+    """Backward-compatible alias for `hive status`."""
+    status_cmd.callback(agent_name, team, workspace)  # type: ignore[attr-defined]
 
 
 @cli.command()
 @click.argument("to_agent")
 @click.argument("body", required=False, default="")
-@click.option("--from", "from_agent", default=None, help="Sender agent name (default: $HIVE_AGENT_NAME or orchestrator)")
+@click.option("--from", "from_agent", default=None, help=f"Sender agent name (default: $HIVE_AGENT_NAME or {LEAD_AGENT_NAME})")
 @click.option("--team", "-t", default=None, help="Team name")
 @click.option("--workspace", "-w", default="", help="Workspace path")
 @click.option("--artifact", default="", help="Artifact path for large payloads")
@@ -709,9 +999,9 @@ def send(
     workspace: str,
     artifact: str,
 ):
-    """Send one tmux-delivered Hive envelope. Usage: hive send <to> \"<body>\" [--artifact path]"""
-    team_name = team or _default_team()
-    t = _load_team(team_name) if team_name else None
+    """Send a Hive message envelope."""
+    team_name, t = _resolve_scoped_team(team, required=True)
+    assert team_name is not None and t is not None
     _resolve_workspace(workspace, t, required=False)
     sender = _resolve_sender(from_agent)
     target = _resolve_live_agent(t, to_agent)
@@ -733,9 +1023,9 @@ def send(
 @click.option("--team", "-t", default=None)
 @click.option("--lines", "-n", default=30)
 def capture(agent_name: str, team: str | None, lines: int):
-    """Capture an agent's pane output."""
-    team = _require_team(team or _default_team())
-    t = _load_team(team)
+    """Debug: capture raw pane output."""
+    _, t = _resolve_scoped_team(team, required=True)
+    assert t is not None
     click.echo(t.get(agent_name).capture(lines))
 
 
@@ -743,11 +1033,115 @@ def capture(agent_name: str, team: str | None, lines: int):
 @click.argument("agent_name")
 @click.option("--team", "-t", default=None)
 def interrupt(agent_name: str, team: str | None):
-    """Interrupt an agent (Escape)."""
-    team = _require_team(team or _default_team())
-    t = _load_team(team)
+    """Interrupt an agent pane."""
+    _, t = _resolve_scoped_team(team, required=True)
+    assert t is not None
     t.get(agent_name).interrupt()
     click.echo(f"Interrupted {agent_name}.")
+
+
+@cli.command("notify")
+@click.argument("message")
+@click.option("--seconds", default=12, type=int, show_default=True, help="Overlay/highlight duration")
+@click.option("--highlight/--no-highlight", default=False, help="Flash target pane border")
+@click.option("--window-status/--no-window-status", default=True, help="Flash tmux window status")
+@click.option("--banner/--no-banner", default=True, help="Post native macOS notification")
+def notify_cmd(
+    message: str,
+    seconds: int,
+    highlight: bool,
+    window_status: bool,
+    banner: bool,
+):
+    """Notify the user for the current pane."""
+    target_pane = _resolve_target_pane()
+    payload = notify_ui.notify(
+        message,
+        target_pane,
+        seconds=max(1, seconds),
+        highlight=highlight,
+        window_status=window_status,
+        native_banner=banner,
+    )
+    click.echo(json.dumps(payload))
+
+
+@cli.command("_notify-hook", hidden=True)
+def notify_hook_cmd() -> None:
+    """Handle Droid hook payloads for notify plugin internals."""
+    raise SystemExit(notify_hook.main())
+
+
+@cli.group()
+def plugin():
+    """Manage first-party Hive plugins."""
+    pass
+
+
+def _render_plugin_mutation_result(action: str, payload: dict[str, object]) -> str:
+    name = str(payload.get("name", ""))
+    lines = [f"Plugin '{name}' {action}."]
+    install_root = str(payload.get("installRoot", "") or "")
+    commands = [str(item) for item in payload.get("commands", [])]
+    skills = [str(item) for item in payload.get("skills", [])]
+
+    if install_root:
+        lines.append(f"  install root: {install_root}")
+    if commands:
+        lines.append(f"  commands: {', '.join(Path(path).name for path in commands)}")
+    if skills:
+        lines.append(f"  skills: {', '.join(Path(path).name for path in skills)}")
+    return "\n".join(lines)
+
+
+@plugin.command("list")
+@click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON")
+def plugin_list(json_output: bool) -> None:
+    """List available plugins and whether they are enabled."""
+    rows = plugin_manager.list_plugins()
+    if json_output:
+        click.echo(json.dumps(rows, ensure_ascii=False))
+        return
+
+    enabled_count = sum(1 for row in rows if row.get("enabled"))
+    click.echo(f"Plugins ({enabled_count}/{len(rows)} enabled)")
+    if not rows:
+        return
+
+    name_width = max(len(str(row.get("name", ""))) for row in rows)
+    for row in rows:
+        status = "enabled" if row.get("enabled") else "disabled"
+        click.echo(f"  {str(row.get('name', '')):<{name_width}}  {status:<8}  {row.get('description', '')}")
+
+
+@plugin.command("enable")
+@click.argument("name")
+@click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON")
+def plugin_enable(name: str, json_output: bool) -> None:
+    """Enable a plugin and materialize its commands/skills."""
+    try:
+        payload = plugin_manager.enable_plugin(name)
+        if json_output:
+            click.echo(json.dumps(payload, ensure_ascii=False))
+            return
+        click.echo(_render_plugin_mutation_result("enabled", payload))
+    except ValueError as e:
+        _fail(str(e))
+
+
+@plugin.command("disable")
+@click.argument("name")
+@click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON")
+def plugin_disable(name: str, json_output: bool) -> None:
+    """Disable a plugin and remove its commands/skills."""
+    try:
+        payload = plugin_manager.disable_plugin(name)
+        if json_output:
+            click.echo(json.dumps(payload, ensure_ascii=False))
+            return
+        click.echo(_render_plugin_mutation_result("disabled", payload))
+    except ValueError as e:
+        _fail(str(e))
 
 
 # --- Terminal commands ---
@@ -756,6 +1150,7 @@ def _resolve_terminal(t: Team, name: str) -> Terminal:
     if name not in t.terminals:
         _fail(f"terminal '{name}' not found in team '{t.name}'")
     terminal = t.terminals[name]
+    _ensure_pane_in_scope(t, terminal.pane_id)
     if not terminal.is_alive():
         _fail(f"terminal '{name}' pane is no longer alive")
     return terminal
@@ -766,9 +1161,9 @@ def _resolve_terminal(t: Team, name: str) -> Terminal:
 @click.argument("command")
 @click.option("--team", "-t", default=None, help="Team name")
 def exec_cmd(terminal_name: str, command: str, team: str | None):
-    """Send a command to a terminal pane (for interactive tools: htop, ssh, docker exec, etc.)."""
-    team_name = _require_team(team or _default_team())
-    t = _load_team(team_name)
+    """Debug: inject a command into a terminal pane."""
+    team_name, t = _resolve_scoped_team(team, required=True)
+    assert team_name is not None and t is not None
     terminal = _resolve_terminal(t, terminal_name)
     tmux.send_keys(terminal.pane_id, command)
     click.echo(f"Sent to {terminal_name} ({terminal.pane_id}).")
@@ -786,11 +1181,12 @@ def terminal():
 @click.option("--pane", "pane_id", default="", help="Pane ID (default: current pane)")
 def terminal_add(name: str, team: str | None, pane_id: str):
     """Register a pane as a terminal."""
-    team_name = _require_team(team or _default_team())
-    t = _load_team(team_name)
+    team_name, t = _resolve_scoped_team(team, required=True)
+    assert team_name is not None and t is not None
     resolved_pane = pane_id or tmux.get_current_pane_id()
     if not resolved_pane:
         _fail("cannot determine pane ID (are you in tmux?)")
+    _ensure_pane_in_scope(t, resolved_pane)
     term_name = name or f"term-{len(t.terminals) + 1}"
     if term_name in t.terminals:
         _fail(f"terminal '{term_name}' already exists")
@@ -805,8 +1201,8 @@ def terminal_add(name: str, team: str | None, pane_id: str):
 @click.option("--team", "-t", default=None, help="Team name")
 def terminal_remove(name: str, team: str | None):
     """Unregister a terminal pane."""
-    team_name = _require_team(team or _default_team())
-    t = _load_team(team_name)
+    team_name, t = _resolve_scoped_team(team, required=True)
+    assert team_name is not None and t is not None
     if name not in t.terminals:
         _fail(f"terminal '{name}' not found")
     terminal_obj = t.terminals.pop(name)

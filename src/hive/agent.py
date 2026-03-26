@@ -10,12 +10,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import core_hooks
 from . import tmux
 
 DROID_BIN = os.environ.get("DROID_PATH", str(Path.home() / ".local" / "bin" / "droid"))
 DROID_STARTUP_TIMEOUT = 30
-SETTINGS_FILE = Path.home() / ".factory" / "settings.json"
-SESSIONS_DIR = Path.home() / ".factory" / "sessions"
+
+
+def _factory_home() -> Path:
+    return Path(os.environ.get("FACTORY_HOME", str(Path.home() / ".factory")))
+
+
+def _settings_file() -> Path:
+    return _factory_home() / "settings.json"
+
+
+def _sessions_dir() -> Path:
+    return _factory_home() / "sessions"
 
 
 def _shell_escape(s: str) -> str:
@@ -43,9 +54,10 @@ def _resolve_model_id(model: str, settings: dict[str, Any]) -> str:
 
 
 def _load_settings() -> dict[str, Any]:
-    if not SETTINGS_FILE.is_file():
+    settings_file = _settings_file()
+    if not settings_file.is_file():
         return {}
-    with open(SETTINGS_FILE) as f:
+    with open(settings_file) as f:
         return json.load(f)
 
 
@@ -56,7 +68,7 @@ def _encode_cwd(cwd: str) -> str:
 
 def _list_sessions(cwd: str) -> set[str]:
     """List existing session UUIDs for a given CWD."""
-    sessions_path = SESSIONS_DIR / _encode_cwd(cwd)
+    sessions_path = _sessions_dir() / _encode_cwd(cwd)
     if not sessions_path.is_dir():
         return set()
     return {
@@ -67,7 +79,7 @@ def _list_sessions(cwd: str) -> set[str]:
 
 
 def _session_settings_path(cwd: str, session_id: str) -> Path:
-    return SESSIONS_DIR / _encode_cwd(cwd) / f"{session_id}.settings.json"
+    return _sessions_dir() / _encode_cwd(cwd) / f"{session_id}.settings.json"
 
 
 def _session_timestamp(cwd: str, session_id: str) -> float:
@@ -100,13 +112,33 @@ def _select_session_id(cwd: str, session_ids: set[str], model: str = "") -> str 
     return ordered[0]
 
 
-def detect_current_session_id(cwd: str, model: str = "") -> str | None:
+def _resolve_session_id_from_map(pane_id: str = "") -> str | None:
+    resolved_pane = pane_id or tmux.get_current_pane_id() or ""
+    if not resolved_pane:
+        return None
+    record = core_hooks.resolve_session_record(
+        pane_id=resolved_pane,
+        tty=tmux.get_pane_tty(resolved_pane) or "",
+    )
+    if not record:
+        return None
+    session_id = record.get("session_id")
+    return str(session_id) if session_id else None
+
+
+def detect_current_session_id(cwd: str, model: str = "", pane_id: str = "") -> str | None:
     """Best-effort lookup for the current droid session ID in a cwd."""
+    mapped_session = _resolve_session_id_from_map(pane_id)
+    if mapped_session:
+        return mapped_session
     return _select_session_id(cwd, _list_sessions(cwd), model=model)
 
 
-def _detect_new_session(cwd: str, before: set[str], model: str = "") -> str | None:
+def _detect_new_session(cwd: str, before: set[str], model: str = "", pane_id: str = "") -> str | None:
     """Find a session UUID that appeared after spawn."""
+    mapped_session = _resolve_session_id_from_map(pane_id)
+    if mapped_session:
+        return mapped_session
     after = _list_sessions(cwd)
     return _select_session_id(cwd, after - before, model=model)
 
@@ -212,7 +244,7 @@ class Agent:
 
         try:
             if tmux.wait_for_text(pane_id, "for help", timeout=DROID_STARTUP_TIMEOUT):
-                detected_session = _detect_new_session(cwd, sessions_before, model=resolved_model)
+                detected_session = _detect_new_session(cwd, sessions_before, model=resolved_model, pane_id=pane_id)
                 if detected_session:
                     agent.session_id = detected_session
 
@@ -224,7 +256,7 @@ class Agent:
                 if skill == "hive":
                     tmux.send_keys(pane_id,
                         "I am a hive teammate. "
-                        "Use `hive current`, `hive who`, `hive send`, and `hive status-set` to collaborate. "
+                        "Use `hive team`, `hive send`, and `hive status-set` to collaborate. "
                         "Hive messages arrive inline as `<HIVE ...> ... </HIVE>` blocks."
                     )
                 if prompt:

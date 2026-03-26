@@ -31,3 +31,15 @@ def test_exec_sends_to_terminal(runner, configure_hive_home, mock_tmux_send, tmp
     result = runner.invoke(cli, ["exec", "shell", "htop", "-t", "team-e"])
     assert result.exit_code == 0
     assert any(text == "htop" for _, text in mock_tmux_send)
+
+
+def test_terminal_add_rejects_pane_from_different_window(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home(session_name="dev")
+    workspace = tmp_path / "ws"
+    assert runner.invoke(cli, ["create", "team-t", "--workspace", str(workspace)]).exit_code == 0
+    monkeypatch.setattr("hive.cli.tmux.get_pane_window_target", lambda _pane: "dev:1")
+
+    result = runner.invoke(cli, ["terminal", "add", "my-term", "-t", "team-t", "--pane", "%99"])
+
+    assert result.exit_code != 0
+    assert "not team 'team-t' window 'dev:0'" in result.output

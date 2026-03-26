@@ -16,6 +16,8 @@ def test_spawn_forwards_cli_options_to_team(runner, configure_hive_home, monkeyp
         def __init__(self):
             self.name = "team-x"
             self.workspace = str(workspace)
+            self.tmux_session = "dev"
+            self.tmux_window = "dev:0"
 
         def spawn(self, name: str, **kwargs):
             calls["name"] = name
@@ -66,6 +68,7 @@ def test_spawn_forwards_cli_options_to_team(runner, configure_hive_home, monkeyp
 
 
 def test_spawn_writes_context_for_new_agent(runner, monkeypatch, tmp_path):
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: False)
     hive_home = tmp_path / ".hive"
     workspace = tmp_path / "ws"
     workspace.mkdir(parents=True, exist_ok=True)
@@ -77,6 +80,8 @@ def test_spawn_writes_context_for_new_agent(runner, monkeypatch, tmp_path):
         def __init__(self):
             self.name = "team-x"
             self.workspace = str(workspace)
+            self.tmux_session = ""
+            self.tmux_window = ""
 
         def spawn(self, *args, **kwargs):
             return _Spawned()
@@ -95,6 +100,7 @@ def test_spawn_writes_context_for_new_agent(runner, monkeypatch, tmp_path):
 
 
 def test_workflow_load_loads_skill_and_optional_prompt(runner, monkeypatch):
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: False)
     calls: list[str] = []
 
     class _FakeAgent:
@@ -105,6 +111,10 @@ def test_workflow_load_loads_skill_and_optional_prompt(runner, monkeypatch):
             calls.append(f"send:{text}")
 
     class _FakeTeam:
+        name = "team-x"
+        tmux_session = ""
+        tmux_window = ""
+
         def get(self, _name: str):
             return _FakeAgent()
 

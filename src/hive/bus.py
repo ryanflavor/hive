@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 import json
 from pathlib import Path
+import shutil
 
 
 WORKSPACE_DIRS = (
@@ -23,6 +24,17 @@ def init_workspace(workspace: str | Path) -> Path:
     ws = Path(workspace).expanduser()
     for name in WORKSPACE_DIRS:
         (ws / name).mkdir(parents=True, exist_ok=True)
+    return ws
+
+
+def reset_workspace(workspace: str | Path) -> Path:
+    ws = Path(workspace).expanduser()
+    ws.mkdir(parents=True, exist_ok=True)
+    for name in WORKSPACE_DIRS:
+        root = ws / name
+        if root.exists():
+            shutil.rmtree(root)
+        root.mkdir(parents=True, exist_ok=True)
     return ws
 
 
@@ -86,14 +98,19 @@ def write_presence_snapshot(workspace: str | Path, team_status: dict[str, object
         "team": team_status.get("name"),
         "description": team_status.get("description"),
         "workspace": team_status.get("workspace"),
-        "agents": team_status.get("agents", {}),
+        "tmuxSession": team_status.get("tmuxSession", ""),
+        "tmuxWindow": team_status.get("tmuxWindow", ""),
+        "members": team_status.get("members", []),
     }
     (root / "team.json").write_text(json.dumps(team_snapshot, indent=2, ensure_ascii=False) + "\n")
 
-    for agent_name, data in dict(team_status.get("agents", {})).items():
+    for member in list(team_status.get("members", [])):
+        member_name = str(member.get("name", ""))
+        if not member_name:
+            continue
         payload = {
             "updatedAt": _now_iso(),
-            "agent": agent_name,
-            **dict(data),
+            "agent": member_name,
+            **dict(member),
         }
-        (root / f"{agent_name}.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+        (root / f"{member_name}.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")

@@ -8,11 +8,32 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import core_hooks
 from . import tmux
 from .agent import Agent, detect_current_session_id
 
 HIVE_HOME = Path(os.environ.get("HIVE_HOME", str(Path.home() / ".hive")))
 COLORS = ["green", "blue", "yellow", "red", "magenta", "cyan"]
+LEAD_AGENT_NAME = "orch"
+
+
+def _member_role(command: str) -> str:
+    return "agent" if command == "droid" else "terminal"
+
+
+def _session_id_for_pane(pane_id: str, current_session_id: str | None = None) -> str | None:
+    if current_session_id:
+        return current_session_id
+    if not pane_id:
+        return current_session_id
+    record = core_hooks.resolve_session_record(
+        pane_id=pane_id,
+        tty=tmux.get_pane_tty(pane_id) or "",
+    )
+    if not record:
+        return current_session_id
+    session_id = record.get("session_id")
+    return str(session_id) if session_id else current_session_id
 
 
 @dataclass
@@ -36,13 +57,14 @@ class Team:
     name: str
     description: str = ""
     workspace: str = ""
-    lead_name: str = "orchestrator"
+    lead_name: str = LEAD_AGENT_NAME
     agents: dict[str, Agent] = field(default_factory=dict)
     terminals: dict[str, Terminal] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     lead_pane_id: str = ""
     lead_session_id: str | None = None
     tmux_session: str = ""
+    tmux_window: str = ""
 
     @property
     def teams_dir(self) -> Path:
@@ -76,9 +98,12 @@ class Team:
 
         if tmux.is_inside_tmux():
             team.lead_pane_id = tmux.get_current_pane_id() or ""
-            team.lead_session_id = detect_current_session_id(resolved_cwd)
+            team.lead_session_id = detect_current_session_id(resolved_cwd, pane_id=team.lead_pane_id)
+            team.tmux_session = tmux.get_current_session_name() or ""
+            team.tmux_window = tmux.get_current_window_target() or ""
             if team.lead_pane_id:
-                tmux.tag_pane(team.lead_pane_id, "lead", "orchestrator", name)
+                lead_command = tmux.get_pane_current_command(team.lead_pane_id) or ""
+                tmux.tag_pane(team.lead_pane_id, _member_role(lead_command), team.lead_name, name)
         else:
             if tmux.has_session(name):
                 raise ValueError(f"Team '{name}' already exists")
@@ -103,11 +128,12 @@ class Team:
             name=data["name"],
             description=data.get("description", ""),
             workspace=data.get("workspace", ""),
-            lead_name=data.get("leadName", "orchestrator"),
+            lead_name=data.get("leadName", LEAD_AGENT_NAME),
             created_at=data.get("createdAt", 0),
             lead_pane_id=data.get("leadPaneId", ""),
             lead_session_id=data.get("leadSessionId"),
             tmux_session=data.get("tmuxSession", ""),
+            tmux_window=data.get("tmuxWindow", ""),
         )
 
         for member in data.get("members", []):
@@ -154,6 +180,7 @@ class Team:
             "leadPaneId": self.lead_pane_id,
             "leadSessionId": self.lead_session_id,
             "tmuxSession": self.tmux_session,
+            "tmuxWindow": self.tmux_window,
             "createdAt": self.created_at,
             "members": [a.to_dict() for a in self.agents.values()],
             "terminals": [t.to_dict() for t in self.terminals.values()],
@@ -264,40 +291,57 @@ class Team:
 
     def status(self) -> dict:
         """Get team status."""
-        agents: dict[str, dict[str, object]] = {}
+        members: list[dict[str, object]] = []
+        changed = False
         lead = self.lead_agent()
         if lead is not None:
-            agents[lead.name] = {
+            refreshed_lead_session = _session_id_for_pane(lead.pane_id, lead.session_id)
+            if refreshed_lead_session != lead.session_id:
+                lead.session_id = refreshed_lead_session
+                self.lead_session_id = refreshed_lead_session
+                changed = True
+            lead_command = tmux.get_pane_current_command(lead.pane_id) or ""
+            members.append({
+                "name": lead.name,
+                "role": _member_role(lead_command),
                 "alive": lead.is_alive(),
                 "pane": lead.pane_id,
                 "model": lead.model,
                 "color": lead.color,
-                "sessionId": lead.session_id,
-            }
+                "sessionId": refreshed_lead_session,
+            })
+        for name in sorted(self.agents):
+            agent = self.agents[name]
+            refreshed_session = _session_id_for_pane(agent.pane_id, agent.session_id)
+            if refreshed_session != agent.session_id:
+                agent.session_id = refreshed_session
+                changed = True
+            members.append({
+                "name": name,
+                "role": "agent",
+                "alive": agent.is_alive(),
+                "pane": agent.pane_id,
+                "model": agent.model,
+                "color": agent.color,
+                "sessionId": refreshed_session,
+            })
+        for name in sorted(self.terminals):
+            terminal = self.terminals[name]
+            members.append({
+                "name": name,
+                "role": "terminal",
+                "alive": terminal.is_alive(),
+                "pane": terminal.pane_id,
+            })
+        if changed:
+            self.save()
         return {
             "name": self.name,
             "description": self.description,
             "workspace": self.workspace,
-            "agents": {
-                **agents,
-                **{
-                    name: {
-                        "alive": agent.is_alive(),
-                        "pane": agent.pane_id,
-                        "model": agent.model,
-                        "color": agent.color,
-                        "sessionId": agent.session_id,
-                    }
-                    for name, agent in self.agents.items()
-                },
-            },
-            "terminals": {
-                name: {
-                    "alive": terminal.is_alive(),
-                    "pane": terminal.pane_id,
-                }
-                for name, terminal in self.terminals.items()
-            },
+            "tmuxSession": self.tmux_session,
+            "tmuxWindow": self.tmux_window,
+            "members": members,
         }
 
     def shutdown(self, name: str | None = None) -> None:
@@ -315,5 +359,5 @@ class Team:
                 tmux.clear_pane_tags(terminal.pane_id)
         if self.lead_pane_id and tmux.is_pane_alive(self.lead_pane_id):
             tmux.clear_pane_tags(self.lead_pane_id)
-        if not tmux.is_inside_tmux():
+        if not tmux.is_inside_tmux() and not self.tmux_session:
             tmux.kill_session(self.name)

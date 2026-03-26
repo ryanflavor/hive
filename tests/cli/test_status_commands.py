@@ -5,21 +5,26 @@ from hive.cli import cli
 
 def test_status_exposes_lead_session_id(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
-    monkeypatch.setattr("hive.team.detect_current_session_id", lambda _cwd: "orch-session-456")
+    monkeypatch.setattr("hive.team.detect_current_session_id", lambda _cwd, model="", pane_id="": "orch-session-456")
     workspace = tmp_path / "ws"
 
     assert runner.invoke(cli, ["create", "team-status", "--workspace", str(workspace)]).exit_code == 0
-    result = runner.invoke(cli, ["status", "-t", "team-status"])
+    result = runner.invoke(cli, ["team", "-t", "team-status"])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["agents"]["orchestrator"]["sessionId"] == "orch-session-456"
+    assert payload["self"] == "orch"
+    assert payload["tmuxWindow"] == "dev:0"
+    orch = next(member for member in payload["members"] if member["name"] == "orch")
+    assert orch["role"] == "agent"
+    assert orch["sessionId"] == "orch-session-456"
 
-    orchestrator_snapshot = json.loads((workspace / "presence" / "orchestrator.json").read_text())
-    assert orchestrator_snapshot["sessionId"] == "orch-session-456"
+    orch_snapshot = json.loads((workspace / "presence" / "orch.json").read_text())
+    assert orch_snapshot["sessionId"] == "orch-session-456"
 
 
-def test_status_set_show_and_wait_status(runner, tmp_path):
+def test_status_set_show_and_wait_status(runner, monkeypatch, tmp_path):
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: False)
     workspace = tmp_path / "ws"
     for name in ("artifacts", "status", "presence", "state"):
         (workspace / name).mkdir(parents=True, exist_ok=True)
@@ -41,8 +46,13 @@ def test_status_set_show_and_wait_status(runner, tmp_path):
         ],
     )
     assert result.exit_code == 0
+    set_payload = json.loads(result.output)
+    assert set_payload["agent"] == "claude"
+    assert set_payload["state"] == "done"
+    assert set_payload["summary"] == "review complete"
+    assert set_payload["path"].endswith("/status/claude.json")
 
-    show_result = runner.invoke(cli, ["status-show", "--workspace", str(workspace), "--agent", "claude"])
+    show_result = runner.invoke(cli, ["status", "--workspace", str(workspace), "--agent", "claude"])
     assert show_result.exit_code == 0
     payload = json.loads(show_result.output)
     assert payload["state"] == "done"
@@ -69,7 +79,8 @@ def test_status_set_show_and_wait_status(runner, tmp_path):
     assert payload["metadata"]["artifact"] == "/tmp/review.md"
 
 
-def test_status_show_without_agent_returns_all_statuses(runner, tmp_path):
+def test_status_without_agent_returns_all_statuses(runner, monkeypatch, tmp_path):
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: False)
     workspace = tmp_path / "ws"
     for name in ("artifacts", "status", "presence", "state"):
         (workspace / name).mkdir(parents=True, exist_ok=True)
@@ -83,7 +94,7 @@ def test_status_show_without_agent_returns_all_statuses(runner, tmp_path):
         ["status-set", "done", "finished", "--workspace", str(workspace), "--agent", "gpt"],
     ).exit_code == 0
 
-    result = runner.invoke(cli, ["status-show", "--workspace", str(workspace)])
+    result = runner.invoke(cli, ["status", "--workspace", str(workspace)])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
@@ -91,7 +102,23 @@ def test_status_show_without_agent_returns_all_statuses(runner, tmp_path):
     assert payload["gpt"]["state"] == "done"
 
 
-def test_wait_status_times_out_without_match(runner, tmp_path):
+def test_statuses_filters_out_stale_agents_from_team_view(runner, configure_hive_home, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    assert runner.invoke(cli, ["create", "team-w", "--workspace", str(workspace)]).exit_code == 0
+    assert runner.invoke(cli, ["status-set", "busy", "working", "--team", "team-w", "--agent", "orch"]).exit_code == 0
+    assert runner.invoke(cli, ["status-set", "busy", "ghost", "--team", "team-w", "--agent", "ghost"]).exit_code == 0
+
+    result = runner.invoke(cli, ["status", "-t", "team-w"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert "orch" in payload
+    assert "ghost" not in payload
+
+
+def test_wait_status_times_out_without_match(runner, monkeypatch, tmp_path):
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: False)
     workspace = tmp_path / "ws"
     for name in ("artifacts", "status", "presence", "state"):
         (workspace / name).mkdir(parents=True, exist_ok=True)
@@ -106,6 +133,7 @@ def test_wait_status_times_out_without_match(runner, tmp_path):
 
 
 def test_wait_status_fails_when_agent_dies(runner, monkeypatch, tmp_path):
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: False)
     workspace = tmp_path / "ws"
     for name in ("artifacts", "status", "presence", "state"):
         (workspace / name).mkdir(parents=True, exist_ok=True)
@@ -116,7 +144,7 @@ def test_wait_status_fails_when_agent_dies(runner, monkeypatch, tmp_path):
 
     class _FakeTeam:
         def status(self) -> dict:
-            return {"agents": {"claude": {"alive": False}}}
+            return {"members": [{"name": "claude", "alive": False}]}
 
         def get(self, _name: str):
             return _FakeAgent()
@@ -139,7 +167,8 @@ def test_who_includes_terminals(runner, configure_hive_home, tmp_path):
     assert runner.invoke(cli, ["create", "team-w", "--workspace", str(workspace)]).exit_code == 0
     assert runner.invoke(cli, ["terminal", "add", "term-1", "-t", "team-w", "--pane", "%77"]).exit_code == 0
 
-    result = runner.invoke(cli, ["who", "-t", "team-w"])
+    result = runner.invoke(cli, ["team", "-t", "team-w"])
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert "term-1" in payload["terminals"]
+    terminal = next(member for member in payload["members"] if member["name"] == "term-1")
+    assert terminal["role"] == "terminal"

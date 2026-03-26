@@ -28,7 +28,7 @@ def test_e2e_create_spawn_send_capture_and_status(tmp_path: Path):
 
     wait_for(lambda: "for help" in run_hive(["capture", "claude", "--team", team], env=env, cwd=tmp_path).stdout)
 
-    assert run_hive(["type", "claude", "plain ping", "--team", team], env=env, cwd=tmp_path).returncode == 0
+    assert run_hive(["inject", "claude", "plain ping", "--team", team], env=env, cwd=tmp_path).returncode == 0
     assert run_hive(["send", "claude", "hello envelope", "--team", team], env=env, cwd=tmp_path).returncode == 0
 
     def capture() -> str:
@@ -36,18 +36,21 @@ def test_e2e_create_spawn_send_capture_and_status(tmp_path: Path):
 
     wait_for(lambda: "plain ping" in capture() and "hello envelope" in capture())
     captured = capture()
-    assert "<HIVE from=orchestrator to=claude>" in captured
+    assert "<HIVE from=orch to=claude>" in captured
     assert "plain ping" in captured
 
-    result = run_hive(["status-set", "busy", "working", "--team", team, "--workspace", str(workspace), "--agent", "orchestrator"], env=env, cwd=tmp_path)
-    assert result.returncode == 0, result.stderr or result.stdout
-
-    result = run_hive(["status-show", "--team", team, "--workspace", str(workspace)], env=env, cwd=tmp_path)
+    result = run_hive(["status-set", "busy", "working", "--team", team, "--workspace", str(workspace), "--agent", "orch"], env=env, cwd=tmp_path)
     assert result.returncode == 0, result.stderr or result.stdout
     payload = json.loads(result.stdout)
-    assert payload["orchestrator"]["state"] == "busy"
+    assert payload["agent"] == "orch"
+    assert payload["state"] == "busy"
 
-    result = run_hive(["wait-status", "orchestrator", "--team", team, "--workspace", str(workspace), "--state", "busy", "--timeout", "1"], env=env, cwd=tmp_path)
+    result = run_hive(["status", "--team", team, "--workspace", str(workspace)], env=env, cwd=tmp_path)
+    assert result.returncode == 0, result.stderr or result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["orch"]["state"] == "busy"
+
+    result = run_hive(["wait-status", "orch", "--team", team, "--workspace", str(workspace), "--state", "busy", "--timeout", "1"], env=env, cwd=tmp_path)
     assert result.returncode == 0, result.stderr or result.stdout
     assert '"state": "busy"' in result.stdout
 

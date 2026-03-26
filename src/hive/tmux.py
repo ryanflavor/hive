@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import time
 from dataclasses import dataclass
@@ -143,6 +144,10 @@ def set_window_option(target: str, option: str, value: str) -> None:
     _run(["set-window-option", "-t", target, option, value], check=False)
 
 
+def clear_window_option(target: str, option: str) -> None:
+    _run(["set-window-option", "-t", target, "-u", option], check=False)
+
+
 def resize_pane(pane_id: str, width: str | None = None, height: str | None = None) -> None:
     args = ["resize-pane", "-t", pane_id]
     if width:
@@ -203,6 +208,134 @@ def get_current_window_index() -> str | None:
         check=False,
     )
     return r.stdout.strip() or None
+
+
+def display_value(target: str, fmt: str) -> str | None:
+    r = _run([
+        "display-message", "-t", target, "-p", fmt,
+    ], check=False)
+    return r.stdout.strip() or None
+
+
+def supports_popup() -> bool:
+    r = _run(["list-commands"], check=False)
+    commands = r.stdout.strip()
+    return "display-popup" in commands
+
+
+def get_most_recent_client_tty(session_name: str | None = None) -> str | None:
+    args = ["list-clients"]
+    if session_name:
+        args.extend(["-t", session_name])
+    args.extend(["-F", "#{client_activity}\t#{client_tty}"])
+    r = _run(args, check=False)
+    rows: list[tuple[int, str]] = []
+    for line in r.stdout.strip().split("\n"):
+        if not line:
+            continue
+        parts = line.split("\t", 1)
+        if len(parts) != 2 or not parts[1]:
+            continue
+        try:
+            activity = int(parts[0] or "0")
+        except ValueError:
+            activity = 0
+        rows.append((activity, parts[1]))
+    if not rows:
+        return None
+    rows.sort(key=lambda item: item[0], reverse=True)
+    return rows[0][1]
+
+
+def get_client_window_target(client_tty: str) -> str | None:
+    if not client_tty:
+        return None
+    r = _run(
+        ["display-message", "-c", client_tty, "-p", "#{session_name}:#{window_index}"],
+        check=False,
+    )
+    return r.stdout.strip() or None
+
+
+def get_most_recent_client_window(session_name: str | None = None) -> str | None:
+    client_tty = get_most_recent_client_tty(session_name)
+    if not client_tty:
+        return None
+    return get_client_window_target(client_tty)
+
+
+def get_client_mode(target: str | None = None) -> str:
+    resolved_target = target or get_current_pane_id()
+    if not resolved_target:
+        return "unknown"
+    value = display_value(resolved_target, "#{client_control_mode}")
+    if value == "1":
+        return "control"
+    if value == "0":
+        return "terminal"
+    return "unknown"
+
+
+def is_control_mode_client(target: str | None = None) -> bool:
+    return get_client_mode(target) == "control"
+
+
+def get_pane_window_name(pane_id: str) -> str | None:
+    return display_value(pane_id, "#{window_name}")
+
+
+def get_pane_tty(pane_id: str) -> str | None:
+    return display_value(pane_id, "#{pane_tty}")
+
+
+def get_pane_title(pane_id: str) -> str | None:
+    return display_value(pane_id, "#{pane_title}")
+
+
+def get_pane_current_command(pane_id: str) -> str | None:
+    return display_value(pane_id, "#{pane_current_command}")
+
+
+def get_pane_window_target(pane_id: str) -> str | None:
+    return display_value(pane_id, "#{session_name}:#{window_index}")
+
+
+def get_pane_session_name(pane_id: str) -> str | None:
+    return display_value(pane_id, "#{session_name}")
+
+
+def get_pane_count(pane_id: str) -> int:
+    value = display_value(pane_id, "#{window_panes}")
+    try:
+        return int(value or "1")
+    except ValueError:
+        return 1
+
+
+def flash_pane_border(pane_id: str, color: str = "yellow", seconds: int = 12) -> None:
+    set_pane_border_color(pane_id, color)
+    reset_cmd = (
+        f"sleep {max(1, seconds)}; "
+        f"tmux select-pane -t {shlex.quote(pane_id)} -P {shlex.quote('fg=default')} >/dev/null 2>&1 || true"
+    )
+    _run(["run-shell", "-b", reset_cmd], check=False)
+
+
+def flash_window_status(window_target: str, style: str = "fg=colour235,bg=colour220,bold", seconds: int = 12) -> None:
+    duration = max(1, int(seconds))
+    interval = 0.5
+    quoted_target = shlex.quote(window_target)
+    quoted_style = shlex.quote(style)
+    set_cmd = f"tmux set-window-option -t {quoted_target} window-status-style {quoted_style} >/dev/null 2>&1 || true"
+    clear_cmd = f"tmux set-window-option -t {quoted_target} -u window-status-style >/dev/null 2>&1 || true"
+    parts: list[str] = []
+    for _ in range(duration):
+        parts.append(set_cmd)
+        parts.append(f"sleep {interval}")
+        parts.append(clear_cmd)
+        parts.append(f"sleep {interval}")
+    parts.append(clear_cmd)
+    _run(["run-shell", "-b", "; ".join(parts)], check=False)
 
 
 @dataclass

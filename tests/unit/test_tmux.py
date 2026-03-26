@@ -95,6 +95,50 @@ def test_context_helpers_use_environment_and_display_message(monkeypatch):
     assert tmux.get_current_window_index() == "2"
 
 
+def test_client_mode_and_popup_support_helpers(monkeypatch):
+    monkeypatch.setattr(
+        "hive.tmux._run",
+        lambda args, check=False, timeout=5: subprocess.CompletedProcess(
+            ["tmux", *args],
+            0,
+            "display-popup\n" if args[0] == "list-commands" else ("1\n" if "#{client_control_mode}" in args else ""),
+            "",
+        ),
+    )
+    monkeypatch.setenv("TMUX_PANE", "%7")
+
+    assert tmux.supports_popup() is True
+    assert tmux.get_client_mode("%7") == "control"
+    assert tmux.is_control_mode_client("%7") is True
+
+
+def test_client_mode_returns_terminal_or_unknown(monkeypatch):
+    monkeypatch.setattr("hive.tmux.display_value", lambda _target, _fmt: "0")
+    assert tmux.get_client_mode("%8") == "terminal"
+    assert tmux.is_control_mode_client("%8") is False
+
+    monkeypatch.setattr("hive.tmux.display_value", lambda _target, _fmt: None)
+    assert tmux.get_client_mode("%8") == "unknown"
+
+
+def test_client_window_helpers_resolve_most_recent_client(monkeypatch):
+    def _fake_run(args, check=False, timeout=5):
+        if args[0] == "list-clients":
+            return subprocess.CompletedProcess(
+                ["tmux", *args],
+                0,
+                "10\t/dev/ttys010\n50\t/dev/ttys050\n",
+                "",
+            )
+        return subprocess.CompletedProcess(["tmux", *args], 0, "dev:5\n", "")
+
+    monkeypatch.setattr("hive.tmux._run", _fake_run)
+
+    assert tmux.get_most_recent_client_tty("dev") == "/dev/ttys050"
+    assert tmux.get_client_window_target("/dev/ttys050") == "dev:5"
+    assert tmux.get_most_recent_client_window("dev") == "dev:5"
+
+
 def test_current_window_helpers_return_none_without_tmux_pane(monkeypatch):
     monkeypatch.delenv("TMUX_PANE", raising=False)
 
@@ -144,6 +188,27 @@ def test_pane_option_helpers_and_tagging(monkeypatch):
     assert calls[2] == ("set-option", "-p", "-t", "%1", "-u", "@hive-role")
     assert ("set-option", "-p", "-t", "%1", "@hive-agent", "claude") in calls
     assert ("set-option", "-p", "-t", "%1", "-u", "@hive-team") in calls
+
+
+def test_window_option_helpers_and_flash(monkeypatch):
+    calls = []
+
+    def _fake_run(args, check=False, timeout=5):
+        calls.append(tuple(args))
+        return subprocess.CompletedProcess(["tmux", *args], 0, "", "")
+
+    monkeypatch.setattr("hive.tmux._run", _fake_run)
+
+    tmux.set_window_option("dev:1", "window-status-style", "fg=red")
+    tmux.clear_window_option("dev:1", "window-status-style")
+    tmux.flash_window_status("dev:1", seconds=3)
+
+    assert calls[0] == ("set-window-option", "-t", "dev:1", "window-status-style", "fg=red")
+    assert calls[1] == ("set-window-option", "-t", "dev:1", "-u", "window-status-style")
+    assert calls[2][0:2] == ("run-shell", "-b")
+    assert "window-status-style" in calls[2][2]
+    assert "dev:1" in calls[2][2]
+    assert calls[2][2].count("sleep 0.5") == 6
 
 
 def test_wait_for_text_success_and_timeout(monkeypatch):

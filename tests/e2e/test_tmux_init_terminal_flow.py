@@ -39,16 +39,21 @@ def test_e2e_init_current_exec_and_terminal_management(tmp_path: Path):
 
         send_tmux_command(pane_a, hive_shell_command(["init", "--workspace", str(workspace)], env=env, cwd=tmp_path, stdout_path=init_out))
         init_payload = json.loads(wait_for_file(init_out))
-        assert init_payload["team"] == session
-        assert any(p["role"] == "lead" for p in init_payload["panes"])
+        team_name = init_payload["team"]
+        window_index = str(init_payload["window"]).split(":")[-1]
+        assert team_name == f"{session}-{window_index}"
         assert any(p["role"] == "terminal" for p in init_payload["panes"])
+        assert any(p["role"] == "agent" for p in init_payload["panes"])
 
-        result = run_hive(["who", "--team", session], env=env, cwd=tmp_path)
+        result = run_hive(["who", "--team", team_name], env=env, cwd=tmp_path)
         assert result.returncode == 0, result.stderr or result.stdout
         payload = json.loads(result.stdout)
-        assert payload["terminals"] == {"term-1": {"alive": True, "pane": pane_b}}
+        term_1 = next(member for member in payload["members"] if member["name"] == "term-1")
+        assert term_1["role"] == "terminal"
+        assert term_1["alive"] is True
+        assert term_1["pane"] == pane_b
 
-        result = run_hive(["exec", "term-1", "echo terminal-ok", "--team", session], env=env, cwd=tmp_path)
+        result = run_hive(["exec", "term-1", "echo terminal-ok", "--team", team_name], env=env, cwd=tmp_path)
         assert result.returncode == 0, result.stderr or result.stdout
 
         def terminal_capture() -> str:
@@ -57,26 +62,30 @@ def test_e2e_init_current_exec_and_terminal_management(tmp_path: Path):
         wait_for(lambda: "terminal-ok" in terminal_capture())
         assert "terminal-ok" in terminal_capture()
 
-        result = run_hive(["terminal", "remove", "term-1", "--team", session], env=env, cwd=tmp_path)
+        result = run_hive(["terminal", "remove", "term-1", "--team", team_name], env=env, cwd=tmp_path)
         assert result.returncode == 0, result.stderr or result.stdout
-        result = run_hive(["who", "--team", session], env=env, cwd=tmp_path)
+        result = run_hive(["who", "--team", team_name], env=env, cwd=tmp_path)
         assert result.returncode == 0, result.stderr or result.stdout
-        assert json.loads(result.stdout)["terminals"] == {}
+        remaining_members = json.loads(result.stdout)["members"]
+        assert not any(member["name"] == "term-1" for member in remaining_members)
 
-        result = run_hive(["terminal", "add", "shell", "--team", session, "--pane", pane_b], env=env, cwd=tmp_path)
+        result = run_hive(["terminal", "add", "shell", "--team", team_name, "--pane", pane_b], env=env, cwd=tmp_path)
         assert result.returncode == 0, result.stderr or result.stdout
-        result = run_hive(["who", "--team", session], env=env, cwd=tmp_path)
+        result = run_hive(["who", "--team", team_name], env=env, cwd=tmp_path)
         assert result.returncode == 0, result.stderr or result.stdout
-        assert json.loads(result.stdout)["terminals"] == {"shell": {"alive": True, "pane": pane_b}}
+        shell = next(member for member in json.loads(result.stdout)["members"] if member["name"] == "shell")
+        assert shell["role"] == "terminal"
+        assert shell["alive"] is True
+        assert shell["pane"] == pane_b
 
-        tags = run_tmux(["list-panes", "-t", f"{session}:0", "-F", "#{pane_id} role=#{@hive-role} agent=#{@hive-agent} team=#{@hive-team}"]).stdout
-        assert f"{pane_a} role=lead agent=orchestrator team={session}" in tags
-        assert f"{pane_b} role=terminal agent=shell team={session}" in tags
+        tags = run_tmux(["list-panes", "-t", init_payload["window"], "-F", "#{pane_id} role=#{@hive-role} agent=#{@hive-agent} team=#{@hive-team}"]).stdout
+        assert f"{pane_a} role=terminal agent=orch team={team_name}" in tags
+        assert f"{pane_b} role=terminal agent=shell team={team_name}" in tags
 
-        result = run_hive(["delete", session], env=env, cwd=tmp_path)
+        result = run_hive(["delete", team_name], env=env, cwd=tmp_path)
         assert result.returncode == 0, result.stderr or result.stdout
         session_check = subprocess.run(["tmux", "has-session", "-t", session], capture_output=True, text=True)
-        assert session_check.returncode != 0
-        assert not ((tmp_path / ".hive" / "teams" / session).exists())
+        assert session_check.returncode == 0
+        assert not ((tmp_path / ".hive" / "teams" / team_name).exists())
     finally:
         subprocess.run(["tmux", "kill-session", "-t", session], capture_output=True, text=True)

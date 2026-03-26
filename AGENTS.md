@@ -14,7 +14,8 @@ Tests live under `tests/` and are split by level:
 
 ## Build, Test, and Development Commands
 
-- `pip install -e .` — install Hive in editable mode.
+- `python3 -m pip install -e .` — install Hive in editable mode.
+- After any local modification, rerun `python3 -m pip install -e .` before testing or manual CLI verification.
 - `PYTHONPATH=src python -m pytest tests/ -q` — run the full test suite.
 - `PYTHONPATH=src python -m pytest tests/ -m unit -q` — fast unit tests only.
 - `PYTHONPATH=src python -m pytest tests/ -m cli -q` — CLI-layer tests.

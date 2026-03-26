@@ -17,6 +17,8 @@ def base_env(tmp_path: Path, fake_droid: Path) -> dict[str, str]:
         pythonpath = f"{pythonpath}{os.pathsep}{os.environ['PYTHONPATH']}"
     return {
         "HIVE_HOME": str(tmp_path / ".hive"),
+        "FACTORY_HOME": str(tmp_path / ".factory"),
+        "XDG_CACHE_HOME": str(tmp_path / ".cache"),
         "DROID_PATH": str(fake_droid),
         "PYTHONPATH": pythonpath,
         "PYTHONUNBUFFERED": "1",
