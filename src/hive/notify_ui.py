@@ -487,7 +487,7 @@ reset=$'\033[0m'
 
 render_footer() {
   local remaining="$1"
-  printf '%s[Tab]%s focus pane   %s[Esc]%s dismiss   %s[%ss]%s close' "$accent" "$reset" "$accent" "$reset" "$accent" "$remaining" "$reset"
+  printf '%s[Space]%s jump   %s[Any key]%s dismiss   %s[%ss]%s close' "$accent" "$reset" "$accent" "$reset" "$accent" "$remaining" "$reset"
 }
 
 box_line="$(printf '%*s' "$((content_width + 2))" '' | tr ' ' '─')"
@@ -509,7 +509,7 @@ key=""
 remaining="$seconds"
 while (( remaining > 0 )); do
   if IFS= read -rsn1 -t 1 key; then
-    if [[ "$key" == $'\t' ]]; then
+    if [[ "$key" == ' ' ]]; then
       TMUX= tmux select-window -t "$window_target" >/dev/null 2>&1 || true
       TMUX= tmux select-pane -t "$pane_id" >/dev/null 2>&1 || true
     fi
@@ -544,7 +544,7 @@ def _popup_geometry(message: str, *, window_name: str, agent_name: str, pane_id:
     min_width = 56
     max_width = 72
     chrome_width = 8
-    footer = f"[Tab] focus pane   [Esc] dismiss   [{max(1, seconds)}s] close"
+    footer = f"[Space] jump   [Any key] dismiss   [{max(1, seconds)}s] close"
     candidates = ([len(line) for line in message.splitlines()] or [0]) + [
         len(window_name),
         len(agent_name or "notify"),
@@ -561,6 +561,18 @@ def _popup_geometry(message: str, *, window_name: str, agent_name: str, pane_id:
         wrapped_lines += len(wrapped)
     height = min(18, max(11, wrapped_lines + 7))
     return width, height, content_width
+
+
+def _popup_position(pane_id: str, popup_width: int) -> tuple[str, str]:
+    window_width_raw = tmux.display_value(pane_id, "#{window_width}")
+    try:
+        window_width = int(window_width_raw or "0")
+    except ValueError:
+        window_width = 0
+    if window_width <= 0:
+        return "C", "C"
+    x = max(0, window_width - popup_width - 1)
+    return str(x), "1"
 
 
 def post_native_notification(message: str, subtitle: str) -> None:
@@ -606,6 +618,7 @@ def show_tmux_popup(message: str, pane_id: str, seconds: int = 12) -> None:
         pane_id=pane_id,
         seconds=seconds,
     )
+    popup_x, popup_y = _popup_position(pane_id, popup_width)
     args = [
         "bash",
         str(script_path),
@@ -624,9 +637,9 @@ def show_tmux_popup(message: str, pane_id: str, seconds: int = 12) -> None:
         "-t",
         pane_id,
         "-x",
-        "C",
+        popup_x,
         "-y",
-        "C",
+        popup_y,
         "-w",
         str(popup_width),
         "-h",

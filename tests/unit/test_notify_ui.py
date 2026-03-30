@@ -76,11 +76,12 @@ def test_notify_is_suppressed_when_user_is_already_in_target_window(monkeypatch)
     assert calls == []
 
 
-def test_show_tmux_popup_uses_centered_styled_popup(monkeypatch):
+def test_show_tmux_popup_uses_top_right_styled_popup(monkeypatch):
     _mock_tmux_basics(monkeypatch)
     calls: list[list[str]] = []
 
     monkeypatch.setattr("hive.notify_ui._write_temp_popup_script", lambda: __import__("pathlib").Path("/tmp/hive-notify-popup.sh"))
+    monkeypatch.setattr("hive.notify_ui.tmux.display_value", lambda _target, fmt: "120" if fmt == "#{window_width}" else None)
     monkeypatch.setattr(
         "hive.notify_ui.subprocess.run",
         lambda args, check=False, capture_output=True, text=True: calls.append(args) or subprocess.CompletedProcess(args, 0, "", ""),
@@ -89,9 +90,10 @@ def test_show_tmux_popup_uses_centered_styled_popup(monkeypatch):
     notify_ui.show_tmux_popup("回来确认", "%9", seconds=9)
 
     cmd = calls[0]
+    popup_width, _, _ = notify_ui._popup_geometry("回来确认", window_name="dev", agent_name="orch", pane_id="%9", seconds=9)
     assert cmd[:4] == ["tmux", "display-popup", "-t", "%9"]
-    assert "-x" in cmd and "C" in cmd
-    assert "-y" in cmd and "C" in cmd
+    assert cmd[cmd.index("-x") + 1] == str(120 - popup_width - 1)
+    assert cmd[cmd.index("-y") + 1] == "1"
     assert "-w" in cmd and cmd[cmd.index("-w") + 1] != "76%"
     assert "-h" in cmd and cmd[cmd.index("-h") + 1] != "14"
     assert "-s" in cmd and "fg=colour235,bg=colour230" in cmd
@@ -101,6 +103,9 @@ def test_show_tmux_popup_uses_centered_styled_popup(monkeypatch):
 
 def test_popup_source_does_not_render_message_header():
     assert "Message" not in notify_ui.TMUX_POPUP_SOURCE
+    assert "[Space]" in notify_ui.TMUX_POPUP_SOURCE
+    assert "[Any key]" in notify_ui.TMUX_POPUP_SOURCE
+    assert 'if [[ "$key" == \' \' ]]; then' in notify_ui.TMUX_POPUP_SOURCE
 
 
 def test_popup_geometry_keeps_short_messages_compact():
@@ -115,3 +120,9 @@ def test_popup_geometry_keeps_short_messages_compact():
     assert 56 <= width < 72
     assert 11 <= height <= 13
     assert content_width == width - 8
+
+
+def test_popup_position_falls_back_to_center_when_window_width_missing(monkeypatch):
+    monkeypatch.setattr("hive.notify_ui.tmux.display_value", lambda _target, _fmt: None)
+
+    assert notify_ui._popup_position("%9", 60) == ("C", "C")
