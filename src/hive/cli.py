@@ -21,6 +21,7 @@ from . import notify_ui
 from . import plugin_manager
 from . import tmux
 from .agent import Agent
+from .agent_cli import SHELL_NAMES, detect_profile_from_pane_command, is_agent_command, member_role
 from .team import HIVE_HOME, LEAD_AGENT_NAME, Team, Terminal
 
 
@@ -144,7 +145,7 @@ def _discover_tmux_binding() -> dict[str, str]:
                 "team": team.name,
                 "workspace": team.workspace,
                 "agent": team.lead_name,
-                "role": "agent" if current_command == "droid" else "terminal",
+                "role": member_role(current_command),
                 "pane": current_pane,
                 "tmuxSession": team.tmux_session,
                 "tmuxWindow": team.tmux_window,
@@ -424,9 +425,9 @@ def _gc_dead_teams() -> None:
 @cli.command("fork")
 @click.option("--pane", "pane_id", default="", help="Source pane ID (default: auto-detect)")
 @click.option("--split", "-s", type=click.Choice(["auto", "h", "v"]), default="auto", help="Split direction (default: auto-detect from pane dimensions)")
-@click.option("--timeout", default=30, type=int, show_default=True, help="Seconds to wait for droid startup")
+@click.option("--timeout", default=30, type=int, show_default=True, help="Seconds to wait for agent startup")
 def fork_cmd(pane_id: str, split: str, timeout: int):
-    """Fork the current droid session into a new split pane."""
+    """Fork the current agent session into a new split pane."""
     if not tmux.is_inside_tmux():
         _fail("hive fork requires tmux")
 
@@ -434,7 +435,8 @@ def fork_cmd(pane_id: str, split: str, timeout: int):
     if not current_pane:
         _fail("cannot determine current pane (pass --pane explicitly)")
 
-    cwd = tmux.display_value(current_pane, "#{pane_current_path}") or os.getcwd()
+    pane_command = tmux.get_pane_current_command(current_pane) or ""
+    profile = detect_profile_from_pane_command(pane_command)
 
     if split == "auto":
         width = int(tmux.display_value(current_pane, "#{pane_width}") or "80")
@@ -454,16 +456,19 @@ def fork_cmd(pane_id: str, split: str, timeout: int):
 
     try:
         if session_id:
-            tmux.send_keys(new_pane, f"droid -r {session_id}")
+            tmux.send_keys(new_pane, profile.resume_cmd.format(session_id=session_id))
         else:
-            tmux.send_keys(new_pane, "droid -r")
+            tmux.send_keys(new_pane, f"{profile.name} -r")
 
-        if tmux.wait_for_text(new_pane, "for help", timeout=timeout):
-            time.sleep(1)
-            tmux.send_keys(new_pane, "/fork")
-            fork_ok = True
+        if profile.fork_needs_tui:
+            if tmux.wait_for_text(new_pane, profile.ready_text, timeout=timeout):
+                time.sleep(1)
+                tmux.send_keys(new_pane, profile.fork_cmd)
+                fork_ok = True
+            else:
+                _fail(f"{profile.name} startup timed out, fork not sent")
         else:
-            _fail("droid startup timed out, /fork not sent")
+            fork_ok = True
     finally:
         if not fork_ok:
             tmux.kill_pane(new_pane)
@@ -522,7 +527,7 @@ def current_cmd():
             {
                 "id": p.pane_id,
                 "command": p.command,
-                "role": p.role or ("agent" if p.command == "droid" else "terminal"),
+                "role": p.role or member_role(p.command),
                 "agent": p.agent,
                 "team": p.team,
             }
@@ -627,8 +632,6 @@ def init_cmd(name: str, workspace: str, notify: bool):
 
     _remember_context(team=team_name, workspace=str(ws_path), agent=LEAD_AGENT_NAME)
 
-    _SHELL_CMDS = {"zsh", "bash", "fish", "sh", "dash", "ksh", "tcsh", "csh"}
-
     seen_names = _names_used_in_window(panes)
     seen_names.add(LEAD_AGENT_NAME)
     discovered = []
@@ -636,7 +639,7 @@ def init_cmd(name: str, workspace: str, notify: bool):
     for pane in panes:
         if pane.team and pane.team != team_name:
             _fail(f"pane '{pane.pane_id}' already belongs to team '{pane.team}'")
-        is_agent = pane.command not in _SHELL_CMDS
+        is_agent = pane.command not in SHELL_NAMES
         is_current = pane.pane_id == current_pane
         if is_current:
             discovered.append({

@@ -1,4 +1,4 @@
-"""Team: a tmux window with a group of droid agents."""
+"""Team: a tmux window with a group of agents."""
 
 from __future__ import annotations
 
@@ -11,15 +11,12 @@ from pathlib import Path
 from . import core_hooks
 from . import tmux
 from .agent import Agent, detect_current_session_id
+from .agent_cli import member_role as _member_role
 
 HIVE_HOME = Path(os.environ.get("HIVE_HOME", str(Path.home() / ".hive")))
 COLORS = ["green", "blue", "yellow", "red", "magenta", "cyan"]
 LEAD_AGENT_NAME = "orch"
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
-
-
-def _member_role(command: str) -> str:
-    return "agent" if command == "droid" else "terminal"
 
 
 def _session_id_for_pane(pane_id: str, current_session_id: str | None = None) -> str | None:
