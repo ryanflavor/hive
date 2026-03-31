@@ -17,7 +17,7 @@ def test_plugin_list_enable_and_disable_cvim(runner, configure_hive_home):
 
     listed = runner.invoke(cli, ["plugin", "list"])
     assert listed.exit_code == 0
-    assert "Plugins (0/3 enabled)" in listed.output
+    assert "Plugins (0/4 enabled)" in listed.output
     assert "cvim" in listed.output
     assert "disabled" in listed.output
 
@@ -30,7 +30,7 @@ def test_plugin_list_enable_and_disable_cvim(runner, configure_hive_home):
     listed_json = runner.invoke(cli, ["plugin", "list", "--json"])
     assert listed_json.exit_code == 0
     names = {item["name"]: item for item in json.loads(listed_json.output)}
-    assert {"cvim", "notify", "cross-review"}.issubset(names)
+    assert {"cvim", "notify", "cross-review", "fork"}.issubset(names)
     assert names["cvim"]["enabled"] is False
 
     enabled = runner.invoke(cli, ["plugin", "enable", "cvim"])

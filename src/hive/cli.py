@@ -31,6 +31,7 @@ _COMMAND_HELP_SECTIONS = {
     "init": "Team Setup",
     "create": "Team Setup",
     "delete": "Team Setup",
+    "fork": "Team Setup",
     "spawn": "Team Setup",
     "workflow": "Team Setup",
     "send": "Communication",
@@ -418,6 +419,54 @@ def _gc_dead_teams() -> None:
             ctx = hive_context.load_current_context()
             if ctx.get("team") == team.name:
                 hive_context.clear_current_context()
+
+
+@cli.command("fork")
+@click.option("--pane", "pane_id", default="", help="Source pane ID (default: auto-detect)")
+@click.option("--split", "-s", type=click.Choice(["auto", "h", "v"]), default="auto", help="Split direction (default: auto-detect from pane dimensions)")
+@click.option("--timeout", default=30, type=int, show_default=True, help="Seconds to wait for droid startup")
+def fork_cmd(pane_id: str, split: str, timeout: int):
+    """Fork the current droid session into a new split pane."""
+    if not tmux.is_inside_tmux():
+        _fail("hive fork requires tmux")
+
+    current_pane = pane_id or tmux.get_current_pane_id()
+    if not current_pane:
+        _fail("cannot determine current pane (pass --pane explicitly)")
+
+    cwd = tmux.display_value(current_pane, "#{pane_current_path}") or os.getcwd()
+
+    if split == "auto":
+        width = int(tmux.display_value(current_pane, "#{pane_width}") or "80")
+        height = int(tmux.display_value(current_pane, "#{pane_height}") or "24")
+        horizontal = width >= height * 3
+    else:
+        horizontal = split == "h"
+
+    record = core_hooks.resolve_session_record(
+        pane_id=current_pane,
+        tty=tmux.get_pane_tty(current_pane) or "",
+    )
+    session_id = record.get("session_id") if record else None
+
+    new_pane = tmux.split_window(current_pane, horizontal=horizontal)
+    fork_ok = False
+
+    try:
+        if session_id:
+            tmux.send_keys(new_pane, f"droid -r {session_id}")
+        else:
+            tmux.send_keys(new_pane, "droid -r")
+
+        if tmux.wait_for_text(new_pane, "for help", timeout=timeout):
+            time.sleep(1)
+            tmux.send_keys(new_pane, "/fork")
+            fork_ok = True
+        else:
+            _fail("droid startup timed out, /fork not sent")
+    finally:
+        if not fork_ok:
+            tmux.kill_pane(new_pane)
 
 
 @cli.command("teams")

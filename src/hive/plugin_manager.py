@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 import time
 from dataclasses import dataclass
 from importlib import resources
@@ -175,6 +176,27 @@ def _install_commands(install_dir: Path) -> list[str]:
     return materialized
 
 
+def _source_tmux_conf(conf: Path) -> bool:
+    if not conf.is_file():
+        return False
+    try:
+        subprocess.run(
+            ["tmux", "source-file", str(conf)],
+            capture_output=True, check=True, timeout=5,
+        )
+        return True
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+
+def _install_tmux_bindings(install_dir: Path) -> bool:
+    return _source_tmux_conf(install_dir / "tmux" / "enable.conf")
+
+
+def _uninstall_tmux_bindings(install_dir: Path) -> bool:
+    return _source_tmux_conf(install_dir / "tmux" / "disable.conf")
+
+
 def _install_skills(install_dir: Path) -> list[str]:
     skills_dir = install_dir / "skills"
     if not skills_dir.is_dir():
@@ -224,6 +246,8 @@ def disable_plugin(name: str, *, missing_ok: bool = False) -> dict[str, object]:
     if isinstance(hook_defs, dict) and hook_defs:
         core_hooks.remove_hook_groups(hook_defs)
     install_root = Path(plugin_state.get("installRoot", "")) if plugin_state.get("installRoot") else None
+    if install_root and plugin_state.get("tmux"):
+        _uninstall_tmux_bindings(install_root)
     if install_root:
         _remove_path(install_root)
     plugins.pop(name, None)
@@ -245,15 +269,19 @@ def enable_plugin(name: str) -> dict[str, object]:
     hook_defs = _plugin_hook_defs(install_dir)
     if hook_defs:
         core_hooks.merge_hook_groups(hook_defs)
+    has_tmux = _install_tmux_bindings(install_dir)
 
     state = _load_state()
-    state.setdefault("plugins", {})[name] = {
+    plugin_state: dict[str, object] = {
         "installRoot": str(install_dir),
         "commands": commands,
         "skills": skills,
         "hooks": hook_defs,
         "enabledAt": int(time.time()),
     }
+    if has_tmux:
+        plugin_state["tmux"] = True
+    state.setdefault("plugins", {})[name] = plugin_state
     _save_state(state)
 
     return {
@@ -263,4 +291,5 @@ def enable_plugin(name: str) -> dict[str, object]:
         "installRoot": str(install_dir),
         "commands": commands,
         "skills": skills,
+        "tmux": has_tmux,
     }
