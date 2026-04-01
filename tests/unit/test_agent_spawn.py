@@ -2,9 +2,8 @@
 
 from hive.agent import (
     Agent,
-    _cleanup_runtime_settings_override,
+    _build_droid_model_settings,
     _detect_new_session,
-    _write_runtime_settings_override,
     detect_current_session_id,
 )
 import json
@@ -116,31 +115,54 @@ def test_load_skill_sends_slash_command(monkeypatch):
     assert calls == ["/skill code-review"]
 
 
-def test_spawn_uses_runtime_settings_override(monkeypatch):
+def test_spawn_droid_uses_process_substitution_for_model(monkeypatch):
     calls = _setup_tmux_mocks(monkeypatch)
-    cleaned: list[str] = []
 
     monkeypatch.setattr(
-        "hive.agent._write_runtime_settings_override",
-        lambda _model: (__import__("pathlib").Path("/tmp/hive-runtime-settings.json"), "custom:Claude-Opus-4.6-0"),
-    )
-    monkeypatch.setattr(
-        "hive.agent._cleanup_runtime_settings_override",
-        lambda path: cleaned.append(str(path) if path else ""),
+        "hive.agent._build_droid_model_settings",
+        lambda _model: ('{"sessionDefaultSettings":{"model":"custom:Claude-Opus-4.6-0"}}', "custom:Claude-Opus-4.6-0"),
     )
 
     Agent.spawn(
         name="w1", team_name="t", target_pane="%0",
         model="custom:claude-opus-4-6", cwd="/tmp", is_first=True,
-        skill="none",
+        skill="none", cli="droid",
     )
 
     startup_cmd = calls[0]
-    assert "--settings '/tmp/hive-runtime-settings.json'" in startup_cmd
-    assert cleaned == ["/tmp/hive-runtime-settings.json"]
+    assert "--settings <(echo" in startup_cmd
+    assert "sessionDefaultSettings" in startup_cmd
 
 
-def test_write_runtime_settings_override_resolves_custom_model(monkeypatch, tmp_path):
+def test_spawn_claude_uses_model_flag(monkeypatch):
+    calls = _setup_tmux_mocks(monkeypatch)
+
+    Agent.spawn(
+        name="w1", team_name="t", target_pane="%0",
+        model="opus", cwd="/tmp", is_first=True,
+        skill="none", cli="claude",
+    )
+
+    startup_cmd = calls[0]
+    assert "--model 'opus'" in startup_cmd
+    assert "claude" in startup_cmd
+
+
+def test_spawn_codex_uses_model_flag(monkeypatch):
+    calls = _setup_tmux_mocks(monkeypatch)
+
+    Agent.spawn(
+        name="w1", team_name="t", target_pane="%0",
+        model="gpt-5.2", cwd="/tmp", is_first=True,
+        skill="none", cli="codex",
+    )
+
+    startup_cmd = calls[0]
+    assert "-m 'gpt-5.2'" in startup_cmd
+    assert "codex" in startup_cmd
+
+
+def test_build_droid_model_settings_resolves_custom_model(monkeypatch, tmp_path):
     settings_file = tmp_path / "settings.json"
     settings_file.write_text(json.dumps({
         "sessionDefaultSettings": {"model": "opus"},
@@ -150,39 +172,99 @@ def test_write_runtime_settings_override_resolves_custom_model(monkeypatch, tmp_
     }))
     monkeypatch.setattr("hive.agent._settings_file", lambda: settings_file)
 
-    runtime_path, resolved = _write_runtime_settings_override("custom:claude-opus-4-6")
+    json_str, resolved = _build_droid_model_settings("custom:claude-opus-4-6")
     assert resolved == "custom:Claude-Opus-4.6-0"
-    assert runtime_path is not None
+    assert json_str
 
-    data = json.loads(runtime_path.read_text())
+    data = json.loads(json_str)
     assert data == {"sessionDefaultSettings": {"model": "custom:Claude-Opus-4.6-0"}}
 
-    original = json.loads(settings_file.read_text())
-    assert original["sessionDefaultSettings"]["model"] == "opus"
 
-    _cleanup_runtime_settings_override(runtime_path)
-    assert not runtime_path.exists()
-
-
-def test_write_runtime_settings_override_keeps_direct_model(monkeypatch, tmp_path):
+def test_build_droid_model_settings_keeps_direct_model(monkeypatch, tmp_path):
     settings_file = tmp_path / "settings.json"
     settings_file.write_text(json.dumps({
         "sessionDefaultSettings": {"model": "custom:my-model"},
     }))
     monkeypatch.setattr("hive.agent._settings_file", lambda: settings_file)
 
-    runtime_path, resolved = _write_runtime_settings_override("custom:my-model")
+    json_str, resolved = _build_droid_model_settings("custom:my-model")
     assert resolved == "custom:my-model"
-    assert runtime_path is not None
-    data = json.loads(runtime_path.read_text())
+    data = json.loads(json_str)
     assert data == {"sessionDefaultSettings": {"model": "custom:my-model"}}
-    _cleanup_runtime_settings_override(runtime_path)
 
 
-def test_write_runtime_settings_override_returns_none_when_model_empty():
-    runtime_path, resolved = _write_runtime_settings_override("")
-    assert runtime_path is None
+def test_build_droid_model_settings_returns_empty_when_no_model():
+    json_str, resolved = _build_droid_model_settings("")
+    assert json_str == ""
     assert resolved == ""
+
+
+def test_spawn_rejects_unknown_cli(monkeypatch):
+    _setup_tmux_mocks(monkeypatch)
+
+    try:
+        Agent.spawn(name="w1", team_name="t", target_pane="%0", cwd="/tmp", skill="none", cli="vim")
+    except ValueError as exc:
+        assert "unsupported cli" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_spawn_droid_resume_uses_dash_r(monkeypatch):
+    calls = _setup_tmux_mocks(monkeypatch)
+
+    Agent.spawn(
+        name="w1", team_name="t", target_pane="%0",
+        cwd="/tmp", is_first=True, skill="none", cli="droid",
+        session_id="sess-abc",
+    )
+
+    startup_cmd = calls[0]
+    assert "-r 'sess-abc'" in startup_cmd
+
+
+def test_spawn_claude_resume_uses_fork_session(monkeypatch):
+    calls = _setup_tmux_mocks(monkeypatch)
+
+    Agent.spawn(
+        name="w1", team_name="t", target_pane="%0",
+        cwd="/tmp", is_first=True, skill="none", cli="claude",
+        session_id="sess-abc",
+    )
+
+    startup_cmd = calls[0]
+    assert "-r 'sess-abc'" in startup_cmd
+    assert "--fork-session" in startup_cmd
+
+
+def test_spawn_codex_resume_uses_fork_subcommand(monkeypatch):
+    calls = _setup_tmux_mocks(monkeypatch)
+
+    Agent.spawn(
+        name="w1", team_name="t", target_pane="%0",
+        cwd="/tmp", is_first=True, skill="none", cli="codex",
+        session_id="sess-abc",
+    )
+
+    startup_cmd = calls[0]
+    assert "codex" in startup_cmd
+    assert "fork" in startup_cmd
+    assert "sess-abc" in startup_cmd
+    # codex fork does not take --model; model flag should not appear
+    assert "-m" not in startup_cmd
+
+
+def test_spawn_claude_skips_droid_session_detection(monkeypatch):
+    calls = _setup_tmux_mocks(monkeypatch)
+    scanned: list[str] = []
+    monkeypatch.setattr("hive.agent._list_sessions", lambda cwd: scanned.append(cwd) or set())
+
+    Agent.spawn(
+        name="w1", team_name="t", target_pane="%0",
+        cwd="/tmp", is_first=True, skill="none", cli="claude",
+    )
+
+    assert scanned == [], "should not scan droid sessions for claude"
 
 
 def test_detect_new_session_matches_resolved_model_id(monkeypatch, tmp_path):

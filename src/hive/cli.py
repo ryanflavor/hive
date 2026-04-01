@@ -784,8 +784,9 @@ def delete(name: str, workspace: str, keep_workspace: bool):
 @click.option("--skill", default="hive", help="Base skill to load after startup ('none' to skip)")
 @click.option("--workflow", default="", help="Workflow skill to load after the base skill")
 @click.option("--env", "-e", multiple=True, help="Extra env vars (KEY=VALUE, repeatable)")
+@click.option("--cli", "cli_name", type=click.Choice(["droid", "claude", "codex"]), default="droid", help="Agent CLI to spawn")
 def spawn(agent_name: str, model: str, prompt: str,
-          color: str, cwd: str, skill: str, workflow: str, env: tuple[str, ...]):
+          color: str, cwd: str, skill: str, workflow: str, env: tuple[str, ...], cli_name: str):
     """Spawn an agent pane."""
     team_name, t = _resolve_scoped_team(None, required=True)
     assert team_name is not None and t is not None
@@ -800,6 +801,7 @@ def spawn(agent_name: str, model: str, prompt: str,
             skill=skill,
             workflow=workflow,
             extra_env=extra_env or None,
+            cli=cli_name,
         )
         hive_context.save_context_for_pane(
             agent.pane_id,

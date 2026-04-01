@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,8 +13,14 @@ from . import tmux
 from .agent_cli import resolve_session_id_for_pane
 
 DROID_BIN = os.environ.get("DROID_PATH", str(Path.home() / ".local" / "bin" / "droid"))
-DROID_STARTUP_TIMEOUT = 30
+AGENT_STARTUP_TIMEOUT = 30
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
+
+CLI_BINS: dict[str, str] = {
+    "droid": DROID_BIN,
+    "claude": "claude",
+    "codex": "codex",
+}
 
 
 def _factory_home() -> Path:
@@ -137,28 +142,16 @@ def _detect_new_session(cwd: str, before: set[str], model: str = "", pane_id: st
     return _select_session_id(cwd, after - before, model=model)
 
 
-def _write_runtime_settings_override(model: str) -> tuple[Path | None, str]:
-    """Create a process-local settings override for interactive droid spawn."""
-    if not model:
-        return None, model
+def _build_droid_model_settings(model: str) -> tuple[str, str]:
+    """Resolve model ID and return inline JSON for --settings process substitution.
 
+    Returns (json_str, resolved_model_id).  Empty json_str when no model given.
+    """
+    if not model:
+        return "", model
     settings = _load_settings()
     target_id = _resolve_model_id(model, settings)
-    payload = {"sessionDefaultSettings": {"model": target_id}}
-
-    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tmp:
-        json.dump(payload, tmp, indent=2, ensure_ascii=False)
-        tmp.write("\n")
-        return Path(tmp.name), target_id
-
-
-def _cleanup_runtime_settings_override(path: Path | None) -> None:
-    if path is None:
-        return
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        pass
+    return json.dumps({"sessionDefaultSettings": {"model": target_id}}), target_id
 
 
 @dataclass
@@ -172,6 +165,7 @@ class Agent:
     cwd: str = field(default_factory=os.getcwd)
     session_id: str | None = None
     spawned_at: float = field(default_factory=time.time)
+    cli: str = "droid"
 
     # --- Lifecycle ---
 
@@ -191,26 +185,47 @@ class Agent:
         split_size: str | None = None,
         skill: str = "hive",
         extra_env: dict[str, str] | None = None,
+        cli: str = "droid",
     ) -> Agent:
-        """Spawn a droid in a tmux pane."""
+        """Spawn an agent CLI (droid/claude/codex) in a tmux pane."""
+        if cli not in CLI_BINS:
+            raise ValueError(f"unsupported cli '{cli}', must be one of: {', '.join(CLI_BINS)}")
         cwd = cwd or os.getcwd()
         if not tmux.is_inside_tmux():
             raise ValueError(_TMUX_REQUIRED_MESSAGE)
 
-        # Snapshot existing sessions to detect the new one after startup
-        sessions_before = _list_sessions(cwd)
-        runtime_settings_path, resolved_model = _write_runtime_settings_override(model)
+        from .agent_cli import get_profile
+        profile = get_profile(cli)
+        ready_text = profile.ready_text if profile else "for help"
+
+        sessions_before = _list_sessions(cwd) if cli == "droid" else set()
+        resolved_model = model
 
         pane_id = tmux.split_window(target_pane, horizontal=split_horizontal, size=split_size)
-
         tmux.set_pane_title(pane_id, f"[{name}]")
         tmux.set_pane_border_color(pane_id, color)
 
-        cmd_parts = ["exec", _shell_escape(DROID_BIN)]
-        if runtime_settings_path is not None:
-            cmd_parts.extend(["--settings", _shell_escape(str(runtime_settings_path))])
+        bin_path = CLI_BINS[cli]
+        cmd_parts = ["exec", _shell_escape(bin_path)]
+
+        if model:
+            if cli == "droid":
+                json_str, resolved_model = _build_droid_model_settings(model)
+                if json_str:
+                    cmd_parts.extend(["--settings", f"<(echo {_shell_escape(json_str)})"])
+            elif cli == "claude":
+                cmd_parts.extend(["--model", _shell_escape(model)])
+            elif cli == "codex":
+                cmd_parts.extend(["-m", _shell_escape(model)])
+
+        # Resume uses the original session's model; no --model flag needed.
         if session_id:
-            cmd_parts.extend(["-r", _shell_escape(session_id)])
+            if cli == "droid":
+                cmd_parts.extend(["-r", _shell_escape(session_id)])
+            elif cli == "claude":
+                cmd_parts.extend(["-r", _shell_escape(session_id), "--fork-session"])
+            elif cli == "codex":
+                cmd_parts = ["exec", _shell_escape(bin_path), "fork", _shell_escape(session_id)]
 
         env_parts: list[str] = []
         if extra_env:
@@ -232,31 +247,30 @@ class Agent:
             color=color,
             cwd=cwd,
             session_id=session_id,
+            cli=cli,
         )
 
-        try:
-            if tmux.wait_for_text(pane_id, "for help", timeout=DROID_STARTUP_TIMEOUT):
+        if tmux.wait_for_text(pane_id, ready_text, timeout=AGENT_STARTUP_TIMEOUT):
+            if cli == "droid":
                 detected_session = _detect_new_session(cwd, sessions_before, model=resolved_model, pane_id=pane_id)
                 if detected_session:
                     agent.session_id = detected_session
 
-                time.sleep(1)
+            time.sleep(1)
 
-                if skill and skill != "none":
-                    agent.load_skill(skill)
+            if skill and skill != "none":
+                agent.load_skill(skill)
 
-                if skill == "hive":
-                    tmux.send_keys(pane_id,
-                        "I am a hive teammate. "
-                        "Use `hive team`, `hive send`, and `hive status-set` to collaborate. "
-                        "Hive messages arrive inline as `<HIVE ...> ... </HIVE>` blocks."
-                    )
-                if prompt:
-                    tmux.send_keys(pane_id, prompt)
+            if skill == "hive":
+                tmux.send_keys(pane_id,
+                    "I am a hive teammate. "
+                    "Use `hive team`, `hive send`, and `hive status-set` to collaborate. "
+                    "Hive messages arrive inline as `<HIVE ...> ... </HIVE>` blocks."
+                )
+            if prompt:
+                tmux.send_keys(pane_id, prompt)
 
-            return agent
-        finally:
-            _cleanup_runtime_settings_override(runtime_settings_path)
+        return agent
 
     # --- Control ---
 
@@ -308,4 +322,5 @@ class Agent:
             "sessionId": self.session_id,
             "spawnedAt": self.spawned_at,
             "isActive": self.is_alive(),
+            "cli": self.cli,
         }

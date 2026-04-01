@@ -129,6 +129,7 @@ class Team:
                 cwd=member.get("cwd", ""),
                 session_id=member.get("sessionId"),
                 spawned_at=member.get("spawnedAt", 0),
+                cli=member.get("cli", "droid"),
             )
             team.agents[agent.name] = agent
 
@@ -194,6 +195,7 @@ class Team:
         skill: str = "hive",
         workflow: str = "",
         extra_env: dict[str, str] | None = None,
+        cli: str = "droid",
     ) -> Agent:
         """Spawn a new agent in the team."""
         if name in self.agents:
@@ -211,7 +213,6 @@ class Team:
             split_horizontal = True
             split_size = "50%"
         else:
-            # Subsequent: split from last agent pane vertically
             last_agent = list(self.agents.values())[-1]
             target = last_agent.pane_id
             split_horizontal = False
@@ -230,6 +231,7 @@ class Team:
             split_size=split_size,
             skill=skill,
             extra_env=extra_env,
+            cli=cli,
         )
 
         if workflow:
