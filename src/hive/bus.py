@@ -57,6 +57,11 @@ def write_status(
     *,
     state: str,
     summary: str = "",
+    activity: str = "",
+    task: str = "",
+    waiting_on: str = "",
+    waiting_for: str = "",
+    blocked_by: str = "",
     metadata: dict[str, str] | None = None,
 ) -> Path:
     path = Path(workspace).expanduser() / "status" / f"{agent_name}.json"
@@ -64,10 +69,21 @@ def write_status(
     payload = {
         "agent": agent_name,
         "state": state,
-        "summary": summary,
         "metadata": metadata or {},
         "updatedAt": _now_iso(),
     }
+    if summary:
+        payload["summary"] = summary
+    if activity:
+        payload["activity"] = activity
+    if task:
+        payload["task"] = task
+    if waiting_on:
+        payload["waitingOn"] = waiting_on
+    if waiting_for:
+        payload["waitingFor"] = waiting_for
+    if blocked_by:
+        payload["blockedBy"] = blocked_by
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
     return path
 

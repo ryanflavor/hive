@@ -23,6 +23,19 @@ def test_teams_lists_known_teams(runner, configure_hive_home, monkeypatch, tmp_p
     assert team_a["members"] == ["orch"]
 
 
+def test_teams_tolerates_missing_created_option(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+
+    assert runner.invoke(cli, ["create", "team-a", "--workspace", str(tmp_path / "ws-a")]).exit_code == 0
+    monkeypatch.setattr("hive.team._find_team_window", lambda _name: ("dev:0", {"workspace": str(tmp_path / "ws-a"), "desc": "", "created": ""}))
+
+    result = runner.invoke(cli, ["teams"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload[0]["name"] == "team-a"
+
+
 def test_use_sets_current_context(runner, configure_hive_home, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"

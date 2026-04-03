@@ -113,7 +113,7 @@ class Team:
             name=name,
             description=window_data.get("desc", ""),
             workspace=window_data.get("workspace", ""),
-            created_at=float(window_data.get("created", 0)),
+            created_at=float(window_data.get("created") or 0),
             tmux_session=window_target.split(":")[0] if ":" in window_target else "",
             tmux_window=window_target,
         )

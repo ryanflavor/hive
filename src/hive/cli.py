@@ -87,6 +87,8 @@ hive notify "处理完成了，回来确认一下"'''
 
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
 _TMUX_OPTIONAL_ROOT_COMMANDS = {"plugin", "_notify-hook"}
+_STATUS_STATES = ("idle", "busy", "waiting_input", "blocked", "done", "failed")
+_MESSAGE_INTENTS = ("send", "notify", "ask", "reply")
 
 
 class SectionedHelpGroup(click.Group):
@@ -326,11 +328,36 @@ def _resolve_target_pane() -> str:
     return ""
 
 
-def _format_hive_envelope(*, from_agent: str, to_agent: str, body: str, artifact: str = "") -> str:
-    header = f"<HIVE from={from_agent} to={to_agent}"
+def _new_message_id() -> str:
+    return f"msg-{secrets.token_hex(8)}"
+
+
+def _format_hive_envelope(
+    *,
+    from_agent: str,
+    to_agent: str,
+    body: str,
+    artifact: str = "",
+    message_id: str = "",
+    intent: str = "",
+    reply_to: str = "",
+) -> str:
+    attrs: list[tuple[str, str]] = []
+    if message_id or intent or reply_to:
+        attrs.append(("protocol", "2"))
+    if message_id:
+        attrs.append(("id", message_id))
+    attrs.extend([
+        ("from", from_agent),
+        ("to", to_agent),
+    ])
+    if intent:
+        attrs.append(("intent", intent))
+    if reply_to:
+        attrs.append(("replyTo", reply_to))
     if artifact:
-        header += f" artifact={artifact}"
-    header += ">"
+        attrs.append(("artifact", artifact))
+    header = "<HIVE " + " ".join(f"{key}={value}" for key, value in attrs) + ">"
     payload = body.strip() if body.strip() else "(no message)"
     return f"{header}\n{payload}\n</HIVE>"
 
@@ -882,41 +909,75 @@ def who():
 
 
 @cli.command("status-set")
-@click.argument("state")
+@click.argument("state", type=click.Choice(_STATUS_STATES, case_sensitive=False))
 @click.argument("summary", required=False, default="")
 @click.option("--agent", "agent_name", default=None, help=f"Agent name (default: current tmux binding or {LEAD_AGENT_NAME})")
+@click.option("--task", default="", help="Structured task identifier")
+@click.option("--activity", default="", help="Short current activity label")
+@click.option("--waiting-on", default="", help="Agent or dependency currently being waited on")
+@click.option("--waiting-for", default="", help="Message or dependency ID currently being waited on")
+@click.option("--blocked-by", default="", help="Short blocker identifier")
 @click.option("--meta", "metadata_entries", multiple=True, help="Metadata KEY=VALUE")
 def status_set(
     state: str,
     summary: str,
     agent_name: str | None,
+    task: str,
+    activity: str,
+    waiting_on: str,
+    waiting_for: str,
+    blocked_by: str,
     metadata_entries: tuple[str, ...],
 ):
     """Publish a collaboration status."""
     team_name, t = _resolve_scoped_team(None, required=True)
     ws = _resolve_workspace(t, required=True)
     sender = _resolve_sender(agent_name)
+    normalized_state = state.lower()
+    legacy_summary = summary.strip()
+    resolved_activity = activity.strip()
+    structured_fields_used = any([task, resolved_activity, waiting_on, waiting_for, blocked_by])
+    if legacy_summary and resolved_activity:
+        _fail("use either the legacy summary argument or --activity, not both")
+    if not resolved_activity and structured_fields_used:
+        resolved_activity = legacy_summary
+    if normalized_state == "waiting_input" and not (waiting_on or waiting_for):
+        _fail("waiting_input requires --waiting-on or --waiting-for")
+    if normalized_state == "blocked" and not blocked_by:
+        _fail("blocked requires --blocked-by")
     metadata = _parse_entries(metadata_entries)
     path = bus.write_status(
         ws,
         sender,
-        state=state,
-        summary=summary,
+        state=normalized_state,
+        summary=legacy_summary if not structured_fields_used else (legacy_summary or resolved_activity),
+        activity=resolved_activity if structured_fields_used else "",
+        task=task,
+        waiting_on=waiting_on,
+        waiting_for=waiting_for,
+        blocked_by=blocked_by,
         metadata=metadata,
     )
-    click.echo(
-        json.dumps(
-            {
-                "agent": sender,
-                "state": state,
-                "summary": summary,
-                "metadata": metadata,
-                "path": str(path),
-            },
-            indent=2,
-            ensure_ascii=False,
-        )
-    )
+    response: dict[str, object] = {
+        "agent": sender,
+        "state": normalized_state,
+        "metadata": metadata,
+        "path": str(path),
+    }
+    if legacy_summary or resolved_activity:
+        response["summary"] = legacy_summary or resolved_activity
+    if structured_fields_used:
+        if resolved_activity:
+            response["activity"] = resolved_activity
+        if task:
+            response["task"] = task
+        if waiting_on:
+            response["waitingOn"] = waiting_on
+        if waiting_for:
+            response["waitingFor"] = waiting_for
+        if blocked_by:
+            response["blockedBy"] = blocked_by
+    click.echo(json.dumps(response, indent=2, ensure_ascii=False))
 
 
 @cli.command("status")
@@ -958,11 +1019,17 @@ def status_show(agent_name: str | None):
 @click.argument("to_agent")
 @click.argument("body", required=False, default="")
 @click.option("--from", "from_agent", default=None, help=f"Sender agent name (default: current tmux binding or {LEAD_AGENT_NAME})")
+@click.option("--intent", type=click.Choice(_MESSAGE_INTENTS, case_sensitive=False), default="send", show_default=True, help="Structured message intent")
+@click.option("--reply-to", default="", help="Structured reply target message ID")
+@click.option("--message-id", default="", help="Structured message ID override")
 @click.option("--artifact", default="", help="Artifact path for large payloads")
 def send(
     to_agent: str,
     body: str,
     from_agent: str | None,
+    intent: str,
+    reply_to: str,
+    message_id: str,
     artifact: str,
 ):
     """Send a Hive message envelope."""
@@ -970,6 +1037,13 @@ def send(
     assert team_name is not None and t is not None
     sender = _resolve_sender(from_agent)
     target = _resolve_live_agent(t, to_agent)
+    normalized_intent = intent.lower()
+    if normalized_intent == "reply" and not reply_to:
+        _fail("--intent reply requires --reply-to")
+    if reply_to and normalized_intent != "reply":
+        _fail("--reply-to can only be used with --intent reply")
+    structured_send = bool(reply_to or message_id or normalized_intent != "send")
+    resolved_message_id = message_id or (_new_message_id() if structured_send else "")
     resolved_artifact = str(Path(artifact).expanduser()) if artifact else ""
     if resolved_artifact and not Path(resolved_artifact).exists():
         _fail(f"artifact not found: {resolved_artifact}")
@@ -978,9 +1052,28 @@ def send(
         to_agent=to_agent,
         body=body,
         artifact=resolved_artifact,
+        message_id=resolved_message_id,
+        intent=normalized_intent if structured_send else "",
+        reply_to=reply_to,
     )
     target.send(envelope)
-    click.echo(f"Sent HIVE message to {to_agent}.")
+    if not structured_send:
+        click.echo(f"Sent HIVE message to {to_agent}.")
+        return
+    click.echo(
+        json.dumps(
+            {
+                "messageId": resolved_message_id,
+                "intent": normalized_intent,
+                "from": sender,
+                "to": to_agent,
+                "replyTo": reply_to,
+                "artifact": resolved_artifact,
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
 
 
 @cli.command()

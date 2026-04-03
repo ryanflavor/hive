@@ -93,6 +93,92 @@ def test_status_set_show_and_wait_status(runner, configure_hive_home, monkeypatc
     assert payload["metadata"]["artifact"] == "/tmp/review.md"
 
 
+def test_status_set_supports_structured_fields(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    assert runner.invoke(cli, ["create", "team-status", "--workspace", str(workspace)]).exit_code == 0
+
+    class _FakeTeam:
+        def __init__(self):
+            self.name = "team-status"
+            self.workspace = str(workspace)
+            self.tmux_session = "dev"
+            self.tmux_window = "dev:0"
+            self.lead_name = "orch"
+
+        def status(self) -> dict:
+            return {"members": [{"name": "orch"}, {"name": "claude"}]}
+
+    monkeypatch.setattr("hive.cli._load_team", lambda _team: _FakeTeam())
+
+    result = runner.invoke(
+        cli,
+        [
+            "status-set",
+            "waiting_input",
+            "wait-reply",
+            "--agent",
+            "claude",
+            "--task",
+            "protocol-redesign",
+            "--waiting-on",
+            "orch",
+            "--waiting-for",
+            "msg-123",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["state"] == "waiting_input"
+    assert payload["summary"] == "wait-reply"
+    assert payload["activity"] == "wait-reply"
+    assert payload["task"] == "protocol-redesign"
+    assert payload["waitingOn"] == "orch"
+    assert payload["waitingFor"] == "msg-123"
+
+    show_result = runner.invoke(cli, ["status", "--agent", "claude"])
+    assert show_result.exit_code == 0
+    shown = json.loads(show_result.output)
+    assert shown["activity"] == "wait-reply"
+    assert shown["task"] == "protocol-redesign"
+    assert shown["waitingOn"] == "orch"
+    assert shown["waitingFor"] == "msg-123"
+
+
+def test_status_set_validates_structured_waiting_and_blocked_states(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    assert runner.invoke(cli, ["create", "team-status", "--workspace", str(workspace)]).exit_code == 0
+
+    class _FakeTeam:
+        def __init__(self):
+            self.name = "team-status"
+            self.workspace = str(workspace)
+            self.tmux_session = "dev"
+            self.tmux_window = "dev:0"
+            self.lead_name = "orch"
+
+        def status(self) -> dict:
+            return {"members": [{"name": "orch"}, {"name": "claude"}]}
+
+    monkeypatch.setattr("hive.cli._load_team", lambda _team: _FakeTeam())
+
+    waiting_result = runner.invoke(
+        cli,
+        ["status-set", "waiting_input", "--agent", "claude"],
+    )
+    assert waiting_result.exit_code != 0
+    assert "waiting_input requires --waiting-on or --waiting-for" in waiting_result.output
+
+    blocked_result = runner.invoke(
+        cli,
+        ["status-set", "blocked", "--agent", "claude"],
+    )
+    assert blocked_result.exit_code != 0
+    assert "blocked requires --blocked-by" in blocked_result.output
+
+
 def test_status_without_agent_returns_all_statuses(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"

@@ -73,6 +73,37 @@ def test_write_and_read_status_round_trip(tmp_path, monkeypatch):
     }
 
 
+def test_write_and_read_structured_status_round_trip(tmp_path, monkeypatch):
+    monkeypatch.setattr("hive.bus._now_iso", lambda: "2026-03-17T10:00:00Z")
+    workspace = bus.init_workspace(tmp_path / "ws")
+
+    path = bus.write_status(
+        workspace,
+        "claude",
+        state="waiting_input",
+        summary="wait-reply",
+        activity="wait-reply",
+        task="protocol-redesign",
+        waiting_on="orch",
+        waiting_for="msg-123",
+        metadata={"artifact": "/tmp/review.md"},
+    )
+
+    assert path == workspace / "status" / "claude.json"
+    payload = bus.read_status(workspace, "claude")
+    assert payload == {
+        "agent": "claude",
+        "state": "waiting_input",
+        "summary": "wait-reply",
+        "activity": "wait-reply",
+        "task": "protocol-redesign",
+        "waitingOn": "orch",
+        "waitingFor": "msg-123",
+        "metadata": {"artifact": "/tmp/review.md"},
+        "updatedAt": "2026-03-17T10:00:00Z",
+    }
+
+
 def test_read_status_returns_none_when_missing(tmp_path):
     assert bus.read_status(tmp_path / "missing", "claude") is None
 
