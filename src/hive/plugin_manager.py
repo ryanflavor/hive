@@ -255,19 +255,6 @@ def disable_plugin(name: str, *, missing_ok: bool = False) -> dict[str, object]:
     return {"name": name, "enabled": False}
 
 
-def refresh_enabled_plugins() -> list[dict[str, object]]:
-    """Re-enable every currently enabled plugin to pick up package updates."""
-    state = _load_state()
-    names = list(state.get("plugins", {}).keys())
-    results: list[dict[str, object]] = []
-    for name in names:
-        try:
-            results.append(enable_plugin(name))
-        except ValueError:
-            pass
-    return results
-
-
 def enable_plugin(name: str) -> dict[str, object]:
     manifest = load_manifest(name)
     disable_plugin(name, missing_ok=True)

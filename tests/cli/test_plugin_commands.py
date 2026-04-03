@@ -122,29 +122,6 @@ def test_plugin_enable_cross_review_materializes_skill(runner, configure_hive_ho
     assert json.loads(enabled_json.output)["enabled"] is True
 
 
-def test_plugin_refresh_reinstalls_all_enabled(runner, configure_hive_home):
-    hive_home = configure_hive_home(tmux_inside=False)
-    factory_home = hive_home.parent / ".factory"
-
-    runner.invoke(cli, ["plugin", "enable", "code-review"])
-    skill_md = hive_home / "plugins" / "installed" / "code-review" / "skills" / "code-review" / "SKILL.md"
-    assert skill_md.exists()
-    original = skill_md.read_text()
-    skill_md.write_text("stale content")
-
-    result = runner.invoke(cli, ["plugin", "refresh"])
-    assert result.exit_code == 0
-    assert "code-review" in result.output
-    assert "refreshed" in result.output
-    assert skill_md.read_text() == original
-
-    result_json = runner.invoke(cli, ["plugin", "refresh", "--json"])
-    assert result_json.exit_code == 0
-    payloads = json.loads(result_json.output)
-    names = [p["name"] for p in payloads]
-    assert "code-review" in names
-
-
 def test_plugin_enable_notify_materializes_command_and_hooks(runner, configure_hive_home):
     hive_home = configure_hive_home(tmux_inside=False)
     factory_home = hive_home.parent / ".factory"
