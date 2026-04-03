@@ -1167,6 +1167,21 @@ def plugin_list(json_output: bool) -> None:
         click.echo(f"  {str(row.get('name', '')):<{name_width}}  {status:<8}  {row.get('description', '')}")
 
 
+@plugin.command("refresh")
+@click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON")
+def plugin_refresh(json_output: bool) -> None:
+    """Re-enable all enabled plugins to pick up package updates."""
+    results = plugin_manager.refresh_enabled_plugins()
+    if json_output:
+        click.echo(json.dumps(results, ensure_ascii=False))
+        return
+    if not results:
+        click.echo("No enabled plugins to refresh.")
+        return
+    for payload in results:
+        click.echo(_render_plugin_mutation_result("refreshed", payload))
+
+
 @plugin.command("enable")
 @click.argument("name")
 @click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON")
