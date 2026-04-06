@@ -10,18 +10,21 @@ import json
 
 def _setup_tmux_mocks(monkeypatch):
     calls: list[str] = []
+    tags: list[tuple[object, ...]] = []
 
     monkeypatch.setattr("hive.agent.tmux.is_inside_tmux", lambda: True)
     monkeypatch.setattr("hive.agent.tmux.split_window", lambda target, horizontal=True, size=None, cwd=None: target)
     monkeypatch.setattr("hive.agent.tmux.get_pane_tty", lambda _pane: None)
     monkeypatch.setattr("hive.agent.tmux.set_pane_title", lambda *_: None)
     monkeypatch.setattr("hive.agent.tmux.set_pane_border_color", lambda *_: None)
+    monkeypatch.setattr("hive.agent.tmux.tag_pane", lambda *args, **_kwargs: tags.append(args))
     monkeypatch.setattr("hive.agent.tmux.wait_for_text", lambda *_args, **_kw: True)
+    monkeypatch.setattr("hive.agent.tmux.wait_for_texts", lambda *_args, **_kw: True)
     monkeypatch.setattr("hive.agent.tmux.send_keys", lambda _pane, text: calls.append(text))
     monkeypatch.setattr("hive.agent.resolve_session_id_for_pane", lambda _pane: None)
     monkeypatch.setattr("hive.agent.time.sleep", lambda *_: None)
 
-    return calls
+    return calls, tags
 
 
 def test_spawn_rejects_outside_tmux(monkeypatch):
@@ -36,7 +39,7 @@ def test_spawn_rejects_outside_tmux(monkeypatch):
 
 
 def test_spawn_loads_specified_skill(monkeypatch):
-    calls = _setup_tmux_mocks(monkeypatch)
+    calls, _ = _setup_tmux_mocks(monkeypatch)
 
     Agent.spawn(
         name="w1", team_name="t", target_pane="%0",
@@ -50,7 +53,7 @@ def test_spawn_loads_specified_skill(monkeypatch):
 
 
 def test_spawn_skips_skill_when_none(monkeypatch):
-    calls = _setup_tmux_mocks(monkeypatch)
+    calls, _ = _setup_tmux_mocks(monkeypatch)
 
     Agent.spawn(
         name="w1", team_name="t", target_pane="%0",
@@ -61,7 +64,7 @@ def test_spawn_skips_skill_when_none(monkeypatch):
 
 
 def test_spawn_passes_extra_env(monkeypatch):
-    calls = _setup_tmux_mocks(monkeypatch)
+    calls, _ = _setup_tmux_mocks(monkeypatch)
 
     Agent.spawn(
         name="w1", team_name="t", target_pane="%0",
@@ -77,7 +80,7 @@ def test_spawn_passes_extra_env(monkeypatch):
 
 
 def test_spawn_without_extra_env_does_not_export_default_hive_vars(monkeypatch):
-    calls = _setup_tmux_mocks(monkeypatch)
+    calls, _ = _setup_tmux_mocks(monkeypatch)
 
     Agent.spawn(
         name="w1", team_name="t", target_pane="%0",
@@ -91,7 +94,7 @@ def test_spawn_without_extra_env_does_not_export_default_hive_vars(monkeypatch):
 
 
 def test_spawn_hive_bootstraps_and_sends_prompt(monkeypatch):
-    calls = _setup_tmux_mocks(monkeypatch)
+    calls, _ = _setup_tmux_mocks(monkeypatch)
 
     Agent.spawn(
         name="w1", team_name="t", target_pane="%0",
@@ -105,8 +108,23 @@ def test_spawn_hive_bootstraps_and_sends_prompt(monkeypatch):
     assert "Please check your inbox." in calls
 
 
+def test_spawn_hive_can_skip_bootstrap_message(monkeypatch):
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+
+    Agent.spawn(
+        name="w1", team_name="t", target_pane="%0",
+        cwd="/tmp", is_first=True, skill="hive",
+        prompt="Please check your inbox.",
+        send_bootstrap_prompt=False,
+    )
+
+    assert "/hive" in calls
+    assert not any("Use `hive team`, `hive send`, and `hive status-set`" in c for c in calls)
+    assert "Please check your inbox." in calls
+
+
 def test_load_skill_sends_slash_command(monkeypatch):
-    calls = _setup_tmux_mocks(monkeypatch)
+    calls, _ = _setup_tmux_mocks(monkeypatch)
     agent = Agent(name="w1", team_name="t", pane_id="%0")
 
     agent.load_skill("code-review")
@@ -114,8 +132,17 @@ def test_load_skill_sends_slash_command(monkeypatch):
     assert calls == ["/code-review"]
 
 
-def test_spawn_droid_uses_process_substitution_for_model(monkeypatch):
-    calls = _setup_tmux_mocks(monkeypatch)
+def test_load_skill_uses_cli_specific_command(monkeypatch):
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    agent = Agent(name="w1", team_name="t", pane_id="%0", cli="codex")
+
+    agent.load_skill("code-review")
+
+    assert calls == ["$code-review"]
+
+
+def test_spawn_droid_uses_temp_settings_file_for_model(monkeypatch):
+    calls, tags = _setup_tmux_mocks(monkeypatch)
 
     monkeypatch.setattr(
         "hive.agent._build_droid_model_settings",
@@ -129,12 +156,27 @@ def test_spawn_droid_uses_process_substitution_for_model(monkeypatch):
     )
 
     startup_cmd = calls[0]
-    assert "--settings <(echo" in startup_cmd
+    assert "settings_file=$(mktemp -t hive-droid-settings)" in startup_cmd
+    assert "--settings \"$settings_file\"" in startup_cmd
     assert "sessionDefaultSettings" in startup_cmd
+    assert tags == [("%0", "agent", "w1", "t")]
+
+
+def test_spawn_tags_pane_before_waiting_for_ready(monkeypatch):
+    calls, tags = _setup_tmux_mocks(monkeypatch)
+    monkeypatch.setattr("hive.agent.tmux.wait_for_texts", lambda *_args, **_kw: False)
+
+    Agent.spawn(
+        name="w1", team_name="t", target_pane="%9",
+        cwd="/tmp", is_first=True, skill="none", cli="droid",
+    )
+
+    assert calls, "spawn should still start the CLI process"
+    assert tags == [("%9", "agent", "w1", "t")]
 
 
 def test_spawn_claude_uses_model_flag(monkeypatch):
-    calls = _setup_tmux_mocks(monkeypatch)
+    calls, _ = _setup_tmux_mocks(monkeypatch)
 
     Agent.spawn(
         name="w1", team_name="t", target_pane="%0",
@@ -148,7 +190,7 @@ def test_spawn_claude_uses_model_flag(monkeypatch):
 
 
 def test_spawn_codex_uses_model_flag(monkeypatch):
-    calls = _setup_tmux_mocks(monkeypatch)
+    calls, _ = _setup_tmux_mocks(monkeypatch)
 
     Agent.spawn(
         name="w1", team_name="t", target_pane="%0",
@@ -210,7 +252,7 @@ def test_spawn_rejects_unknown_cli(monkeypatch):
 
 
 def test_spawn_droid_resume_uses_dash_r(monkeypatch):
-    calls = _setup_tmux_mocks(monkeypatch)
+    calls, _ = _setup_tmux_mocks(monkeypatch)
 
     Agent.spawn(
         name="w1", team_name="t", target_pane="%0",
@@ -223,7 +265,7 @@ def test_spawn_droid_resume_uses_dash_r(monkeypatch):
 
 
 def test_spawn_claude_resume_uses_fork_session(monkeypatch):
-    calls = _setup_tmux_mocks(monkeypatch)
+    calls, _ = _setup_tmux_mocks(monkeypatch)
 
     Agent.spawn(
         name="w1", team_name="t", target_pane="%0",
@@ -237,7 +279,7 @@ def test_spawn_claude_resume_uses_fork_session(monkeypatch):
 
 
 def test_spawn_codex_resume_uses_fork_subcommand(monkeypatch):
-    calls = _setup_tmux_mocks(monkeypatch)
+    calls, _ = _setup_tmux_mocks(monkeypatch)
 
     Agent.spawn(
         name="w1", team_name="t", target_pane="%0",
@@ -254,7 +296,7 @@ def test_spawn_codex_resume_uses_fork_subcommand(monkeypatch):
 
 
 def test_spawn_claude_skips_droid_session_detection(monkeypatch):
-    calls = _setup_tmux_mocks(monkeypatch)
+    calls, _ = _setup_tmux_mocks(monkeypatch)
     resolved: list[str] = []
     monkeypatch.setattr("hive.agent.resolve_session_id_for_pane", lambda pane_id: resolved.append(pane_id) or None)
 

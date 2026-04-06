@@ -15,7 +15,4 @@ export DROID_VIM_SEED_MODE=session
 export DROID_VIM_OUTPUT_MODE=diff
 export DROID_VIM_CURSOR_MODE=start
 export DROID_VIM_TRANSPORT=popup
-export DROID_VIM_POPUP_MODE=center
-export DROID_VIM_POPUP_WIDTH=70%
-export DROID_VIM_POPUP_HEIGHT=74%
 exec "${HIVE_PLUGIN_ROOT}/bin/droid-vim-command" "$@"

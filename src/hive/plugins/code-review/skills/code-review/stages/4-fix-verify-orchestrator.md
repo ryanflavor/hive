@@ -22,7 +22,7 @@ CTX_JSON=$(hive current)
 WORKSPACE=$(printf '%s' "$CTX_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("workspace",""))')
 
 printf '%s' '1' > "$WORKSPACE/state/s4-round"
-hive status-set busy "stage-4" --task code-review --activity fix-verify-round-1
+hive status-set busy --task code-review --activity fix-verify-round-1
 
 hive send opus "阶段 4：读取 ~/.factory/skills/code-review/stages/4-fix-verify-opus.md，按共识 artifact 修复问题。完成后用 --meta stage=s4 --meta role=fix --meta round=1 回传。"
 ```

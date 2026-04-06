@@ -30,7 +30,7 @@ cat > "$INPUT_ARTIFACT" <<EOF
 (粘贴或概括 $WORKSPACE/artifacts/codex-r1.md)
 EOF
 
-hive status-set busy "stage-3" --task code-review --activity launch-cross-confirm
+hive status-set busy --task code-review --activity launch-cross-confirm
 hive send opus "阶段 3：读取 ~/.factory/skills/code-review/stages/3-cross-confirm-opus.md，并基于 $INPUT_ARTIFACT 与 Codex 达成共识。完成后用 status-set done 回传，带上 --meta stage=s3 --meta artifact=<consensus-artifact> --meta result=<fix|skip|deadlock>"
 ```
 

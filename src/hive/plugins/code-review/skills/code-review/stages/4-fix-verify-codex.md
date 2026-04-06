@@ -33,5 +33,5 @@ pass / fail
 ## 回传
 
 ```bash
-hive status-set done "verify round complete"           --task code-review           --activity verify-round-done           --meta stage=s4           --meta role=verify           --meta round=<n>           --meta result=<pass|fail>           --meta artifact=/tmp/hive-xxx/artifacts/s4-verify-round-<n>.md
+hive status-set done "verify round complete"           --task code-review           --meta stage=s4           --meta role=verify           --meta round=<n>           --meta result=<pass|fail>           --meta artifact=/tmp/hive-xxx/artifacts/s4-verify-round-<n>.md
 ```

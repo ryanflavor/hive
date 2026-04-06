@@ -121,6 +121,7 @@ class Agent:
         skill: str = "hive",
         extra_env: dict[str, str] | None = None,
         cli: str = "droid",
+        send_bootstrap_prompt: bool = True,
     ) -> Agent:
         """Spawn an agent CLI (droid/claude/codex) in a tmux pane."""
         if cli not in CLI_BINS:
@@ -138,15 +139,21 @@ class Agent:
         pane_id = tmux.split_window(target_pane, horizontal=split_horizontal, size=split_size)
         tmux.set_pane_title(pane_id, f"[{name}]")
         tmux.set_pane_border_color(pane_id, color)
+        tmux.tag_pane(pane_id, "agent", name, team_name, model=model, cli=cli, color=color)
 
         bin_path = CLI_BINS[cli]
         cmd_parts = ["exec", _shell_escape(bin_path)]
+        pre_cmd_parts: list[str] = []
 
-        if model:
+        if model and not session_id:
             if cli == "droid":
                 json_str, resolved_model = _build_droid_model_settings(model)
                 if json_str:
-                    cmd_parts.extend(["--settings", f"<(echo {_shell_escape(json_str)})"])
+                    pre_cmd_parts.extend([
+                        "settings_file=$(mktemp -t hive-droid-settings)",
+                        f"printf '%s' {_shell_escape(json_str)} > \"$settings_file\"",
+                    ])
+                    cmd_parts.extend(["--settings", "\"$settings_file\""])
             elif cli == "claude":
                 cmd_parts.extend(["--model", _shell_escape(model)])
             elif cli == "codex":
@@ -169,6 +176,8 @@ class Agent:
         cmd = f"cd {_shell_escape(cwd)}"
         if env_parts:
             cmd = f"{cmd} && export {' '.join(env_parts)}"
+        if pre_cmd_parts:
+            cmd = f"{cmd} && {' && '.join(pre_cmd_parts)}"
         cmd = f"{cmd} && {' '.join(cmd_parts)}"
         tmux.send_keys(pane_id, cmd)
 
@@ -195,7 +204,7 @@ class Agent:
             if skill and skill != "none":
                 agent.load_skill(skill)
 
-            if skill == "hive":
+            if skill == "hive" and send_bootstrap_prompt:
                 tmux.send_keys(pane_id,
                     "I am a hive teammate. "
                     "Use `hive team`, `hive send`, and `hive status-set` to collaborate. "

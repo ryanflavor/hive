@@ -441,29 +441,34 @@ def list_panes_with_titles(target: str) -> list[PaneInfo]:
     return result
 
 
-_HIVE_FMT = "\t".join([
-    "#{pane_id}", "#{pane_title}", "#{pane_current_command}",
-    "#{@hive-role}", "#{@hive-agent}", "#{@hive-team}",
-    "#{@hive-model}", "#{@hive-cli}", "#{@hive-color}",
+_PANE_BASE_FMT = "\t".join([
+    "#{pane_id}",
+    "#{pane_title}",
+    "#{pane_current_command}",
 ])
-
-_HIVE_FMT_FIELD_COUNT = 9
 
 
 def list_panes_full(target: str) -> list[PaneInfo]:
     """List all panes with command and hive identity (@hive-*)."""
-    r = _run(["list-panes", "-t", target, "-F", _HIVE_FMT], check=False)
+    r = _run(["list-panes", "-t", target, "-F", _PANE_BASE_FMT], check=False)
     result = []
     for line in r.stdout.strip().split("\n"):
         if not line:
             continue
         parts = line.split("\t")
-        while len(parts) < _HIVE_FMT_FIELD_COUNT:
+        while len(parts) < 3:
             parts.append("")
+        pane_id = parts[0]
         result.append(PaneInfo(
-            pane_id=parts[0], title=parts[1], command=parts[2],
-            role=parts[3], agent=parts[4], team=parts[5],
-            model=parts[6], cli=parts[7], color=parts[8],
+            pane_id=pane_id,
+            title=parts[1],
+            command=parts[2],
+            role=get_pane_option(pane_id, "hive-role") or "",
+            agent=get_pane_option(pane_id, "hive-agent") or "",
+            team=get_pane_option(pane_id, "hive-team") or "",
+            model=get_pane_option(pane_id, "hive-model") or "",
+            cli=get_pane_option(pane_id, "hive-cli") or "",
+            color=get_pane_option(pane_id, "hive-color") or "",
         ))
     return result
 
@@ -475,7 +480,9 @@ def set_pane_option(pane_id: str, key: str, value: str) -> None:
 
 
 def get_pane_option(pane_id: str, key: str) -> str | None:
-    r = _run(["display-message", "-t", pane_id, "-p", f"#{{@{key}}}"], check=False)
+    r = _run(["show-options", "-p", "-v", "-t", pane_id, f"@{key}"], check=False)
+    if r.returncode != 0:
+        return None
     val = r.stdout.strip()
     return val or None
 
@@ -516,10 +523,20 @@ def wait_for_text(
     interval: float = 1,
 ) -> bool:
     """Wait until text appears in pane output."""
+    return wait_for_texts(pane_id, (text,), timeout=timeout, interval=interval)
+
+
+def wait_for_texts(
+    pane_id: str,
+    texts: tuple[str, ...],
+    timeout: float = 30,
+    interval: float = 1,
+) -> bool:
+    """Wait until any text appears in pane output."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         output = capture_pane(pane_id)
-        if text in output:
+        if any(text in output for text in texts):
             return True
         time.sleep(interval)
     return False

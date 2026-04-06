@@ -74,7 +74,6 @@ gh pr comment <number> --body-file "$WORKSPACE/artifacts/review-summary.md"
 ```bash
 hive status-set done "review workflow complete" \
   --task code-review \
-  --activity summary-done \
   --meta stage=s5 \
   --meta artifact=/tmp/hive-xxx/artifacts/review-summary.md
 ```

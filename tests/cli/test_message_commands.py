@@ -203,28 +203,6 @@ def test_inject_delegates_to_agent(runner, configure_hive_home, monkeypatch):
     assert "Injected raw input into claude." in result.output
 
 
-def test_type_alias_still_works(runner, configure_hive_home, monkeypatch):
-    configure_hive_home()
-    sent: list[str] = []
-
-    class _FakeAgent:
-        def send(self, text: str) -> None:
-            sent.append(text)
-
-    class _FakeTeam:
-        tmux_session = "dev"
-        tmux_window = "dev:0"
-
-        def get(self, _name: str):
-            return _FakeAgent()
-
-    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
-
-    result = runner.invoke(cli, ["type", "claude", "plain prompt"])
-    assert result.exit_code == 0
-    assert sent == ["plain prompt"]
-
-
 def test_capture_reads_agent_output(runner, configure_hive_home, monkeypatch):
     configure_hive_home()
     class _FakeAgent:

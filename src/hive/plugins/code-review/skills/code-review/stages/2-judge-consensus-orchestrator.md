@@ -26,7 +26,7 @@
 CTX_JSON=$(hive current)
 WORKSPACE=$(printf '%s' "$CTX_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("workspace",""))')
 
-hive status-set busy "stage-2" --task code-review --activity judge-consensus
+hive status-set busy --task code-review --activity judge-consensus
 
 # 人工分析 opus-r1.md 与 codex-r1.md 后记录结果
 printf '%s' 'both_ok' > "$WORKSPACE/state/s2-result"   # 或 same_issues / divergent

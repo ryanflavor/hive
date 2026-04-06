@@ -171,10 +171,23 @@ def test_current_window_helpers_return_none_without_tmux_pane(monkeypatch):
 def test_list_panes_with_titles_and_full_parse_rows(monkeypatch):
     outputs = {
         "#{pane_id}\t#{pane_title}": "%1\tmain\n%2\tworker\n",
-        tmux._HIVE_FMT: "%1\tmain\tdroid\tagent\tclaude\tteam-a\n%2\tshell\tzsh\tterminal\tterm-1\tteam-a\n",
+        tmux._PANE_BASE_FMT: "%1\tmain\tdroid\n%2\tshell\tzsh\n",
+    }
+    pane_options = {
+        ("%1", "@hive-role"): "agent\n",
+        ("%1", "@hive-agent"): "claude\n",
+        ("%1", "@hive-team"): "team-a\n",
+        ("%2", "@hive-role"): "terminal\n",
+        ("%2", "@hive-agent"): "term-1\n",
+        ("%2", "@hive-team"): "team-a\n",
     }
 
     def _fake_run(args, check=False, timeout=5):
+        if args[0] == "show-options":
+            key = (args[4], args[5])
+            if key not in pane_options:
+                return subprocess.CompletedProcess(["tmux", *args], 1, "", "")
+            return subprocess.CompletedProcess(["tmux", *args], 0, pane_options[key], "")
         fmt = args[-1]
         return subprocess.CompletedProcess(["tmux", *args], 0, outputs[fmt], "")
 
@@ -193,7 +206,7 @@ def test_pane_option_helpers_and_tagging(monkeypatch):
 
     def _fake_run(args, check=False, timeout=5):
         calls.append(tuple(args))
-        stdout = "value\n" if args[0] == "display-message" else ""
+        stdout = "value\n" if args[0] == "show-options" else ""
         return subprocess.CompletedProcess(["tmux", *args], 0, stdout, "")
 
     monkeypatch.setattr("hive.tmux._run", _fake_run)
@@ -205,7 +218,7 @@ def test_pane_option_helpers_and_tagging(monkeypatch):
     tmux.clear_pane_tags("%1")
 
     assert calls[0] == ("set-option", "-p", "-t", "%1", "@hive-role", "agent")
-    assert calls[1] == ("display-message", "-t", "%1", "-p", "#{@hive-role}")
+    assert calls[1] == ("show-options", "-p", "-v", "-t", "%1", "@hive-role")
     assert calls[2] == ("set-option", "-p", "-t", "%1", "-u", "@hive-role")
     assert ("set-option", "-p", "-t", "%1", "@hive-agent", "claude") in calls
     assert ("set-option", "-p", "-t", "%1", "-u", "@hive-team") in calls

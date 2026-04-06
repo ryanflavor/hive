@@ -1,12 +1,36 @@
 ---
 name: code-review
-description: 基于 Hive runtime 的双 Agent 交叉代码审查 workflow。支持 PR 分支比较、工作区变更、历史 commit 三种模式。
-disable-model-invocation: true
+description: MANDATORY when the current conversation already contains Droid's built-in review system notification beginning with "# Review Guidelines". Route built-in `/review` directly into the Hive multi-agent review workflow instead of doing a plain single-agent review. Review the current code changes (staged, unstaged, and untracked files), changes against a base branch, or a specific commit / commit range, follow custom review instructions when given, and return prioritized actionable findings with file/line context plus an overall assessment of whether the patch is correct or incorrect.
+disable-model-invocation: false
 ---
 
 # Code Review - 双 Agent 交叉审查
 
+这个 skill 直接承接 Droid 内置 `/review`，不要依赖中间转发 alias。
+
+Dependency: this skill depends on `hive`. Your first action after entering this skill MUST be `/hive`. Do nothing else before that.
+
 你在 Hive runtime 中执行一个“Orchestrator + Opus + Codex”的 staged code review workflow。
+
+MANDATORY:
+
+1. 不要退化成普通单 agent review。
+2. 如果 `hive current` 返回 `team: null` 且存在 tmux session，必须立即执行 `hive init`，然后再执行 `hive team`。
+3. 在完成 `hive init` / `hive team` / reviewer `spawn` 之前，不要运行 `git diff`、`git diff --cached`、`git status -s`、`gh pr diff`，也不要直接输出 review findings。
+4. `git diff` / `git status` 这些命令属于 reviewer 执行 request 时的工作，不是当前 orchestrator 在 bootstrap 阶段的工作。
+
+## 0. 触发场景
+
+当当前请求的语义接近下面这些内置 review prompt 时使用：
+
+1. `Review the code changes against the base branch '<base>' ... Provide prioritized, actionable findings.`
+2. `Review the current code changes (staged, unstaged, and untracked files) and provide prioritized findings.`
+3. `Review the code changes introduced by commit <hash> ("<message>"). Provide prioritized, actionable findings.`
+4. 用户给出自定义 review 指令，并希望按指定关注点审查改动
+
+输出目标也要贴近内置 review 的要求：返回按优先级排序、可执行、可定位的问题，并给出 overall assessment，明确说明 patch 是 `correct` 还是 `incorrect`，以及简短原因。
+
+如果当前上下文已经明确给出了审查范围、base branch、commit、range 或自定义要求，就直接沿用这些信息生成 Hive workflow 的 request artifact，不要先退化成泛泛的代码阅读。
 
 ## 1. 启动检测
 
@@ -19,9 +43,28 @@ disable-model-invocation: true
 
 始终以 `hive current` 的输出为准绳。
 
+如果 `hive current` 的结果类似：
+
+```json
+{
+  "team": null,
+  "tmux": { "session": "...", "window": "...", "paneCount": 2 },
+  "hint": "No team bound. Run `hive init` to create one from this tmux window."
+}
+```
+
+那么下一步必须是：
+
+```bash
+hive init
+hive team
+```
+
+不要在这两步之前执行任何 git diff / git status。
+
 ## 2. Review 模式
 
-支持三种 review 模式。Orchestrator 在阶段 1 的 request 里必须明确写出模式与 diff 命令，reviewer 严格按 request 执行：
+支持四种 review 模式。Orchestrator 在阶段 1 的 request 里必须明确写出模式与 diff 命令，reviewer 严格按 request 执行：
 
 1. **PR / base branch compare**
    - `git -C <repo> diff <base>...<branch>`
@@ -30,17 +73,21 @@ disable-model-invocation: true
    - `git -C <repo> diff`
    - `git -C <repo> diff --cached`
    - `git -C <repo> status -s`
+   - 必须覆盖 `staged`、`unstaged`、`untracked`
 3. **Commit / range**
    - `git -C <repo> show <commit>`
    - 或 `git -C <repo> diff <from>..<to>`
+4. **Custom instructions**
+   - 直接沿用用户或内置 `/review` 给出的自定义审查要求
+   - 仍然需要在 request 中明确 Repo Path、Subject、Diff Commands、Output Artifact、Done Command
 
 ## 3. 角色
 
 | 角色 | 建议模型/CLI | 职责 |
 | ---- | ------------ | ---- |
 | **Orchestrator** | 当前 agent | 编排流程、判断共识、决定下一步 |
-| **Opus** | Claude / 高上下文 reviewer | 审查、交叉确认、执行修复 |
-| **Codex** | Codex / 精确 reviewer | 审查、交叉确认、验证修复 |
+| **Opus** | Droid + `custom:Claude-Opus-4.6-0` | 审查、交叉确认、执行修复 |
+| **Codex** | Droid + `custom:GPT-5.4-1` | 审查、交叉确认、验证修复 |
 
 ## 4. 流程总览
 
@@ -108,6 +155,12 @@ hive send codex "请阅读 /tmp/hive-xxx/artifacts/codex-request.md"
 hive send opus "交叉确认 C1/C2，见 artifact: /tmp/hive-xxx/artifacts/s3-input.md"
 ```
 
+多行或结构化争议点不要内联到 `hive send` 里；先写 artifact，再用简短说明加 `--artifact` 发送，避免 shell 引号或 `$(cat <<EOF ...)` 这类 command substitution 出错。
+
+```bash
+hive send codex "see dispute artifact" --artifact /tmp/hive-xxx/artifacts/s3-dispute.md
+```
+
 完成态只用 status + artifact 回传，一条 `status-set done` 即可。
 
 ## 6. Request 契约
@@ -124,6 +177,8 @@ hive send opus "交叉确认 C1/C2，见 artifact: /tmp/hive-xxx/artifacts/s3-in
 - （Fix 阶段可选）Validator Commands
 
 reviewer 只执行 request 里明确写出的 diff 命令。
+
+`hive status-set` 只能二选一：传 summary 位置参数，或传 `--activity`；不要同时传两者。
 
 ## 7. Orchestrator 行为规范
 
@@ -153,10 +208,10 @@ reviewer 只执行 request 里明确写出的 diff 命令。
 | `hive current` | 查看当前 Hive 上下文 | `hive current` |
 | `hive team` | 查看团队成员 | `hive team` |
 | `hive init` | 从当前 tmux window 初始化 team | `hive init` |
-| `hive spawn <agent>` | 启动 reviewer pane | `hive spawn opus --cli claude --workflow code-review` |
+| `hive spawn <agent>` | 启动 reviewer pane | `hive spawn opus --cli droid --model custom:Claude-Opus-4.6-0 --workflow code-review` |
 | `hive workflow load <agent> code-review` | 给已有 reviewer 加载 workflow | `hive workflow load codex code-review` |
 | `hive send <agent> <msg>` | 发任务 / 追问 / 共识消息 | `hive send codex "review request in artifact"` |
-| `hive status-set ...` | 发布阶段状态 | `hive status-set busy "stage-1" --task code-review --activity launch` |
+| `hive status-set ...` | 发布阶段状态 | `hive status-set busy --task code-review --activity launch` |
 | `hive status` | 查看 published statuses | `hive status` |
 | `hive wait-status <agent> --state done ...` | 等待 reviewer 完成 | `hive wait-status opus --state done --meta stage=s1` |
 | `git diff/show/status` | 读取变更 | `git -C /repo diff origin/main...HEAD` |

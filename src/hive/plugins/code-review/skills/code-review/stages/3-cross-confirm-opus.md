@@ -47,6 +47,17 @@ flowchart TD
 hive send codex "阶段 3：读取 ~/.factory/skills/code-review/stages/3-cross-confirm-codex.md。我们需要确认以下问题：..."
 ```
 
+若要发送多行争议点或结构化逐项结论，先写 artifact 再发送；不要把 `$(cat <<EOF ...)` 这类多行 command substitution 内联进 `hive send`。
+
+```bash
+DISPUTE_ARTIFACT="$WORKSPACE/artifacts/s3-dispute-round-1.md"
+cat > "$DISPUTE_ARTIFACT" <<'EOF'
+C1: Fix - ...
+C2: Skip - ...
+EOF
+hive send codex "阶段 3：请结合争议点 artifact 回复 Fix / Skip / Deadlock。" --artifact "$DISPUTE_ARTIFACT"
+```
+
 ## 3. 对话规则
 
 - 每轮只处理有限个争议点
@@ -61,7 +72,6 @@ hive send codex "阶段 3：读取 ~/.factory/skills/code-review/stages/3-cross-
 ```bash
 hive status-set done "cross confirm complete" \
   --task code-review \
-  --activity cross-confirm-done \
   --meta stage=s3 \
   --meta artifact=/tmp/hive-xxx/artifacts/s3-consensus.md \
   --meta result=fix

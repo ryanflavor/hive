@@ -37,5 +37,5 @@ flowchart TD
 ## 回传
 
 ```bash
-hive status-set done "fix round complete"           --task code-review           --activity fix-round-done           --meta stage=s4           --meta role=fix           --meta round=<n>           --meta artifact=/tmp/hive-xxx/artifacts/s4-fix-round-<n>.md
+hive status-set done "fix round complete"           --task code-review           --meta stage=s4           --meta role=fix           --meta round=<n>           --meta artifact=/tmp/hive-xxx/artifacts/s4-fix-round-<n>.md
 ```

@@ -130,6 +130,8 @@ def _discover_tmux_binding() -> dict[str, str]:
         return {}
     agent_name = tmux.get_pane_option(current_pane, "hive-agent") or ""
     role = tmux.get_pane_option(current_pane, "hive-role") or ""
+    if not agent_name and not role:
+        return {}
     window_target = tmux.get_current_window_target() or ""
     session_name = tmux.get_current_session_name() or ""
     workspace = tmux.get_window_option(window_target, "hive-workspace") if window_target else ""
@@ -450,7 +452,11 @@ def fork_cmd(pane_id: str, split: str, timeout: int):
         tmux.send_keys(new_pane, profile.resume_cmd.format(session_id=session_id))
 
         if profile.fork_needs_tui:
-            if tmux.wait_for_text(new_pane, profile.ready_text, timeout=timeout):
+            if (
+                tmux.wait_for_texts(new_pane, profile.ready_text, timeout=timeout)
+                if isinstance(profile.ready_text, tuple)
+                else tmux.wait_for_text(new_pane, profile.ready_text, timeout=timeout)
+            ):
                 time.sleep(1)
                 tmux.send_keys(new_pane, profile.fork_cmd)
                 fork_ok = True
@@ -526,29 +532,6 @@ def current_cmd():
     click.echo(json.dumps(result, indent=2, ensure_ascii=False))
 
 
-@cli.command("use")
-@click.argument("team")
-@click.option("--workspace", "-w", default="", help="Workspace path override")
-@click.option("--agent", default="", help="Default agent name for standalone skill sessions")
-def use_cmd(team: str, workspace: str, agent: str):
-    """Bind the current tmux pane context to a team."""
-    loaded = _load_team(team)
-    _ensure_team_matches_current_window(loaded)
-    resolved_workspace = workspace or loaded.workspace
-    _remember_context(team=team, workspace=resolved_workspace, agent=agent or LEAD_AGENT_NAME)
-    click.echo(
-        json.dumps(
-            {
-                "team": team,
-                "workspace": resolved_workspace,
-                "agent": agent or LEAD_AGENT_NAME,
-            },
-            indent=2,
-            ensure_ascii=False,
-        )
-    )
-
-
 _RANDOM_AGENT_NAMES = (
     "yoyo", "lulu", "nini", "bobo", "kiki",
     "dodo", "pipi", "toto", "momo", "coco",
@@ -585,14 +568,26 @@ def init_cmd(name: str, workspace: str, notify: bool):
 
     _gc_dead_teams()
 
+    session_name = tmux.get_current_session_name() or "hive"
+    window_index = tmux.get_current_window_index() or "0"
+    window_target = tmux.get_current_window_target()
     existing = _discover_tmux_binding()
     if existing.get("team"):
         click.echo(json.dumps(existing, indent=2, ensure_ascii=False))
         return
-
-    session_name = tmux.get_current_session_name() or "hive"
-    window_index = tmux.get_current_window_index() or "0"
-    window_target = tmux.get_current_window_target()
+    bound_team = tmux.get_window_option(window_target, "hive-team") if window_target else ""
+    if bound_team:
+        try:
+            loaded = Team.load(bound_team)
+        except FileNotFoundError:
+            loaded = None
+        if loaded and loaded.tmux_window == window_target and loaded.status().get("members"):
+            _fail(
+                f"tmux window '{window_target}' already belongs to team '{bound_team}'; "
+                "current pane is not registered"
+            )
+        for key in ("hive-team", "hive-workspace", "hive-desc", "hive-created"):
+            tmux.clear_window_option(window_target, f"@{key}")
 
     team_name = name or f"{session_name}-{window_index}"
     default_ws_path = _default_auto_workspace_path(session_name, window_index)
@@ -884,14 +879,6 @@ def inject_cmd(agent_name: str, text: str):
     assert team_name is not None and t is not None
     t.get(agent_name).send(text)
     click.echo(f"Injected raw input into {agent_name}.")
-
-
-@cli.command("type", hidden=True)
-@click.argument("agent_name")
-@click.argument("text")
-def type_cmd(agent_name: str, text: str):
-    """Backward-compatible alias for `hive inject`."""
-    inject_cmd.callback(agent_name, text)  # type: ignore[attr-defined]
 
 
 @cli.command("team")

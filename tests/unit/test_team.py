@@ -81,11 +81,12 @@ def test_team_lead_agent_uses_persisted_session_id(configure_hive_home):
     assert lead.session_id == "sess-1"
 
 
-def test_team_spawn_tags_agent_and_loads_workflow(configure_hive_home, monkeypatch):
+def test_team_spawn_tags_agent_and_passes_workflow_as_initial_skill(configure_hive_home, monkeypatch):
     configure_hive_home(tmux_inside=True, current_pane="%0")
     spawned = []
     tagged = []
     layouts = []
+    sent = []
 
     agent = Agent(name="claude", team_name="team-a", pane_id="%9", color="green")
     monkeypatch.setattr(
@@ -97,16 +98,19 @@ def test_team_spawn_tags_agent_and_loads_workflow(configure_hive_home, monkeypat
     monkeypatch.setattr("hive.team.tmux.enable_pane_border_status", lambda target: layouts.append(("border", target)))
     monkeypatch.setattr("hive.team.tmux.set_window_option", lambda target, option, value: layouts.append((target, option, value)))
     monkeypatch.setattr("hive.team.tmux.select_layout", lambda target, layout: layouts.append(("layout", target, layout)))
-    monkeypatch.setattr("hive.agent.Agent.load_skill", lambda self, workflow: setattr(self, "loaded_workflow", workflow))
+    monkeypatch.setattr("hive.agent.Agent.send", lambda self, text: sent.append(text))
 
     team = Team(name="team-a", lead_pane_id="%0")
-    result = team.spawn("claude", workflow="code-review")
+    result = team.spawn("claude", workflow="code-review", prompt="start now")
 
     assert result is agent
     assert spawned[0]["target_pane"] == "%0"
     assert spawned[0]["color"] == "green"
+    assert spawned[0]["skill"] == "code-review"
+    assert spawned[0]["prompt"] == "start now"
+    assert spawned[0]["send_bootstrap_prompt"] is False
     assert tagged == [("%9", "agent", "claude", "team-a")]
-    assert getattr(agent, "loaded_workflow") == "code-review"
+    assert sent == []
     assert ("border", "dev:1") in layouts
 
 
@@ -127,6 +131,8 @@ def test_team_spawn_second_agent_splits_from_last_agent(configure_hive_home, mon
     assert calls[0]["target_pane"] == "%9"
     assert calls[0]["split_horizontal"] is False
     assert calls[0]["color"] == "blue"
+    assert calls[0]["skill"] == "hive"
+    assert calls[0]["send_bootstrap_prompt"] is True
 
 
 def test_team_get_and_broadcast(configure_hive_home, monkeypatch):

@@ -2,6 +2,8 @@
 
 审查 request 指定的变更，输出 artifact，并用 `hive status-set` 回传给 Orchestrator。
 
+收到阶段 1 的 Hive 消息后，不要先回复泛化的 ready / 自我介绍。第一动作必须是：读取本文件、读取 request artifact、设置 busy 状态并开始执行审查。除非 request 无效，否则不要先发送任何只表示“已准备好”的 Hive 消息。
+
 ```mermaid
 flowchart TD
     Start([开始]) --> S1[1. 读取 request]

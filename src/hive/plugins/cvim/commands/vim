@@ -14,7 +14,4 @@ set -euo pipefail
 export DROID_VIM_SEED_MODE=blank
 export DROID_VIM_CURSOR_MODE=end
 export DROID_VIM_TRANSPORT=popup
-export DROID_VIM_POPUP_MODE=other-pane-right
-export DROID_VIM_POPUP_WIDTH=72%
-export DROID_VIM_POPUP_HEIGHT=84%
 exec "${HIVE_PLUGIN_ROOT}/bin/droid-vim-command" "$@"

@@ -19,6 +19,12 @@ def test_member_role_classifies_agents_and_shells():
     assert agent_cli.member_role("python3") == "terminal"
 
 
+def test_profiles_use_expected_skill_commands():
+    assert agent_cli.get_profile("droid").skill_cmd == "/{name}"
+    assert agent_cli.get_profile("claude").skill_cmd == "/{name}"
+    assert agent_cli.get_profile("codex").skill_cmd == "${name}"
+
+
 def test_detect_profile_for_pane_uses_title_and_tty_processes(monkeypatch):
     monkeypatch.setattr("hive.agent_cli.tmux.get_pane_current_command", lambda _pane: "2.1.89")
     monkeypatch.setattr("hive.agent_cli.tmux.get_pane_title", lambda _pane: "\u2733 Claude Code")

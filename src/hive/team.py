@@ -202,6 +202,8 @@ class Team:
             split_horizontal = False
             split_size = "50%"
 
+        initial_skill = workflow or skill
+
         agent = Agent.spawn(
             name=name,
             team_name=self.name,
@@ -213,13 +215,11 @@ class Team:
             is_first=is_first,
             split_horizontal=split_horizontal,
             split_size=split_size,
-            skill=skill,
+            skill=initial_skill,
             extra_env=extra_env,
             cli=cli,
+            send_bootstrap_prompt=initial_skill == "hive",
         )
-
-        if workflow:
-            agent.load_skill(workflow)
 
         tmux.tag_pane(agent.pane_id, "agent", name, self.name,
                       model=model, cli=cli, color=color)

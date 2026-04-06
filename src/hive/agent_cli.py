@@ -71,7 +71,7 @@ PROFILES: dict[str, CLIProfile] = {
         resume_cmd="codex fork {session_id}",
         fork_cmd=None,
         fork_needs_tui=False,
-        skill_cmd="/{name}",
+        skill_cmd="${name}",
     ),
 }
 

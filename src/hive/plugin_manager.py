@@ -197,17 +197,40 @@ def _uninstall_tmux_bindings(install_dir: Path) -> bool:
     return _source_tmux_conf(install_dir / "tmux" / "disable.conf")
 
 
+def _is_plugin_managed_skill(path: Path) -> bool:
+    """Return True if *path* is a symlink pointing into the hive plugin installed tree."""
+    if not path.is_symlink():
+        return False
+    try:
+        target = path.resolve()
+        return target.is_relative_to(_installed_root())
+    except (OSError, ValueError):
+        return False
+
+
 def _install_skills(install_dir: Path) -> list[str]:
     skills_dir = install_dir / "skills"
     if not skills_dir.is_dir():
         return []
     linked: list[str] = []
+    skipped: list[str] = []
     for skill_dir in sorted(skills_dir.iterdir()):
         if skill_dir.name.startswith("."):
             continue
         dst = _factory_skills_dir() / skill_dir.name
+        if dst.exists() and not _is_plugin_managed_skill(dst):
+            skipped.append(skill_dir.name)
+            continue
         _link_path(skill_dir.resolve(), dst)
         linked.append(str(dst))
+    if skipped:
+        import click
+        click.echo(
+            f"Warning: skipped skill(s) {', '.join(skipped)} — "
+            "already exists and is not managed by a hive plugin. "
+            "Remove or rename the existing skill to allow the plugin to install it.",
+            err=True,
+        )
     return linked
 
 
@@ -241,7 +264,10 @@ def disable_plugin(name: str, *, missing_ok: bool = False) -> dict[str, object]:
     for path_str in plugin_state.get("commands", []):
         _remove_path(Path(path_str))
     for path_str in plugin_state.get("skills", []):
-        _remove_path(Path(path_str))
+        skill_path = Path(path_str)
+        if skill_path.exists() and not _is_plugin_managed_skill(skill_path):
+            continue
+        _remove_path(skill_path)
     hook_defs = plugin_state.get("hooks", {})
     if isinstance(hook_defs, dict) and hook_defs:
         core_hooks.remove_hook_groups(hook_defs)

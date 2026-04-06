@@ -115,11 +115,152 @@ def test_plugin_enable_cross_review_materializes_skill(runner, configure_hive_ho
     assert "Plugin 'code-review' enabled." in enabled.output
     assert "skills: code-review" in enabled.output
     assert (factory_home / "skills" / "code-review").is_symlink()
-    assert (hive_home / "plugins" / "installed" / "code-review" / "skills" / "code-review" / "SKILL.md").exists()
+
+    skill = hive_home / "plugins" / "installed" / "code-review" / "skills" / "code-review" / "SKILL.md"
+    assert skill.exists()
+    skill_text = skill.read_text()
+    assert "disable-model-invocation: false" in skill_text
+    assert "MANDATORY when the current conversation already contains Droid's built-in review system notification" in skill_text
+    assert "Route built-in `/review` directly into the Hive multi-agent review workflow" in skill_text
+    assert "this skill depends on `hive`" in skill_text
+    assert "Your first action after entering this skill MUST be `/hive`" in skill_text
+    assert "如果 `hive current` 返回 `team: null` 且存在 tmux session，必须立即执行 `hive init`" in skill_text
+    assert "在完成 `hive init` / `hive team` / reviewer `spawn` 之前，不要运行 `git diff`" in skill_text
+    assert "Review the current code changes (staged, unstaged, and untracked files)" in skill_text
+    assert "Review the code changes against the base branch '<base>'" in skill_text
+    assert "patch 是 `correct` 还是 `incorrect`" in skill_text
+    assert "`hive status-set` 只能二选一：传 summary 位置参数，或传 `--activity`；不要同时传两者。" in skill_text
+    assert "多行或结构化争议点不要内联到 `hive send` 里" in skill_text
+    assert 'hive send codex "see dispute artifact" --artifact /tmp/hive-xxx/artifacts/s3-dispute.md' in skill_text
+
+    stage = hive_home / "plugins" / "installed" / "code-review" / "skills" / "code-review" / "stages" / "1-review-orchestrator.md"
+    assert stage.exists()
+    stage_text = stage.read_text()
+    assert 'Done Command: hive status-set done "review complete" --task code-review --meta stage=s1 --meta reviewer=${reviewer} --meta artifact=$out --meta verdict=<ok|issues>' in stage_text
+    assert "hive status-set busy --task code-review --activity launch-reviews" in stage_text
+    assert "hive spawn opus --cli droid --model custom:Claude-Opus-4.6-0 --workflow code-review" in stage_text
+    assert "hive spawn codex --cli droid --model custom:GPT-5.4-1 --workflow code-review" in stage_text
+    assert "hive team" in stage_text
+    assert "至少 90s" in stage_text
+    assert "hive workflow load opus code-review" in stage_text
+    assert "hive workflow load codex code-review" in stage_text
+    assert "不要重复 spawn 同一个 reviewer" in stage_text
+    assert "不要回复 ready" in stage_text
+    assert "若 reviewer 只回复了泛化的 ready / 自我介绍" in stage_text
+    assert "仅凭 team 成员列表不能确认 reviewer 已就绪" in stage_text
+    assert "hive capture" in stage_text
+    assert 'hive status-set busy "stage-1" --task code-review --activity launch-reviews' not in stage_text
+    assert '--activity ${reviewer}-r1-done' not in stage_text
+
+    review_opus_stage = hive_home / "plugins" / "installed" / "code-review" / "skills" / "code-review" / "stages" / "1-review-opus.md"
+    assert review_opus_stage.exists()
+    review_opus_stage_text = review_opus_stage.read_text()
+    assert 'hive status-set failed "invalid request" --task code-review --meta stage=s1 --meta reviewer=opus' in review_opus_stage_text
+    assert "不要先回复泛化的 ready / 自我介绍" in review_opus_stage_text
+    assert "不要先发送任何只表示“已准备好”的 Hive 消息" in review_opus_stage_text
+    assert '--activity request-invalid' not in review_opus_stage_text
+
+    review_codex_stage = hive_home / "plugins" / "installed" / "code-review" / "skills" / "code-review" / "stages" / "1-review-codex.md"
+    assert review_codex_stage.exists()
+    review_codex_stage_text = review_codex_stage.read_text()
+    assert "不要先回复泛化的 ready / 自我介绍" in review_codex_stage_text
+    assert "不要先发送任何只表示“已准备好”的 Hive 消息" in review_codex_stage_text
+
+    judge_stage = hive_home / "plugins" / "installed" / "code-review" / "skills" / "code-review" / "stages" / "2-judge-consensus-orchestrator.md"
+    assert judge_stage.exists()
+    judge_stage_text = judge_stage.read_text()
+    assert 'hive status-set busy --task code-review --activity judge-consensus' in judge_stage_text
+    assert 'hive status-set busy "stage-2" --task code-review --activity judge-consensus' not in judge_stage_text
+
+    cross_orch_stage = hive_home / "plugins" / "installed" / "code-review" / "skills" / "code-review" / "stages" / "3-cross-confirm-orchestrator.md"
+    assert cross_orch_stage.exists()
+    cross_orch_stage_text = cross_orch_stage.read_text()
+    assert 'hive status-set busy --task code-review --activity launch-cross-confirm' in cross_orch_stage_text
+    assert 'hive status-set busy "stage-3" --task code-review --activity launch-cross-confirm' not in cross_orch_stage_text
+
+    cross_opus_stage = hive_home / "plugins" / "installed" / "code-review" / "skills" / "code-review" / "stages" / "3-cross-confirm-opus.md"
+    assert cross_opus_stage.exists()
+    cross_opus_stage_text = cross_opus_stage.read_text()
+    assert 'hive status-set done "cross confirm complete" \\' in cross_opus_stage_text
+    assert "不要把 `$(cat <<EOF ...)` 这类多行 command substitution 内联进 `hive send`" in cross_opus_stage_text
+    assert 'hive send codex "阶段 3：请结合争议点 artifact 回复 Fix / Skip / Deadlock。" --artifact "$DISPUTE_ARTIFACT"' in cross_opus_stage_text
+    assert '--activity cross-confirm-done' not in cross_opus_stage_text
+
+    cross_codex_stage = hive_home / "plugins" / "installed" / "code-review" / "skills" / "code-review" / "stages" / "3-cross-confirm-codex.md"
+    assert cross_codex_stage.exists()
+    cross_codex_stage_text = cross_codex_stage.read_text()
+    assert "若回复包含多行结构化内容，先写 artifact 再 `hive send opus ... --artifact <path>`" in cross_codex_stage_text
+    assert 'hive send opus "阶段 3：我的逐项结论见 artifact。" --artifact "$ROUND_ARTIFACT"' in cross_codex_stage_text
+
+    fix_orch_stage = hive_home / "plugins" / "installed" / "code-review" / "skills" / "code-review" / "stages" / "4-fix-verify-orchestrator.md"
+    assert fix_orch_stage.exists()
+    fix_orch_stage_text = fix_orch_stage.read_text()
+    assert 'hive status-set busy --task code-review --activity fix-verify-round-1' in fix_orch_stage_text
+    assert 'hive status-set busy "stage-4" --task code-review --activity fix-verify-round-1' not in fix_orch_stage_text
+
+    fix_opus_stage = hive_home / "plugins" / "installed" / "code-review" / "skills" / "code-review" / "stages" / "4-fix-verify-opus.md"
+    assert fix_opus_stage.exists()
+    fix_opus_stage_text = fix_opus_stage.read_text()
+    assert 'hive status-set done "fix round complete"           --task code-review           --meta stage=s4' in fix_opus_stage_text
+    assert '--activity fix-round-done' not in fix_opus_stage_text
+
+    fix_codex_stage = hive_home / "plugins" / "installed" / "code-review" / "skills" / "code-review" / "stages" / "4-fix-verify-codex.md"
+    assert fix_codex_stage.exists()
+    fix_codex_stage_text = fix_codex_stage.read_text()
+    assert 'hive status-set done "verify round complete"           --task code-review           --meta stage=s4' in fix_codex_stage_text
+    assert '--activity verify-round-done' not in fix_codex_stage_text
+
+    summary_stage = hive_home / "plugins" / "installed" / "code-review" / "skills" / "code-review" / "stages" / "5-summary-orchestrator.md"
+    assert summary_stage.exists()
+    summary_stage_text = summary_stage.read_text()
+    assert 'hive status-set done "review workflow complete" \\' in summary_stage_text
+    assert '--activity summary-done' not in summary_stage_text
 
     enabled_json = runner.invoke(cli, ["plugin", "enable", "code-review", "--json"])
     assert enabled_json.exit_code == 0
     assert json.loads(enabled_json.output)["enabled"] is True
+
+
+def test_plugin_enable_code_review_does_not_touch_existing_user_review_skill(runner, configure_hive_home):
+    hive_home = configure_hive_home(tmux_inside=False)
+    factory_home = hive_home.parent / ".factory"
+
+    user_skill_dir = factory_home / "skills" / "review"
+    user_skill_dir.mkdir(parents=True, exist_ok=True)
+    user_skill_file = user_skill_dir / "SKILL.md"
+    user_skill_file.write_text("---\nname: review\ndescription: my custom review skill\n---\n")
+
+    enabled = runner.invoke(cli, ["plugin", "enable", "code-review"])
+
+    assert enabled.exit_code == 0
+    assert "skills: code-review" in enabled.output
+    assert "Warning: skipped skill(s) review" not in enabled.output
+    assert user_skill_file.read_text().startswith("---\nname: review\ndescription: my custom review skill")
+    assert not user_skill_dir.is_symlink()
+    assert (factory_home / "skills" / "code-review").is_symlink()
+
+
+def test_plugin_reenable_preserves_user_skill_that_replaced_old_plugin_symlink(runner, configure_hive_home):
+    hive_home = configure_hive_home(tmux_inside=False)
+    factory_home = hive_home.parent / ".factory"
+
+    enabled = runner.invoke(cli, ["plugin", "enable", "code-review"])
+    assert enabled.exit_code == 0
+
+    review_skill = factory_home / "skills" / "review"
+    if review_skill.is_symlink():
+        review_skill.unlink()
+    elif review_skill.is_dir():
+        import shutil
+        shutil.rmtree(review_skill)
+    review_skill.mkdir(parents=True, exist_ok=True)
+    (review_skill / "SKILL.md").write_text("---\nname: review\ndescription: user custom\n---\n")
+
+    reenabled = runner.invoke(cli, ["plugin", "enable", "code-review"])
+    assert reenabled.exit_code == 0
+    assert review_skill.exists()
+    assert not review_skill.is_symlink()
+    assert (review_skill / "SKILL.md").read_text().startswith("---\nname: review\ndescription: user custom")
 
 
 def test_plugin_enable_notify_materializes_command_and_hooks(runner, configure_hive_home):

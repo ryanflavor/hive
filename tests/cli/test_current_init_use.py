@@ -36,33 +36,6 @@ def test_teams_tolerates_missing_created_option(runner, configure_hive_home, mon
     assert payload[0]["name"] == "team-a"
 
 
-def test_use_sets_current_context(runner, configure_hive_home, tmp_path):
-    configure_hive_home()
-    workspace = tmp_path / "ws"
-
-    assert runner.invoke(cli, ["create", "team-c", "--workspace", str(workspace)]).exit_code == 0
-    result = runner.invoke(cli, ["use", "team-c", "--agent", "claude"])
-
-    assert result.exit_code == 0
-    payload = json.loads(result.output)
-    assert payload == {"team": "team-c", "workspace": str(workspace), "agent": "claude"}
-
-
-def test_use_rejects_team_from_different_tmux_window(runner, configure_hive_home, monkeypatch, tmp_path):
-    configure_hive_home(session_name="dev")
-
-    # Create team dev-0 at window dev:0 (default)
-    assert runner.invoke(cli, ["create", "dev-0", "--workspace", str(tmp_path / "ws")]).exit_code == 0
-
-    # Switch current window to dev:1
-    monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "dev:1")
-
-    result = runner.invoke(cli, ["use", "dev-0"])
-
-    assert result.exit_code != 0
-    assert "belongs to tmux window 'dev:0'" in result.output
-
-
 def test_current_reads_persisted_context(runner, configure_hive_home, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"
@@ -111,6 +84,22 @@ def test_current_ignores_persisted_context_inside_tmux_when_window_is_unbound(ru
     ctx_dir = tmp_path / ".hive" / "contexts"
     ctx_dir.mkdir(parents=True, exist_ok=True)
     (ctx_dir / "default.json").write_text(json.dumps({"team": "stale-team", "workspace": "/tmp/ws", "agent": "claude"}))
+
+    result = runner.invoke(cli, ["current"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["team"] is None
+    assert payload["hint"].startswith("No team bound")
+
+
+def test_current_ignores_window_only_team_binding_without_pane_registration(runner, configure_hive_home, tmp_path):
+    configure_hive_home(current_pane="%9", session_name="dev")
+
+    from hive import tmux
+    tmux.set_window_option("dev:0", "@hive-team", "dev")
+    tmux.set_window_option("dev:0", "@hive-workspace", str(tmp_path / "ws"))
+    tmux.set_window_option("dev:0", "@hive-created", "0")
 
     result = runner.invoke(cli, ["current"])
 
@@ -221,6 +210,32 @@ def test_init_returns_existing_team_for_registered_member(runner, configure_hive
         "tmuxSession": "dev",
         "tmuxWindow": "dev:0",
     }
+
+
+def test_init_replaces_window_only_team_binding_without_members(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home(current_pane="%9", session_name="dev")
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
+    monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
+    monkeypatch.setattr("hive.cli.tmux.get_current_window_index", lambda: "0")
+    monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "dev:0")
+    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%9")
+
+    from hive import tmux
+    from hive.tmux import PaneInfo
+
+    tmux.set_window_option("dev:0", "@hive-team", "ghost")
+    tmux.set_window_option("dev:0", "@hive-workspace", str(tmp_path / "ghost-ws"))
+    tmux.set_window_option("dev:0", "@hive-created", "0")
+    monkeypatch.setattr("hive.cli.tmux.list_panes_full", lambda _target: [PaneInfo("%9", "", command="droid")])
+
+    result = runner.invoke(cli, ["init", "--workspace", str(tmp_path / "ws"), "--no-notify"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["team"] == "dev-0"
+    assert payload["panes"][0]["name"] == "orch"
+    assert payload["panes"][0]["isSelf"] is True
+    assert tmux.get_window_option("dev:0", "hive-team") == "dev-0"
 
 
 def test_init_creates_team_registers_agents_and_notifies(runner, configure_hive_home, monkeypatch, mock_tmux_send, tmp_path):
