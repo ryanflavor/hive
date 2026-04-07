@@ -15,9 +15,11 @@ Tests live under `tests/` and are split by level:
 ## Build, Test, and Development Commands
 
 - `python3 -m pip install -e .` — install Hive in editable mode.
-- After any local modification, rerun `python3 -m pip install -e .` before testing or manual CLI verification.
-- After installing, re-enable each plugin that ships skill or command files so the installed copies stay current:
-  `hive plugin enable code-review && hive plugin enable cvim && hive plugin enable fork && hive plugin enable notify`
+- **MUST**: after ANY code change, run install + plugin re-enable BEFORE testing, committing, or manual verification:
+  ```
+  python3 -m pip install -e . --break-system-packages && hive plugin enable code-review && hive plugin enable cvim && hive plugin enable fork && hive plugin enable notify
+  ```
+  This is a single mandatory step. Do not skip it. Do not split it. Do not "do it later".
 - `PYTHONPATH=src python -m pytest tests/ -q` — run the full test suite.
 - `PYTHONPATH=src python -m pytest tests/ -m unit -q` — fast unit tests only.
 - `PYTHONPATH=src python -m pytest tests/ -m cli -q` — CLI-layer tests.
