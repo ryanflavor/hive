@@ -50,7 +50,6 @@ def extract_last_assistant_text(file_path: Path, offset: int = 0) -> str:
         if message.get("role") != "assistant":
             continue
         parts: list[str] = []
-        fallback_plan = ""
         for item in message.get("content") or []:
             if item.get("type") == "text":
                 text = item.get("text") or ""
@@ -59,13 +58,13 @@ def extract_last_assistant_text(file_path: Path, offset: int = 0) -> str:
             elif item.get("type") == "tool_use" and item.get("name") == "ExitSpecMode":
                 tool_input = item.get("input") or {}
                 plan = tool_input.get("plan") if isinstance(tool_input, dict) else ""
+                title = tool_input.get("title") if isinstance(tool_input, dict) else ""
                 if isinstance(plan, str) and plan.strip():
-                    fallback_plan = plan.strip()
-        text_result = ""
-        if parts:
-            text_result = "\n\n".join(parts).strip()
-        elif fallback_plan:
-            text_result = fallback_plan
+                    header = ""
+                    if isinstance(title, str) and title.strip():
+                        header = f'Propose Specification title: "{title.strip()}"\n\n'
+                    parts.append(f"{header}Specification for approval:\n\n{plan.strip()}")
+        text_result = "\n\n".join(parts).strip() if parts else ""
         if text_result:
             if skip <= 0:
                 return text_result

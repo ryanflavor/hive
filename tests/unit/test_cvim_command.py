@@ -3,11 +3,56 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
 COMMAND = ROOT / "src" / "hive" / "plugins" / "cvim" / "bin" / "droid-vim-command"
+SHARED_DIR = ROOT / "src" / "hive" / "plugins" / "cvim" / "bin"
+
+
+def _import_shared():
+    if str(SHARED_DIR) not in sys.path:
+        sys.path.insert(0, str(SHARED_DIR))
+    import _droid_vim_shared
+    return _droid_vim_shared
+
+
+def _make_session(tmp_path: Path, messages: list[dict]) -> Path:
+    f = tmp_path / "session.jsonl"
+    lines = []
+    for msg in messages:
+        lines.append(json.dumps({"type": "message", "message": msg}))
+    f.write_text("\n".join(lines) + "\n")
+    return f
+
+
+def test_extract_includes_exit_spec_mode_plan_with_text(tmp_path):
+    shared = _import_shared()
+    session = _make_session(tmp_path, [
+        {"role": "assistant", "content": [
+            {"type": "text", "text": "Summary text here."},
+            {"type": "tool_use", "name": "ExitSpecMode", "input": {"plan": "## Detailed plan", "title": "My Spec"}},
+        ]},
+    ])
+    result = shared.extract_last_assistant_text(session)
+    assert "Summary text here." in result
+    assert 'Propose Specification title: "My Spec"' in result
+    assert "Specification for approval:" in result
+    assert "## Detailed plan" in result
+
+
+def test_extract_plan_only_without_text(tmp_path):
+    shared = _import_shared()
+    session = _make_session(tmp_path, [
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "ExitSpecMode", "input": {"plan": "## Plan only"}},
+        ]},
+    ])
+    result = shared.extract_last_assistant_text(session)
+    assert "Specification for approval:" in result
+    assert "## Plan only" in result
 
 
 def _write_fake_tmux(tmp_path: Path) -> Path:
