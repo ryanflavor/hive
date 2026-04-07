@@ -130,13 +130,15 @@ class Team:
                     team.lead_pane_id = pane.pane_id
                     team.lead_name = pane.agent or LEAD_AGENT_NAME
                 elif pane.role == "agent":
+                    from .agent_cli import normalize_command
+                    resolved_cli = pane.cli or normalize_command(pane.command) or "droid"
                     agent = Agent(
                         name=pane.agent,
                         team_name=name,
                         pane_id=pane.pane_id,
                         model=pane.model,
                         color=pane.color or "green",
-                        cli=pane.cli or "droid",
+                        cli=resolved_cli,
                         cwd="",
                     )
                     team.agents[pane.agent] = agent
