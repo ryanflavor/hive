@@ -895,6 +895,25 @@ def who():
     team_cmd.callback()  # type: ignore[attr-defined]
 
 
+_LAYOUT_PRESETS = ("main-vertical", "main-horizontal", "tiled", "even-horizontal", "even-vertical")
+
+
+@cli.command("layout")
+@click.argument("preset", type=click.Choice(_LAYOUT_PRESETS, case_sensitive=False))
+def layout_cmd(preset: str):
+    """Apply a tmux layout preset to the current team window."""
+    _, t = _resolve_scoped_team(None, required=True)
+    assert t is not None
+    window_target = t.tmux_window or tmux.get_current_window_target() or ""
+    if not window_target:
+        _fail("Cannot determine tmux window target")
+    if preset in ("main-vertical", "main-horizontal"):
+        dim = "main-pane-width" if preset == "main-vertical" else "main-pane-height"
+        tmux.set_window_option(window_target, dim, "50%")
+    tmux.select_layout(window_target, preset)
+    click.echo(json.dumps({"layout": preset, "window": window_target}))
+
+
 @cli.command("status-set")
 @click.argument("state", type=click.Choice(_STATUS_STATES, case_sensitive=False))
 @click.argument("summary", required=False, default="")

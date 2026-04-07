@@ -551,3 +551,30 @@ def test_root_help_groups_commands_by_area(runner):
     assert "status-show" not in result.output
     assert "type" not in result.output
     assert "current  " not in result.output
+
+
+def test_layout_applies_preset(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    assert runner.invoke(cli, ["create", "team-lay", "--workspace", str(tmp_path / "ws")]).exit_code == 0
+
+    layouts_applied: list[tuple[str, str]] = []
+
+    def fake_select_layout(target, layout="tiled"):
+        layouts_applied.append((target, layout))
+
+    monkeypatch.setattr("hive.cli.tmux.select_layout", fake_select_layout)
+    monkeypatch.setattr("hive.cli.tmux.set_window_option", lambda *a, **kw: None)
+
+    result = runner.invoke(cli, ["layout", "tiled"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["layout"] == "tiled"
+    assert any(l == "tiled" for _, l in layouts_applied)
+
+
+def test_layout_rejects_unknown_preset(runner, configure_hive_home, tmp_path):
+    configure_hive_home()
+    assert runner.invoke(cli, ["create", "team-lay2", "--workspace", str(tmp_path / "ws")]).exit_code == 0
+
+    result = runner.invoke(cli, ["layout", "bogus"])
+    assert result.exit_code != 0
