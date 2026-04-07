@@ -1,8 +1,8 @@
-# 阶段 3: Evidence 验证 - Verifier
+# 阶段 1: Evidence 验证 - Verifier
 
-对分配到的候选 findings 逐项验证 evidence 是否真实。
+对分配到的 findings 逐项验证 evidence 是否真实。
 
-收到任务后不要回复 ready。第一动作：读取本文件 → 读取 verify-task artifact → 开始验证。
+收到任务后不要回复 ready。第一动作：读取 verify-task artifact → 开始验证。
 
 ```mermaid
 flowchart TD
@@ -28,7 +28,6 @@ flowchart TD
 ### 1. 检查文件和行号
 
 ```bash
-# 确认文件存在且行号有效
 sed -n '42p' path/to/file.py
 ```
 

@@ -76,38 +76,33 @@ hive team
 
 ## 3. 架构
 
-每阶段 spawn 新 agent，执行完 kill，下一阶段重新 spawn。全程 Orchestrator 不审代码。
+流水线设计：reviewer 完成后立刻 kill 并 spawn verifier，review 和 verification 并行。
 
 ```
 Orch (lead pane) — 纯编排
-├── S1: spawn 3 reviewer → 完成 → kill
-├── S3: spawn 3 verifier → 完成 → kill
-└── S4: spawn 1 fixer + 1 checker → 完成 → kill
+├── S1: spawn 3 reviewer → 谁先完成谁先 kill + spawn verifier → 等全部 verifier → 去重
+├── S2: spawn 1 fixer + 1 checker → 修复验证循环 → kill
+└── S3: summary
 ```
 
-| 阶段 Agent | 建议模型 |
+| Agent | 建议模型 |
 | ---- | ---- |
-| S1 reviewer-a | `custom:Claude-Opus-4.6-0` |
-| S1 reviewer-b | `custom:GPT-5.4-1` |
-| S1 reviewer-c | `custom:Claude-Opus-4.6-0` |
-| S3 verifier-a | `custom:Claude-Opus-4.6-0` |
-| S3 verifier-b | `custom:GPT-5.4-1` |
-| S3 verifier-c | `custom:Claude-Opus-4.6-0` |
-| S4 fixer | `custom:Claude-Opus-4.6-0` |
-| S4 checker | `custom:GPT-5.4-1` |
+| reviewer-a | `custom:Claude-Opus-4.6-0` |
+| reviewer-b | `custom:GPT-5.4-1` |
+| reviewer-c | `custom:Claude-Opus-4.6-0` |
+| verifier-a/b/c | 与对应 reviewer 不同模型 |
+| fixer | `custom:Claude-Opus-4.6-0` |
+| checker | `custom:GPT-5.4-1` |
 
 ## 4. 流程总览
 
 ```mermaid
 flowchart TD
-    Start([开始]) --> S1[阶段 1: 3 路并行审查]
-    S1 --> S2[阶段 2: ≥2/3 投票合并]
-    S2 -->|0 候选| S5[阶段 5: 汇总]
-    S2 -->|>0 候选| S3[阶段 3: 并行 Evidence 验证]
-    S3 -->|0 confirmed| S5
-    S3 -->|>0 confirmed| S4[阶段 4: 修复 + 验证]
-    S4 --> S5
-    S5 --> End([结束])
+    Start([开始]) --> S1[阶段 1: 审查 + 验证流水线]
+    S1 -->|0 confirmed| S3[阶段 3: 汇总]
+    S1 -->|>0 confirmed| S2[阶段 2: 修复 + 验证]
+    S2 --> S3
+    S3 --> End([结束])
 ```
 
 ### 阶段执行
@@ -116,11 +111,9 @@ flowchart TD
 
 | 阶段 | Orch 读取 | Agent 读取 |
 | ---- | --------- | ---------- |
-| 1 | `1-dispatch-orch.md` | `1-review-reviewer.md` |
-| 2 | `2-merge-orch.md` | (无 agent) |
-| 3 | `3-dispatch-orch.md` | `3-verify-verifier.md` |
-| 4 | `4-dispatch-orch.md` | `4-fix-verify.md` |
-| 5 | `5-summary-orch.md` | (无 agent) |
+| 1 | `1-pipeline-orch.md` | `1-review-reviewer.md` / `1-verify-verifier.md` |
+| 2 | `2-fix-orch.md` | `2-fix-verify.md` |
+| 3 | `3-summary-orch.md` | (无 agent) |
 
 ## 5. Finding 格式（Evidence 要求）
 
@@ -220,8 +213,7 @@ review-commit
 review-range
 review-repo-path
 review-pr
-s2-candidate-count
-s3-confirmed-count
-s4-round
+confirmed-count
+s2-round
 review-summary-artifact
 ```

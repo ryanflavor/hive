@@ -1,4 +1,4 @@
-# 阶段 4: 修复 / 验证
+# 阶段 2: 修复 / 验证
 
 本文件同时包含 fixer 和 checker 两个角色的指令。根据 Orchestrator 发来的任务判断自己的角色。
 
@@ -7,15 +7,6 @@
 ## Fixer
 
 根据 confirmed findings 修复问题，运行 validators。
-
-```mermaid
-flowchart TD
-    Start([开始]) --> Read[读取 fix task]
-    Read --> Fix[修改代码]
-    Fix --> Validate[运行 validators]
-    Validate --> Write[写 fix artifact]
-    Write --> Done[status-set done]
-```
 
 ### 规则
 
@@ -49,15 +40,6 @@ flowchart TD
 ## Checker
 
 验证 fixer 的修复是否解决了全部 confirmed findings。
-
-```mermaid
-flowchart TD
-    Start([开始]) --> Read[读取 verify task + fix artifact]
-    Read --> Diff[查看最新 diff]
-    Diff --> Check[逐项验证]
-    Check --> Write[写 verify artifact]
-    Write --> Done[status-set done]
-```
 
 ### 检查点
 

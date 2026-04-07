@@ -2,7 +2,7 @@
 
 独立审查 request 指定的变更，输出带 evidence 的 findings。
 
-收到阶段 1 消息后，不要先回复泛化的 ready / 自我介绍。第一动作必须是：读取本文件、读取 request artifact、设置 busy 状态并开始执行审查。
+收到阶段 1 消息后，不要先回复泛化的 ready / 自我介绍。第一动作必须是：读取 request artifact、设置 busy 状态并开始执行审查。
 
 ```mermaid
 flowchart TD

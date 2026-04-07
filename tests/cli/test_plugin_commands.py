@@ -132,30 +132,21 @@ def test_plugin_enable_code_review_materializes_skill(runner, configure_hive_hom
     # --- Stage files exist ---
     stages_dir = hive_home / "plugins" / "installed" / "code-review" / "skills" / "code-review" / "stages"
     expected_stages = [
-        "1-dispatch-orch.md", "1-review-reviewer.md", "2-merge-orch.md",
-        "3-dispatch-orch.md", "3-verify-verifier.md",
-        "4-dispatch-orch.md", "4-fix-verify.md", "5-summary-orch.md",
+        "1-pipeline-orch.md", "1-review-reviewer.md", "1-verify-verifier.md",
+        "2-fix-orch.md", "2-fix-verify.md", "3-summary-orch.md",
     ]
     for name in expected_stages:
         assert (stages_dir / name).exists(), f"Missing stage file: {name}"
 
-    old_stages = [
-        "1-review-orchestrator.md", "1-review-opus.md", "1-review-codex.md",
-        "2-judge-consensus-orchestrator.md",
-        "3-cross-confirm-orchestrator.md", "3-cross-confirm-opus.md", "3-cross-confirm-codex.md",
-        "4-fix-verify-orchestrator.md", "4-fix-verify-opus.md", "4-fix-verify-codex.md",
-        "5-summary-orchestrator.md",
-    ]
-    for name in old_stages:
-        assert not (stages_dir / name).exists(), f"Old stage file still exists: {name}"
-
-    # --- S1 dispatch ---
-    s1_dispatch = (stages_dir / "1-dispatch-orch.md").read_text()
-    assert "hive spawn reviewer-a" in s1_dispatch
-    assert "hive spawn reviewer-b" in s1_dispatch
-    assert "hive spawn reviewer-c" in s1_dispatch
-    assert "hive layout main-vertical" in s1_dispatch
-    assert "hive status-set busy --task code-review --activity launch-reviews" in s1_dispatch
+    # --- S1 pipeline ---
+    s1_pipeline = (stages_dir / "1-pipeline-orch.md").read_text()
+    assert "hive spawn reviewer-a" in s1_pipeline
+    assert "hive spawn reviewer-b" in s1_pipeline
+    assert "hive spawn reviewer-c" in s1_pipeline
+    assert "hive kill reviewer-a" in s1_pipeline
+    assert "hive spawn verifier-a" in s1_pipeline
+    assert "hive layout main-vertical" in s1_pipeline
+    assert 'rm -f' in s1_pipeline
 
     # --- S1 reviewer ---
     s1_reviewer = (stages_dir / "1-review-reviewer.md").read_text()
@@ -163,29 +154,20 @@ def test_plugin_enable_code_review_materializes_skill(runner, configure_hive_hom
     assert "Code:" in s1_reviewer
     assert "Verify:" in s1_reviewer
 
-    # --- S2 merge ---
-    s2_merge = (stages_dir / "2-merge-orch.md").read_text()
-    assert "hive status-set busy --task code-review --activity merge-votes" in s2_merge
+    # --- S1 verifier ---
+    s1_verifier = (stages_dir / "1-verify-verifier.md").read_text()
+    assert "confirmed" in s1_verifier
+    assert "fabricated" in s1_verifier
 
-    # --- S3 dispatch ---
-    s3_dispatch = (stages_dir / "3-dispatch-orch.md").read_text()
-    assert "hive spawn verifier-a" in s3_dispatch
-    assert "hive kill reviewer-a" in s3_dispatch
-    assert "hive layout main-vertical" in s3_dispatch
+    # --- S2 fix ---
+    s2_fix = (stages_dir / "2-fix-orch.md").read_text()
+    assert "hive spawn fixer" in s2_fix
+    assert "hive spawn checker" in s2_fix
+    assert "hive kill fixer" in s2_fix
 
-    # --- S3 verifier ---
-    s3_verifier = (stages_dir / "3-verify-verifier.md").read_text()
-    assert "confirmed" in s3_verifier
-    assert "fabricated" in s3_verifier
-
-    # --- S4 dispatch ---
-    s4_dispatch = (stages_dir / "4-dispatch-orch.md").read_text()
-    assert "hive spawn fixer" in s4_dispatch
-    assert "hive spawn checker" in s4_dispatch
-
-    # --- S5 summary ---
-    s5_summary = (stages_dir / "5-summary-orch.md").read_text()
-    assert 'hive status-set done "review workflow complete"' in s5_summary
+    # --- S3 summary ---
+    s3_summary = (stages_dir / "3-summary-orch.md").read_text()
+    assert 'hive status-set done "review workflow complete"' in s3_summary
 
     enabled_json = runner.invoke(cli, ["plugin", "enable", "code-review", "--json"])
     assert enabled_json.exit_code == 0
