@@ -146,7 +146,8 @@ def test_plugin_enable_code_review_materializes_skill(runner, configure_hive_hom
     assert "hive kill reviewer-a" in s1_pipeline
     assert "hive spawn verifier-a" in s1_pipeline
     assert "hive layout main-vertical" in s1_pipeline
-    assert 'rm -f' in s1_pipeline
+    assert "hive send orch" in s1_pipeline
+    assert "idle" in s1_pipeline.lower()
 
     # --- S1 reviewer ---
     s1_reviewer = (stages_dir / "1-review-reviewer.md").read_text()
@@ -167,7 +168,7 @@ def test_plugin_enable_code_review_materializes_skill(runner, configure_hive_hom
 
     # --- S3 summary ---
     s3_summary = (stages_dir / "3-summary-orch.md").read_text()
-    assert 'hive status-set done "review workflow complete"' in s3_summary
+    assert "review-summary.md" in s3_summary
 
     enabled_json = runner.invoke(cli, ["plugin", "enable", "code-review", "--json"])
     assert enabled_json.exit_code == 0

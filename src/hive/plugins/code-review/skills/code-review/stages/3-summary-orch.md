@@ -66,9 +66,4 @@ gh pr comment <number> --body-file "$WORKSPACE/artifacts/review-summary.md"
 
 ## 完成
 
-```bash
-hive status-set done "review workflow complete" \
-  --task code-review \
-  --meta stage=s3 \
-  --meta artifact=$WORKSPACE/artifacts/review-summary.md
-```
+输出 summary 到 pane 即可。整个 review workflow 结束。

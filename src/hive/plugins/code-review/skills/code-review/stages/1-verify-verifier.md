@@ -18,7 +18,7 @@ flowchart TD
     Fabricated --> Next
     Next -->|是| Loop
     Next -->|否| Write[写 result artifact]
-    Write --> Done[status-set done]
+    Write --> Done[hive send orch]
 ```
 
 ## 验证步骤
@@ -68,4 +68,10 @@ grep -F 'code snippet from finding' path/to/file.py
 
 ## 回传
 
-用 task artifact 中的 Done Command 回传，一条即可。
+用 task 中的 Done Command 通知 orchestrator：
+
+```bash
+hive send orch "verify done verifier=<自己的名字> artifact=<result artifact path>"
+```
+
+**只发这一条，不要发其他消息。**

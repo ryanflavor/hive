@@ -33,7 +33,13 @@
 
 ### 回传
 
-用 task 中的 Done Command 回传。
+用 task 中的 Done Command 通知 orchestrator：
+
+```bash
+hive send orch "fix done round=N artifact=<artifact path>"
+```
+
+**只发这一条，不要发其他消息。**
 
 ---
 
@@ -67,4 +73,10 @@ pass / fail
 
 ### 回传
 
-用 task 中的 Done Command 回传。`result` 只能是 `pass` 或 `fail`。
+用 task 中的 Done Command 通知 orchestrator：
+
+```bash
+hive send orch "verify done round=N result=<pass|fail> artifact=<artifact path>"
+```
+
+**只发这一条，不要发其他消息。** `result` 只能是 `pass` 或 `fail`。

@@ -2,7 +2,7 @@
 
 独立审查 request 指定的变更，输出带 evidence 的 findings。
 
-收到阶段 1 消息后，不要先回复泛化的 ready / 自我介绍。第一动作必须是：读取 request artifact、设置 busy 状态并开始执行审查。
+收到阶段 1 消息后，不要先回复泛化的 ready / 自我介绍。第一动作必须是：读取 request artifact 并开始执行审查。
 
 ```mermaid
 flowchart TD
@@ -11,12 +11,12 @@ flowchart TD
     S2 --> S3[3. 执行 diff 命令]
     S3 --> S4[4. 审查代码]
     S4 --> S5[5. 写 artifact]
-    S5 --> S6[6. status-set done]
+    S5 --> S6[6. hive send orch]
 ```
 
 ## 1. 读取 request
 
-读取 orchestrator 指定的 request artifact。若缺少以下任一字段，立即失败回传：
+读取 orchestrator 指定的 request artifact。若缺少以下任一字段，立即用 Done Command 回传失败：
 
 - Mode
 - Repo Path
@@ -28,7 +28,7 @@ flowchart TD
 失败示例：
 
 ```bash
-hive status-set failed "invalid request" --task code-review --meta stage=s1 --meta reviewer=<自己的名字>
+hive send orch "review done reviewer=<自己的名字> verdict=error artifact=none"
 ```
 
 ## 2. 读取 REVIEW.md
@@ -102,4 +102,10 @@ hive status-set failed "invalid request" --task code-review --meta stage=s1 --me
 
 ## 6. 通知 Orchestrator
 
-用 request 里的 Done Command 回传。Done Command 已包含全部信号，一条即可。
+用 request 里的 Done Command 回传。这条消息会直接发送到 orch 的 pane：
+
+```bash
+hive send orch "review done reviewer=<自己的名字> verdict=<ok|issues> artifact=<artifact path>"
+```
+
+**只发这一条，不要发其他消息。**
