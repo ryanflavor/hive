@@ -20,7 +20,7 @@ def _setup_tmux_mocks(monkeypatch):
     monkeypatch.setattr("hive.agent.tmux.tag_pane", lambda *args, **_kwargs: tags.append(args))
     monkeypatch.setattr("hive.agent.tmux.wait_for_text", lambda *_args, **_kw: True)
     monkeypatch.setattr("hive.agent.tmux.wait_for_texts", lambda *_args, **_kw: True)
-    monkeypatch.setattr("hive.agent.tmux.send_keys", lambda _pane, text: calls.append(text))
+    monkeypatch.setattr("hive.agent.tmux.send_keys", lambda _pane, text, enter=True: calls.append(text))
     monkeypatch.setattr("hive.agent.tmux.send_key", lambda _pane, key: calls.append(f"<{key}>"))
     monkeypatch.setattr("hive.agent.resolve_session_id_for_pane", lambda _pane: None)
     monkeypatch.setattr("hive.agent.time.sleep", lambda *_: None)
@@ -109,6 +109,21 @@ def test_spawn_hive_bootstraps_and_sends_prompt(monkeypatch):
     assert "Please check your inbox." in calls
 
 
+def test_spawn_codex_hive_bootstraps_and_sends_prompt(monkeypatch):
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+
+    Agent.spawn(
+        name="w1", team_name="t", target_pane="%0",
+        cwd="/tmp", is_first=True, skill="hive",
+        prompt="Please check your inbox.", cli="codex",
+    )
+
+    assert "$hive" in calls
+    assert any("Use `hive team`, `hive send`, and `hive status-set`" in c for c in calls)
+    assert "Please check your inbox." in calls
+    assert calls.count("<Enter>") == 6
+
+
 def test_spawn_hive_can_skip_bootstrap_message(monkeypatch):
     calls, _ = _setup_tmux_mocks(monkeypatch)
 
@@ -130,7 +145,7 @@ def test_load_skill_sends_slash_command(monkeypatch):
 
     agent.load_skill("code-review")
 
-    assert calls == ["/code-review"]
+    assert calls == ["/code-review", "<Enter>"]
 
 
 def test_load_skill_uses_cli_specific_command(monkeypatch):
@@ -139,7 +154,7 @@ def test_load_skill_uses_cli_specific_command(monkeypatch):
 
     agent.load_skill("code-review")
 
-    assert calls == ["$code-review", "<Enter>"]
+    assert calls == ["$code-review", "<Enter>", "<Enter>"]
 
 
 def test_send_adds_extra_enter_for_codex(monkeypatch):
@@ -148,7 +163,7 @@ def test_send_adds_extra_enter_for_codex(monkeypatch):
 
     agent.send("hello world")
 
-    assert calls == ["hello world", "<Enter>"]
+    assert calls == ["hello world", "<Enter>", "<Enter>"]
 
 
 def test_send_no_extra_enter_for_droid(monkeypatch):
@@ -157,7 +172,7 @@ def test_send_no_extra_enter_for_droid(monkeypatch):
 
     agent.send("hello world")
 
-    assert calls == ["hello world"]
+    assert calls == ["hello world", "<Enter>"]
 
 
 def test_spawn_droid_uses_temp_settings_file_for_model(monkeypatch):

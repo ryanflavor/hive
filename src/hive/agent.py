@@ -89,6 +89,21 @@ def _build_droid_model_settings(model: str) -> tuple[str, str]:
     return json.dumps({"sessionDefaultSettings": {"model": target_id}}), target_id
 
 
+_EXTRA_ENTER_SETTLE_SECONDS = 0.05
+
+
+def _submit_interactive_text(pane_id: str, text: str, cli: str) -> None:
+    """Submit text to an interactive agent TUI."""
+    from .agent_cli import get_profile
+
+    profile = get_profile(cli)
+    tmux.send_keys(pane_id, text, enter=False)
+    tmux.send_key(pane_id, "Enter")
+    if profile and profile.extra_enter:
+        time.sleep(_EXTRA_ENTER_SETTLE_SECONDS)
+        tmux.send_key(pane_id, "Enter")
+
+
 @dataclass
 class Agent:
     name: str
@@ -204,20 +219,16 @@ class Agent:
             if skill and skill != "none":
                 agent.load_skill(skill)
 
-            needs_extra_enter = profile.extra_enter if profile else False
-
             if skill == "hive" and send_bootstrap_prompt:
-                tmux.send_keys(pane_id,
+                _submit_interactive_text(
+                    pane_id,
                     "I am a hive teammate. "
                     "Use `hive team`, `hive send`, and `hive status-set` to collaborate. "
-                    "Hive messages arrive inline as `<HIVE ...> ... </HIVE>` blocks."
+                    "Hive messages arrive inline as `<HIVE ...> ... </HIVE>` blocks.",
+                    cli,
                 )
-                if needs_extra_enter:
-                    tmux.send_key(pane_id, "Enter")
             if prompt:
-                tmux.send_keys(pane_id, prompt)
-                if needs_extra_enter:
-                    tmux.send_key(pane_id, "Enter")
+                _submit_interactive_text(pane_id, prompt, cli)
 
         return agent
 
@@ -225,11 +236,7 @@ class Agent:
 
     def send(self, text: str) -> None:
         """Send a prompt to the agent TUI."""
-        from .agent_cli import get_profile
-        profile = get_profile(self.cli)
-        tmux.send_keys(self.pane_id, text)
-        if profile and profile.extra_enter:
-            tmux.send_key(self.pane_id, "Enter")
+        _submit_interactive_text(self.pane_id, text, self.cli)
 
     def load_skill(self, skill_name: str) -> None:
         """Load a skill in the pane using the CLI-specific command."""
@@ -238,11 +245,9 @@ class Agent:
         from .agent_cli import get_profile
         profile = get_profile(self.cli)
         if profile:
-            tmux.send_keys(self.pane_id, profile.skill_cmd.format(name=skill_name))
-            if profile.extra_enter:
-                tmux.send_key(self.pane_id, "Enter")
+            _submit_interactive_text(self.pane_id, profile.skill_cmd.format(name=skill_name), self.cli)
         else:
-            tmux.send_keys(self.pane_id, f"/{skill_name}")
+            _submit_interactive_text(self.pane_id, f"/{skill_name}", self.cli)
         time.sleep(2)
 
     def interrupt(self) -> None:

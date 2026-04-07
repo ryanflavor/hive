@@ -145,7 +145,8 @@ def configure_hive_home(monkeypatch, tmp_path):
 @pytest.fixture
 def mock_tmux_send(monkeypatch):
     sent: list[tuple[str, str]] = []
-    monkeypatch.setattr("hive.agent.tmux.send_keys", lambda pane, text: sent.append((pane, text)))
+    monkeypatch.setattr("hive.agent.tmux.send_keys", lambda pane, text, enter=True: sent.append((pane, text)))
+    monkeypatch.setattr("hive.agent.tmux.send_key", lambda pane, key: sent.append((pane, f"<{key}>")))
     monkeypatch.setattr("hive.agent.time.sleep", lambda _s: None)
     return sent
 
