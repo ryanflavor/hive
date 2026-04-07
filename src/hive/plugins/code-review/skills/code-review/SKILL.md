@@ -162,18 +162,28 @@ flowchart TB
 
 **角色：纯编排者，消息驱动**
 
-- 启动流程，分配任务，发完后 idle
-- 收到 agent 的 `hive send orch` 消息后被唤醒，处理后再 idle
+- 启动流程，分配任务，发完后 **结束当前 response**
+- 收到 agent 的 `hive send orch` 消息后被唤醒，处理后再结束 response
 - S1 做 findings 格式校验 + verifier 管理
 - S2 做修复验证循环
 - S3 做最终汇总
+
+**关键约束（每个 idle 点都必须遵守）：**
+
+发完任务后，你的 response 到此结束。禁止：
+- 轮询 artifact 文件（禁止 glob/ls/sleep/poll 循环）
+- 运行 `hive wait-status`
+- 提前读取 artifact
+- 写 python 脚本检查文件是否出现
+- 做 git diff / git show
+
+下一次 response 由 `<HIVE>` 消息触发。
 
 **边界：**
 
 - 全程不审 diff、不出 findings
 - reviewer/verifier artifact 只有他们自己写
 - 每个阶段结束 kill agent pane，下个阶段重新 spawn
-- 不使用 `hive wait-status`，不轮询
 
 ## 8. Request 契约
 

@@ -42,6 +42,8 @@ flowchart TD
 CTX_JSON=$(hive current)
 WORKSPACE=$(printf '%s' "$CTX_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("workspace",""))')
 
+# 清理上次残留（必须在生成新 artifact 之前）
+rm -rf "$WORKSPACE/artifacts" "$WORKSPACE/state" "$WORKSPACE/status"
 mkdir -p "$WORKSPACE/artifacts" "$WORKSPACE/state"
 
 # 记录 review 上下文（按实际情况替换）
@@ -86,9 +88,20 @@ hive send reviewer-b "阶段 1 review：执行 request artifact $WORKSPACE/artif
 hive send reviewer-c "阶段 1 review：执行 request artifact $WORKSPACE/artifacts/reviewer-c-request.md，完成时仅用其中的 Done Command 回传。"
 ```
 
-发完后 **结束当前 turn，idle 等消息**。不要做任何事。
+发完后 **立即结束当前 response，什么都不做**。
 
-## 消息处理
+**禁止**：
+- 不要轮询 artifact 文件（禁止 glob/ls/sleep 循环）
+- 不要运行 `hive wait-status`
+- 不要读取任何 artifact
+- 不要写任何 python 脚本来检查文件
+- 不要做 git diff / git show
+
+你的 response 到这里结束。下一次 response 会由 reviewer 的 `hive send orch` 消息触发。
+
+---
+
+## 消息处理（收到 HIVE 消息后才执行以下内容）
 
 orch 会收到形如以下的 `<HIVE>` 消息：
 
