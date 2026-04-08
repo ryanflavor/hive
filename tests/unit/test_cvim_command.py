@@ -28,6 +28,17 @@ def _make_session(tmp_path: Path, messages: list[dict]) -> Path:
     return f
 
 
+def test_edit_submission_interrupts_before_paste_by_default():
+    text = COMMAND.read_text()
+
+    assert 'interrupt_before_paste_default="${DROID_VIM_INTERRUPT_BEFORE_PASTE:-1}"' in text
+    assert 'did_pre_interrupt="0"' in text
+    assert 'did_pre_interrupt="1"' in text
+    assert 'sleep "$interrupt_settle_delay"' in text
+    assert 'if [[ "$content_changed" == "1" && "$did_pre_interrupt" != "1" ]]; then' in text
+    assert 'elif [[ "$content_changed" != "1" ]]; then' in text
+
+
 def test_extract_includes_exit_spec_mode_plan_with_text(tmp_path):
     shared = _import_shared()
     session = _make_session(tmp_path, [

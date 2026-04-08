@@ -58,7 +58,7 @@ session_map_file="${HIVE_SESSION_MAP_FILE:-${DROID_VIM_SESSION_MAP_FILE:-${XDG_C
 output_mode="${DROID_VIM_OUTPUT_MODE:-text}"
 cursor_mode="${DROID_VIM_CURSOR_MODE:-start}"
 paste_delay_default="${DROID_VIM_PASTE_DELAY:-0.20}"
-interrupt_before_paste_default="${DROID_VIM_INTERRUPT_BEFORE_PASTE:-0}"
+interrupt_before_paste_default="${DROID_VIM_INTERRUPT_BEFORE_PASTE:-1}"
 interrupt_after_paste_default="${DROID_VIM_INTERRUPT_AFTER_PASTE:-1}"
 interrupt_settle_delay_default="${DROID_VIM_INTERRUPT_SETTLE_DELAY:-0.08}"
 submit_delay_default="${DROID_VIM_SUBMIT_DELAY:-0.03}"
@@ -509,11 +509,13 @@ interrupt_before_paste="$6"
 interrupt_after_paste="$7"
 interrupt_settle_delay="$8"
 submit_delay="$9"
+did_pre_interrupt="0"
 
 sleep "$paste_delay"
 
 if [[ "$content_changed" == "1" && "$interrupt_before_paste" != "0" ]]; then
   tmux send-keys -t "$reply_pane" Escape
+  did_pre_interrupt="1"
   sleep "$interrupt_settle_delay"
 fi
 
@@ -525,13 +527,15 @@ if [[ "$content_changed" == "1" ]]; then
     tmux load-buffer "$send_file"
     tmux paste-buffer -p -t "$reply_pane"
   fi
+  sleep "$interrupt_settle_delay"
 fi
 
 if [[ "$interrupt_after_paste" != "0" ]]; then
-  if [[ "$content_changed" == "1" ]]; then
-    sleep "$interrupt_settle_delay"
+  if [[ "$content_changed" == "1" && "$did_pre_interrupt" != "1" ]]; then
+    tmux send-keys -t "$reply_pane" Escape
+  elif [[ "$content_changed" != "1" ]]; then
+    tmux send-keys -t "$reply_pane" Escape
   fi
-  tmux send-keys -t "$reply_pane" Escape
 fi
 
 if [[ "$content_changed" == "1" ]]; then
