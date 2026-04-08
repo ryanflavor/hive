@@ -57,7 +57,11 @@ split_direction="${DROID_VIM_SPLIT_DIRECTION:-right}"
 session_map_file="${HIVE_SESSION_MAP_FILE:-${DROID_VIM_SESSION_MAP_FILE:-${XDG_CACHE_HOME:-$HOME/.cache}/hive/session-map.json}}"
 output_mode="${DROID_VIM_OUTPUT_MODE:-text}"
 cursor_mode="${DROID_VIM_CURSOR_MODE:-start}"
-paste_delay_default="${DROID_VIM_PASTE_DELAY:-0.20}"
+default_paste_delay="0.20"
+if [[ "$transport" == "popup" ]]; then
+  default_paste_delay="0.60"
+fi
+paste_delay_default="${DROID_VIM_PASTE_DELAY:-$default_paste_delay}"
 interrupt_before_paste_default="${DROID_VIM_INTERRUPT_BEFORE_PASTE:-1}"
 interrupt_after_paste_default="${DROID_VIM_INTERRUPT_AFTER_PASTE:-1}"
 interrupt_settle_delay_default="${DROID_VIM_INTERRUPT_SETTLE_DELAY:-0.08}"
@@ -175,7 +179,26 @@ PY
 }
 
 build_helper_cmd() {
-  printf '%q ' "$helper_file" "$reply_pane" "$editor_bin" "$msg_file" "$orig_file" "$tmpdir" "$output_mode" "$paste_delay_default" "$interrupt_before_paste_default" "$interrupt_after_paste_default" "$interrupt_settle_delay_default" "$submit_delay_default" "$cursor_mode" "$payload_builder"
+  printf '%q ' "$helper_file" "$reply_pane" "$editor_bin" "$msg_file" "$orig_file" "$tmpdir" "$output_mode" "$paste_delay_default" "$interrupt_before_paste_default" "$interrupt_after_paste_default" "$interrupt_settle_delay_default" "$submit_delay_default" "$cursor_mode" "$payload_builder" "$transport"
+}
+
+queue_post_run() {
+  local content_state_file="$tmpdir/content_changed"
+  local send_file="$tmpdir/send.txt"
+  local post_file="$tmpdir/post.sh"
+  local content_changed="0"
+
+  if [[ -f "$content_state_file" ]]; then
+    content_changed="$(cat "$content_state_file" 2>/dev/null || printf '0')"
+  fi
+
+  if [[ ! -f "$post_file" ]]; then
+    rm -rf "$tmpdir"
+    return 0
+  fi
+
+  printf -v post_cmd '%q ' "$post_file" "$reply_pane" "$send_file" "$tmpdir" "$paste_delay_default" "$content_changed" "$interrupt_before_paste_default" "$interrupt_after_paste_default" "$interrupt_settle_delay_default" "$submit_delay_default"
+  tmux run-shell -b "$post_cmd"
 }
 
 tmux_supports_popup() {
@@ -464,12 +487,17 @@ interrupt_settle_delay="${10}"
 submit_delay="${11}"
 cursor_mode="${12}"
 payload_builder="${13}"
+transport_mode="${14}"
 send_file="$tmpdir/send.txt"
 post_file="$tmpdir/post.sh"
+content_state_file="$tmpdir/content_changed"
 content_changed="0"
+retain_tmpdir="0"
 
 cleanup() {
-  rm -rf "$tmpdir"
+  if [[ "$retain_tmpdir" != "1" ]]; then
+    rm -rf "$tmpdir"
+  fi
 }
 
 trap cleanup EXIT
@@ -495,6 +523,7 @@ if [[ -s "$msg_file" ]] && ! cmp -s "$msg_file" "$orig_file"; then
   content_changed="1"
   "$payload_builder" "$orig_file" "$msg_file" "$send_file" "$send_mode"
 fi
+printf '%s' "$content_changed" > "$content_state_file"
 
 cat > "$post_file" <<'POST'
 #!/usr/bin/env bash
@@ -527,7 +556,9 @@ if [[ "$content_changed" == "1" ]]; then
     tmux load-buffer "$send_file"
     tmux paste-buffer -p -t "$reply_pane"
   fi
-  sleep "$interrupt_settle_delay"
+  content_bytes=$(wc -c < "$send_file")
+  paste_settle=$(awk "BEGIN { d = 0.10 + ${content_bytes} / 1024 * 0.03; if (d > 3.0) d = 3.0; printf \"%.2f\", d }")
+  sleep "$paste_settle"
 fi
 
 if [[ "$interrupt_after_paste" != "0" ]]; then
@@ -545,6 +576,10 @@ fi
 rm -rf "$tmpdir"
 POST
 chmod +x "$post_file"
+if [[ "$transport_mode" == "popup" ]]; then
+  retain_tmpdir="1"
+  exit 0
+fi
 trap - EXIT
 printf -v post_cmd '%q ' "$post_file" "$reply_pane" "$send_file" "$tmpdir" "$paste_delay" "$content_changed" "$interrupt_before_paste" "$interrupt_after_paste" "$interrupt_settle_delay" "$submit_delay"
 tmux run-shell -b "$post_cmd"
@@ -631,6 +666,7 @@ open_vim_tmux_popup() {
   read -r popup_x popup_y popup_w popup_h < <(resolve_tmux_popup_geometry "$target_client")
   helper_cmd="$(build_helper_cmd)"
   tmux display-popup -c "$target_client" -t "$src_pane" -d "$src_cwd" -x "$popup_x" -y "$popup_y" -w "$popup_w" -h "$popup_h" -T "$popup_title" -E "$helper_cmd"
+  queue_post_run
 }
 
 open_vim_tmux_window() {

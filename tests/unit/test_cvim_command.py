@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -26,17 +28,6 @@ def _make_session(tmp_path: Path, messages: list[dict]) -> Path:
         lines.append(json.dumps({"type": "message", "message": msg}))
     f.write_text("\n".join(lines) + "\n")
     return f
-
-
-def test_edit_submission_interrupts_before_paste_by_default():
-    text = COMMAND.read_text()
-
-    assert 'interrupt_before_paste_default="${DROID_VIM_INTERRUPT_BEFORE_PASTE:-1}"' in text
-    assert 'did_pre_interrupt="0"' in text
-    assert 'did_pre_interrupt="1"' in text
-    assert 'sleep "$interrupt_settle_delay"' in text
-    assert 'if [[ "$content_changed" == "1" && "$did_pre_interrupt" != "1" ]]; then' in text
-    assert 'elif [[ "$content_changed" != "1" ]]; then' in text
 
 
 def test_extract_includes_exit_spec_mode_plan_with_text(tmp_path):
@@ -73,11 +64,14 @@ def _write_fake_tmux(tmp_path: Path) -> Path:
         """#!/usr/bin/env python3
 import json
 import os
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 state = json.loads(os.environ["FAKE_TMUX_STATE"])
 log_path = Path(os.environ["FAKE_TMUX_LOG"])
+actions_path = Path(os.environ["FAKE_TMUX_ACTIONS"]) if os.environ.get("FAKE_TMUX_ACTIONS") else None
 args = sys.argv[1:]
 cmd = args[0]
 panes = {pane["id"]: pane for pane in state["panes"]}
@@ -85,6 +79,27 @@ panes = {pane["id"]: pane for pane in state["panes"]}
 
 def _print(value):
     sys.stdout.write(f"{value}\\n")
+
+
+def _append(event):
+    if actions_path is None:
+        return
+    event.setdefault("ts", time.monotonic())
+    with actions_path.open("a") as fh:
+        fh.write(json.dumps(event) + "\\n")
+
+
+def _pane_is_ready(now):
+    min_ready_delay = float(os.environ.get("FAKE_TMUX_MIN_READY_DELAY", "0") or "0")
+    if actions_path is None or min_ready_delay <= 0 or not actions_path.exists():
+        return True
+    for line in reversed(actions_path.read_text().splitlines()):
+        if not line.strip():
+            continue
+        event = json.loads(line)
+        if event.get("cmd") == "run-shell":
+            return now - event.get("ts", now) >= min_ready_delay
+    return True
 
 
 def _target_pane():
@@ -140,12 +155,39 @@ if cmd == "list-panes":
     raise SystemExit(0)
 
 if cmd == "display-popup":
-    log_path.write_text(json.dumps({"cmd": cmd, "args": args}))
+    event = {"cmd": cmd, "args": args}
+    log_path.write_text(json.dumps(event))
+    _append(event)
+    if os.environ.get("FAKE_TMUX_EXEC_POPUP") == "1":
+        popup_cmd = args[args.index("-E") + 1]
+        popup_env = os.environ.copy()
+        if os.environ.get("FAKE_TMUX_MARK_POPUP_CONTEXT") == "1":
+            popup_env["FAKE_TMUX_IN_POPUP"] = "1"
+        subprocess.run(popup_cmd, shell=True, check=True, env=popup_env)
     raise SystemExit(0)
 
 if cmd == "new-window":
-    log_path.write_text(json.dumps({"cmd": cmd, "args": args}))
+    event = {"cmd": cmd, "args": args}
+    log_path.write_text(json.dumps(event))
+    _append(event)
     _print(state.get("new_window_id", "@2"))
+    raise SystemExit(0)
+
+if cmd in {"send-keys", "load-buffer", "paste-buffer"}:
+    event = {"cmd": cmd, "args": args}
+    if not _pane_is_ready(time.monotonic()):
+        event["dropped"] = True
+    _append(event)
+    raise SystemExit(0)
+
+if cmd == "run-shell":
+    event = {"cmd": cmd, "args": args}
+    if os.environ.get("FAKE_TMUX_DROP_RUN_SHELL_IN_POPUP") == "1" and os.environ.get("FAKE_TMUX_IN_POPUP") == "1":
+        event["dropped"] = True
+        _append(event)
+        raise SystemExit(0)
+    _append(event)
+    subprocess.run(args[-1], shell=True, check=True, env=os.environ.copy())
     raise SystemExit(0)
 
 raise SystemExit(1)
@@ -153,6 +195,37 @@ raise SystemExit(1)
     )
     script.chmod(0o755)
     return script
+
+
+def _write_fake_editor(tmp_path: Path) -> Path:
+    script = tmp_path / "fake-editor"
+    script.write_text(
+        """#!/usr/bin/env python3
+import os
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+append_text = os.environ.get("FAKE_EDITOR_APPEND_TEXT")
+if append_text:
+    existing = path.read_text() if path.exists() else ""
+    with path.open("a") as fh:
+        if existing and not existing.endswith("\\n"):
+            fh.write("\\n")
+        fh.write(append_text)
+"""
+    )
+    script.chmod(0o755)
+    return script
+
+
+def _materialize_cvim_bundle(tmp_path: Path) -> Path:
+    bundle_root = tmp_path / "cvim-bundle"
+    shutil.copytree(ROOT / "src" / "hive" / "plugins" / "cvim", bundle_root)
+    for file_path in (bundle_root / "bin").iterdir():
+        if file_path.is_file():
+            file_path.chmod(0o755)
+    return bundle_root / "bin" / "droid-vim-command"
 
 
 def _run_command(
@@ -163,6 +236,7 @@ def _run_command(
     extra_env: dict[str, str] | None = None,
 ) -> dict[str, object]:
     _write_fake_tmux(tmp_path)
+    command = _materialize_cvim_bundle(tmp_path)
     log_path = tmp_path / "tmux-log.json"
     state = {
         "current_pane": current_pane,
@@ -182,8 +256,50 @@ def _run_command(
     if extra_env:
         env.update(extra_env)
 
-    subprocess.run([str(COMMAND)], check=True, env=env, cwd=ROOT)
+    subprocess.run([str(command)], check=True, env=env, cwd=ROOT)
     return json.loads(log_path.read_text())
+
+
+def _run_command_actions(
+    tmp_path: Path,
+    *,
+    current_pane: str,
+    panes: list[dict[str, object]],
+    extra_env: dict[str, str] | None = None,
+    use_default_delays: bool = False,
+) -> list[dict[str, object]]:
+    _write_fake_tmux(tmp_path)
+    command = _materialize_cvim_bundle(tmp_path)
+    editor = _write_fake_editor(tmp_path)
+    log_path = tmp_path / "tmux-log.json"
+    actions_path = tmp_path / "tmux-actions.jsonl"
+    state = {
+        "current_pane": current_pane,
+        "client_width": 200,
+        "client_height": 100,
+        "panes": panes,
+    }
+    env = os.environ.copy()
+    env["PATH"] = f"{tmp_path}:{env.get('PATH', '')}"
+    env["TMUX"] = "/tmp/tmux-test"
+    env["TMUX_PANE"] = current_pane
+    env["DROID_VIM_TRANSPORT"] = "popup"
+    env["DROID_VIM_SEED_MODE"] = "blank"
+    env["DROID_VIM_OUTPUT_MODE"] = "text"
+    env["DROID_VIM_EDITOR"] = str(editor)
+    if not use_default_delays:
+        env["DROID_VIM_PASTE_DELAY"] = "0"
+        env["DROID_VIM_INTERRUPT_SETTLE_DELAY"] = "0"
+        env["DROID_VIM_SUBMIT_DELAY"] = "0"
+    env["FAKE_TMUX_STATE"] = json.dumps(state)
+    env["FAKE_TMUX_LOG"] = str(log_path)
+    env["FAKE_TMUX_ACTIONS"] = str(actions_path)
+    env["FAKE_TMUX_EXEC_POPUP"] = "1"
+    if extra_env:
+        env.update(extra_env)
+
+    subprocess.run([str(command)], check=True, env=env, cwd=ROOT)
+    return [json.loads(line) for line in actions_path.read_text().splitlines() if line.strip()]
 
 
 def _popup_geometry(log_record: dict[str, object]) -> tuple[str, str, str, str]:
@@ -320,3 +436,103 @@ def test_popup_chooses_right_column_when_source_is_center_of_three_by_three(tmp_
     record = _run_command(tmp_path, current_pane="%x", panes=panes)
 
     assert _popup_geometry(record) == ("150", "0", "50", "100")
+
+
+def test_edited_save_interrupts_before_paste_and_submits(tmp_path):
+    actions = _run_command_actions(
+        tmp_path,
+        current_pane="%1",
+        panes=[
+            {"id": "%1", "left": 0, "top": 0, "width": 200, "height": 100},
+        ],
+        extra_env={"FAKE_EDITOR_APPEND_TEXT": "new line added"},
+    )
+
+    escape_indexes = [
+        index for index, event in enumerate(actions)
+        if event["cmd"] == "send-keys" and event["args"][-1] == "Escape"
+    ]
+    paste_index = next(
+        index for index, event in enumerate(actions)
+        if event["cmd"] == "paste-buffer"
+    )
+    enter_index = next(
+        index for index, event in enumerate(actions)
+        if event["cmd"] == "send-keys" and event["args"][-1] == "Enter"
+    )
+
+    assert len(escape_indexes) == 1
+    assert any(event["cmd"] == "load-buffer" for event in actions)
+    assert escape_indexes[0] < paste_index < enter_index
+
+
+def test_edited_save_waits_for_pane_ready_before_paste(tmp_path):
+    actions = _run_command_actions(
+        tmp_path,
+        current_pane="%1",
+        panes=[
+            {"id": "%1", "left": 0, "top": 0, "width": 200, "height": 100},
+        ],
+        extra_env={
+            "FAKE_EDITOR_APPEND_TEXT": "new line added",
+            "FAKE_TMUX_MIN_READY_DELAY": "0.30",
+        },
+        use_default_delays=True,
+    )
+
+    paste_event = next(event for event in actions if event["cmd"] == "paste-buffer")
+
+    assert not any(
+        event.get("dropped")
+        for event in actions
+        if event["cmd"] in {"send-keys", "load-buffer", "paste-buffer"}
+    )
+    assert not paste_event.get("dropped", False)
+
+
+def test_popup_schedules_post_after_popup_exits(tmp_path):
+    actions = _run_command_actions(
+        tmp_path,
+        current_pane="%1",
+        panes=[
+            {"id": "%1", "left": 0, "top": 0, "width": 200, "height": 100},
+        ],
+        extra_env={
+            "FAKE_EDITOR_APPEND_TEXT": "new line added",
+            "FAKE_TMUX_MARK_POPUP_CONTEXT": "1",
+            "FAKE_TMUX_DROP_RUN_SHELL_IN_POPUP": "1",
+        },
+        use_default_delays=True,
+    )
+
+    run_shell_events = [event for event in actions if event["cmd"] == "run-shell"]
+
+    assert len(run_shell_events) == 1
+    assert not run_shell_events[0].get("dropped", False)
+    assert any(event["cmd"] == "paste-buffer" for event in actions)
+    assert any(
+        event["cmd"] == "send-keys" and event["args"][-1] == "Enter"
+        for event in actions
+    )
+
+
+def test_unedited_save_interrupts_without_paste_or_submit(tmp_path):
+    actions = _run_command_actions(
+        tmp_path,
+        current_pane="%1",
+        panes=[
+            {"id": "%1", "left": 0, "top": 0, "width": 200, "height": 100},
+        ],
+    )
+
+    escape_events = [
+        event for event in actions
+        if event["cmd"] == "send-keys" and event["args"][-1] == "Escape"
+    ]
+
+    assert len(escape_events) == 1
+    assert not any(event["cmd"] in {"load-buffer", "paste-buffer"} for event in actions)
+    assert not any(
+        event["cmd"] == "send-keys" and event["args"][-1] == "Enter"
+        for event in actions
+    )
