@@ -45,14 +45,11 @@ def test_notify_is_suppressed_when_user_is_already_in_target_window(monkeypatch)
 
 def test_show_window_flash_renames_sets_title_and_builds_script(monkeypatch):
     rename_calls: list[tuple] = []
-    title_calls: list[tuple] = []
     option_calls: list[tuple] = []
     run_calls: list[tuple] = []
     cleanup_args: list[tuple] = []
 
     monkeypatch.setattr("hive.notify_ui.tmux.rename_window", lambda wt, name: rename_calls.append((wt, name)))
-    monkeypatch.setattr("hive.notify_ui.tmux.get_pane_title", lambda _pane: "[orch]")
-    monkeypatch.setattr("hive.notify_ui.tmux.set_pane_title", lambda pane, title: title_calls.append((pane, title)))
     monkeypatch.setattr("hive.notify_ui.tmux.set_window_option", lambda target, option, value: option_calls.append((target, option, value)))
     monkeypatch.setattr("hive.notify_ui.tmux._run", lambda args, check=False: run_calls.append(args))
     monkeypatch.setattr(
@@ -62,15 +59,13 @@ def test_show_window_flash_renames_sets_title_and_builds_script(monkeypatch):
 
     notify_ui.show_window_flash("Agent finished", "%9", "dev:1", "dev", seconds=8)
 
-    assert rename_calls == [("dev:1", "\U0001f916 dev \u00b7 Agent finished")]
-    assert title_calls == [("%9", "\U0001f916 [orch] \u00b7 done")]
+    assert rename_calls == [("dev:1", "dev \u00b7 Agent finished")]
     assert option_calls == [("dev:1", "@hive-notify-token", option_calls[0][2])]
     assert option_calls[0][2].startswith("%9:")
     assert cleanup_args == [{
         "window_target": "dev:1",
         "pane_id": "%9",
         "window_name": "dev",
-        "orig_title": "[orch]",
         "session": "dev",
         "hook_name": cleanup_args[0]["hook_name"],
         "token": option_calls[0][2],

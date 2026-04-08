@@ -55,7 +55,6 @@ MODE="${{1:-timeout}}"
 QT={qt}
 QP={qp}
 QNAME={qname}
-QTITLE={qtitle}
 SESSION={session}
 HOOK_NAME={hook_name}
 TOKEN={token}
@@ -67,13 +66,24 @@ cleanup() {{
   tmux set-window-option -t "$QT" -u window-status-style >/dev/null 2>&1 || true
   tmux set-window-option -t "$QT" -u window-status-current-style >/dev/null 2>&1 || true
   tmux rename-window -t "$QT" "$QNAME" >/dev/null 2>&1 || true
-  tmux select-pane -t "$QP" -T "$QTITLE" >/dev/null 2>&1 || true
   tmux set-window-option -t "$QT" -u @hive-notify-token >/dev/null 2>&1 || true
 }}
 
 cleanup
 if [ "$MODE" = "arrival" ]; then
   tmux select-pane -t "$QP" >/dev/null 2>&1 || true
+  for style in \
+    'fg=default,bg=colour236' \
+    'fg=default,bg=colour238' \
+    'fg=default,bg=colour24' \
+    'fg=default,bg=colour60' \
+    'fg=default,bg=colour238' \
+    'fg=default,bg=colour236'
+  do
+    tmux select-pane -t "$QP" -P "$style" >/dev/null 2>&1 || true
+    sleep 0.18
+  done
+  tmux select-pane -t "$QP" -P 'fg=default,bg=default' >/dev/null 2>&1 || true
 fi
 rm -f "$0"
 '''
@@ -84,7 +94,6 @@ def _write_notify_cleanup_script(
     window_target: str,
     pane_id: str,
     window_name: str,
-    orig_title: str,
     session: str,
     hook_name: str,
     token: str,
@@ -95,7 +104,6 @@ def _write_notify_cleanup_script(
             qt=shlex.quote(window_target),
             qp=shlex.quote(pane_id),
             qname=shlex.quote(window_name),
-            qtitle=shlex.quote(orig_title),
             session=shlex.quote(session),
             hook_name=shlex.quote(hook_name),
             token=shlex.quote(token),
@@ -112,12 +120,8 @@ def show_window_flash(
     window_name: str,
     seconds: int = 12,
 ) -> None:
-    flash_name = f"\U0001f916 {window_name} \u00b7 {message}"
+    flash_name = f"{window_name} \u00b7 {message}"
     tmux.rename_window(window_target, flash_name)
-
-    orig_title = tmux.get_pane_title(pane_id) or ""
-    badge_title = f"\U0001f916 {orig_title} \u00b7 done"
-    tmux.set_pane_title(pane_id, badge_title)
 
     duration = max(1, int(seconds))
     parts = window_target.rsplit(":", 1)
@@ -136,7 +140,6 @@ def show_window_flash(
         window_target=window_target,
         pane_id=pane_id,
         window_name=window_name,
-        orig_title=orig_title,
         session=session,
         hook_name=hook_name,
         token=token,
