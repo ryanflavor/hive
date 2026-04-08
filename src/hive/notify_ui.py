@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import shlex
+import tempfile
+import time
+from pathlib import Path
 
 from . import notify_state
 from . import tmux
@@ -13,39 +16,93 @@ def _user_is_already_in_target_window(pane_id: str, *, session_name: str, window
     return bool(active_window and active_window == window_target)
 
 
+NOTIFY_TOKEN_OPTION = "@hive-notify-token"
+
 FLASH_SCRIPT_TEMPLATE = r'''
-QT={qt}; QP={qp}; FLASH={flash_style}; ORIG={orig_style}; QNAME={qname}
-WIN_IDX={win_idx}
-SESSION={session}
-CLIENT=$(tmux list-clients -t "$SESSION" -F '#{{client_tty}}' 2>/dev/null | head -1)
-cleanup() {{
-  tmux set-window-option -t "$QT" -u window-status-style 2>/dev/null || true
-  tmux set-window-option -t "$QT" -u window-status-current-style 2>/dev/null || true
-  tmux rename-window -t "$QT" "$QNAME" 2>/dev/null || true
+QT={qt}; TOKEN={token}; FLASH={flash_style}; CLEANUP={cleanup}
+is_current() {{
+  CUR=$(tmux show-window-option -v -t "$QT" @hive-notify-token 2>/dev/null || echo '')
+  [ "$CUR" = "$TOKEN" ]
 }}
-is_active() {{
-  [ -z "$CLIENT" ] && return 1
-  CUR=$(tmux display-message -c "$CLIENT" -p '#{{window_index}}' 2>/dev/null || echo '')
-  [ "$CUR" = "$WIN_IDX" ]
+flash_on() {{
+  tmux set-window-option -t "$QT" window-status-style "$FLASH" >/dev/null 2>&1 || true
+  tmux set-window-option -t "$QT" window-status-current-style "$FLASH" >/dev/null 2>&1 || true
 }}
-on_arrive() {{
-  cleanup
-  tmux select-pane -t "$QP" 2>/dev/null || true
-  exit 0
+flash_off() {{
+  tmux set-window-option -t "$QT" -u window-status-style >/dev/null 2>&1 || true
+  tmux set-window-option -t "$QT" -u window-status-current-style >/dev/null 2>&1 || true
 }}
 elapsed=0
-while [ "$elapsed" -lt {duration} ]; do
-  if is_active; then on_arrive; fi
-  tmux set-window-option -t "$QT" window-status-style "$FLASH" 2>/dev/null || true
-  tmux set-window-option -t "$QT" window-status-current-style "$FLASH" 2>/dev/null || true
-  sleep 0.5; elapsed=$((elapsed + 1))
-  if is_active; then on_arrive; fi
-  tmux set-window-option -t "$QT" window-status-style "$ORIG" 2>/dev/null || true
-  tmux set-window-option -t "$QT" window-status-current-style "$ORIG" 2>/dev/null || true
+while [ "$elapsed" -lt {ticks} ]; do
+  is_current || exit 0
+  flash_on
   sleep 0.5
+  elapsed=$((elapsed + 1))
+  is_current || exit 0
+  flash_off
+  sleep 0.5
+  elapsed=$((elapsed + 1))
 done
-cleanup
+if [ -x "$CLEANUP" ]; then
+  "$CLEANUP" timeout
+fi
 '''
+
+CLEANUP_SCRIPT_TEMPLATE = r'''#!/usr/bin/env bash
+set -euo pipefail
+
+MODE="${{1:-timeout}}"
+QT={qt}
+QP={qp}
+QNAME={qname}
+QTITLE={qtitle}
+SESSION={session}
+HOOK_NAME={hook_name}
+TOKEN={token}
+
+cleanup() {{
+  tmux set-hook -ut "$SESSION" "$HOOK_NAME" >/dev/null 2>&1 || true
+  CUR="$(tmux show-window-option -v -t "$QT" @hive-notify-token 2>/dev/null || echo '')"
+  [ "$CUR" = "$TOKEN" ] || exit 0
+  tmux set-window-option -t "$QT" -u window-status-style >/dev/null 2>&1 || true
+  tmux set-window-option -t "$QT" -u window-status-current-style >/dev/null 2>&1 || true
+  tmux rename-window -t "$QT" "$QNAME" >/dev/null 2>&1 || true
+  tmux select-pane -t "$QP" -T "$QTITLE" >/dev/null 2>&1 || true
+  tmux set-window-option -t "$QT" -u @hive-notify-token >/dev/null 2>&1 || true
+}}
+
+cleanup
+if [ "$MODE" = "arrival" ]; then
+  tmux select-pane -t "$QP" >/dev/null 2>&1 || true
+fi
+rm -f "$0"
+'''
+
+
+def _write_notify_cleanup_script(
+    *,
+    window_target: str,
+    pane_id: str,
+    window_name: str,
+    orig_title: str,
+    session: str,
+    hook_name: str,
+    token: str,
+) -> Path:
+    handle = tempfile.NamedTemporaryFile("w", suffix=".sh", prefix="hive-notify-", delete=False)
+    with handle:
+        handle.write(CLEANUP_SCRIPT_TEMPLATE.format(
+            qt=shlex.quote(window_target),
+            qp=shlex.quote(pane_id),
+            qname=shlex.quote(window_name),
+            qtitle=shlex.quote(orig_title),
+            session=shlex.quote(session),
+            hook_name=shlex.quote(hook_name),
+            token=shlex.quote(token),
+        ))
+    path = Path(handle.name)
+    path.chmod(0o755)
+    return path
 
 
 def show_window_flash(
@@ -65,25 +122,39 @@ def show_window_flash(
     duration = max(1, int(seconds))
     parts = window_target.rsplit(":", 1)
     session = parts[0] if len(parts) == 2 else ""
-    win_idx = parts[1] if len(parts) == 2 else ""
+    hook_idx = int(time.time() * 1000) % 1_000_000_000
+    hook_name = f"after-select-window[{hook_idx}]"
+    qt = shlex.quote(window_target)
+    qp = shlex.quote(pane_id)
+    qname = shlex.quote(window_name)
+    qsession = shlex.quote(session)
+    token = f"{pane_id}:{hook_idx}"
+    qtoken = shlex.quote(token)
+
+    tmux.set_window_option(window_target, NOTIFY_TOKEN_OPTION, token)
+    cleanup_script = _write_notify_cleanup_script(
+        window_target=window_target,
+        pane_id=pane_id,
+        window_name=window_name,
+        orig_title=orig_title,
+        session=session,
+        hook_name=hook_name,
+        token=token,
+    )
+    hook_cmd = (
+        f"if -F '#{{==:#{{session_name}}:#{{window_index}},{window_target}}}' "
+        f"\"run-shell -b {shlex.quote(str(cleanup_script))} arrival\" ''"
+    )
+    tmux._run(["set-hook", "-t", session, hook_name, hook_cmd], check=False)
+
     script = FLASH_SCRIPT_TEMPLATE.format(
-        qt=shlex.quote(window_target),
-        qp=shlex.quote(pane_id),
+        qt=qt,
+        token=qtoken,
         flash_style=shlex.quote("fg=white,bg=#ff5f87,bold"),
-        orig_style=shlex.quote("fg=default"),
-        qname=shlex.quote(window_name),
-        win_idx=shlex.quote(win_idx),
-        session=shlex.quote(session),
-        duration=duration,
+        cleanup=shlex.quote(str(cleanup_script)),
+        ticks=duration * 2,
     )
     tmux._run(["run-shell", "-b", script], check=False)
-
-    restore_title = shlex.quote(orig_title)
-    qp = shlex.quote(pane_id)
-    tmux._run([
-        "run-shell", "-b",
-        f"sleep {duration}; tmux select-pane -t {qp} -T {restore_title} 2>/dev/null || true",
-    ], check=False)
 
 
 def notify(

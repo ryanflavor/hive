@@ -46,26 +46,47 @@ def test_notify_is_suppressed_when_user_is_already_in_target_window(monkeypatch)
 def test_show_window_flash_renames_sets_title_and_builds_script(monkeypatch):
     rename_calls: list[tuple] = []
     title_calls: list[tuple] = []
+    option_calls: list[tuple] = []
     run_calls: list[tuple] = []
+    cleanup_args: list[tuple] = []
 
     monkeypatch.setattr("hive.notify_ui.tmux.rename_window", lambda wt, name: rename_calls.append((wt, name)))
     monkeypatch.setattr("hive.notify_ui.tmux.get_pane_title", lambda _pane: "[orch]")
     monkeypatch.setattr("hive.notify_ui.tmux.set_pane_title", lambda pane, title: title_calls.append((pane, title)))
+    monkeypatch.setattr("hive.notify_ui.tmux.set_window_option", lambda target, option, value: option_calls.append((target, option, value)))
     monkeypatch.setattr("hive.notify_ui.tmux._run", lambda args, check=False: run_calls.append(args))
+    monkeypatch.setattr(
+        "hive.notify_ui._write_notify_cleanup_script",
+        lambda **kwargs: cleanup_args.append(kwargs) or __import__("pathlib").Path("/tmp/hive-notify-cleanup.sh"),
+    )
 
     notify_ui.show_window_flash("Agent finished", "%9", "dev:1", "dev", seconds=8)
 
     assert rename_calls == [("dev:1", "\U0001f916 dev \u00b7 Agent finished")]
     assert title_calls == [("%9", "\U0001f916 [orch] \u00b7 done")]
+    assert option_calls == [("dev:1", "@hive-notify-token", option_calls[0][2])]
+    assert option_calls[0][2].startswith("%9:")
+    assert cleanup_args == [{
+        "window_target": "dev:1",
+        "pane_id": "%9",
+        "window_name": "dev",
+        "orig_title": "[orch]",
+        "session": "dev",
+        "hook_name": cleanup_args[0]["hook_name"],
+        "token": option_calls[0][2],
+    }]
     assert len(run_calls) == 2
-    flash_cmd = run_calls[0]
+    hook_cmd = run_calls[0]
+    assert hook_cmd[0:3] == ["set-hook", "-t", "dev"]
+    assert hook_cmd[3].startswith("after-select-window[")
+    assert 'run-shell -b /tmp/hive-notify-cleanup.sh arrival' in hook_cmd[4]
+    assert "dev:1" in hook_cmd[4]
+    flash_cmd = run_calls[1]
     assert flash_cmd[0] == "run-shell"
     assert flash_cmd[1] == "-b"
     script = flash_cmd[2]
-    assert "is_active" in script
-    assert "on_arrive" in script
-    assert "select-pane" in script
-    assert "rename-window" in script
-    title_cmd = run_calls[1]
-    assert "select-pane" in title_cmd[2]
-    assert "[orch]" in title_cmd[2]
+    assert "is_current" in script
+    assert "flash_on" in script
+    assert "@hive-notify-token" in script
+    assert 'CLEANUP=/tmp/hive-notify-cleanup.sh' in script
+    assert '"$CLEANUP" timeout' in script
