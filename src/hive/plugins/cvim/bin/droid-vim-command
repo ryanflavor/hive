@@ -44,6 +44,14 @@ tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/droid-vim.XXXXXX")"
 msg_file="$tmpdir/message.md"
 orig_file="$tmpdir/original.md"
 helper_file="$tmpdir/run.sh"
+debug_root="${DROID_VIM_DEBUG_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/droid-vim/debug}"
+mkdir -p "$debug_root" >/dev/null 2>&1 || true
+debug_log_file="$(mktemp "${debug_root}/cvim.XXXXXX" 2>/dev/null || true)"
+if [[ -z "$debug_log_file" ]]; then
+  debug_log_file="$debug_root/latest.log"
+  : > "$debug_log_file" 2>/dev/null || true
+fi
+printf '%s\n' "$debug_log_file" > "$debug_root/latest" 2>/dev/null || true
 iterm2_api_dir="${DROID_VIM_ITERM2_API_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/droid-vim/iterm2py}"
 ghostty_app="${DROID_VIM_GHOSTTY_APP:-/Applications/Ghostty.app}"
 iterm2_window_x="${DROID_VIM_ITERM2_WINDOW_X:-}"
@@ -66,6 +74,13 @@ interrupt_before_paste_default="${DROID_VIM_INTERRUPT_BEFORE_PASTE:-1}"
 interrupt_after_paste_default="${DROID_VIM_INTERRUPT_AFTER_PASTE:-1}"
 interrupt_settle_delay_default="${DROID_VIM_INTERRUPT_SETTLE_DELAY:-0.08}"
 submit_delay_default="${DROID_VIM_SUBMIT_DELAY:-0.03}"
+
+debug_log() {
+  local message="$1"
+  {
+    printf '%s pid=%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$$" "$message"
+  } >> "$debug_log_file" 2>/dev/null || true
+}
 
 case "$cursor_mode" in
   start|top|auto)
@@ -179,7 +194,7 @@ PY
 }
 
 build_helper_cmd() {
-  printf '%q ' "$helper_file" "$reply_pane" "$editor_bin" "$msg_file" "$orig_file" "$tmpdir" "$output_mode" "$paste_delay_default" "$interrupt_before_paste_default" "$interrupt_after_paste_default" "$interrupt_settle_delay_default" "$submit_delay_default" "$cursor_mode" "$payload_builder" "$transport"
+  printf '%q ' "$helper_file" "$reply_pane" "$editor_bin" "$msg_file" "$orig_file" "$tmpdir" "$output_mode" "$paste_delay_default" "$interrupt_before_paste_default" "$interrupt_after_paste_default" "$interrupt_settle_delay_default" "$submit_delay_default" "$cursor_mode" "$payload_builder" "$transport" "$debug_log_file"
 }
 
 queue_post_run() {
@@ -187,19 +202,30 @@ queue_post_run() {
   local send_file="$tmpdir/send.txt"
   local post_file="$tmpdir/post.sh"
   local content_changed="0"
+  local send_exists="0"
+  local send_bytes="0"
 
   if [[ -f "$content_state_file" ]]; then
     content_changed="$(cat "$content_state_file" 2>/dev/null || printf '0')"
   fi
 
   if [[ ! -f "$post_file" ]]; then
+    debug_log "queue_post_run.skip post_file=missing tmpdir=$tmpdir content_changed=$content_changed"
     rm -rf "$tmpdir"
     return 0
   fi
 
-  printf -v post_cmd '%q ' "$post_file" "$reply_pane" "$send_file" "$tmpdir" "$paste_delay_default" "$content_changed" "$interrupt_before_paste_default" "$interrupt_after_paste_default" "$interrupt_settle_delay_default" "$submit_delay_default"
+  if [[ -f "$send_file" ]]; then
+    send_exists="1"
+    send_bytes="$(wc -c < "$send_file" | tr -d '[:space:]')"
+  fi
+
+  debug_log "queue_post_run.enqueue tmpdir=$tmpdir content_changed=$content_changed send_exists=$send_exists send_bytes=$send_bytes"
+  printf -v post_cmd '%q ' "$post_file" "$reply_pane" "$send_file" "$tmpdir" "$paste_delay_default" "$content_changed" "$interrupt_before_paste_default" "$interrupt_after_paste_default" "$interrupt_settle_delay_default" "$submit_delay_default" "$debug_log_file"
   tmux run-shell -b "$post_cmd"
 }
+
+debug_log "command.start transport=$transport seed_mode=$seed_mode output_mode=$output_mode src_pane=$src_pane reply_pane=$reply_pane cwd=$src_cwd tmpdir=$tmpdir session_map=$session_map_file"
 
 tmux_supports_popup() {
   local commands
@@ -488,19 +514,31 @@ submit_delay="${11}"
 cursor_mode="${12}"
 payload_builder="${13}"
 transport_mode="${14}"
+debug_log_file="${15}"
 send_file="$tmpdir/send.txt"
 post_file="$tmpdir/post.sh"
 content_state_file="$tmpdir/content_changed"
 content_changed="0"
 retain_tmpdir="0"
 
+debug_log() {
+  local message="$1"
+  {
+    printf '%s pid=%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$$" "$message"
+  } >> "$debug_log_file" 2>/dev/null || true
+}
+
 cleanup() {
   if [[ "$retain_tmpdir" != "1" ]]; then
+    debug_log "helper.cleanup tmpdir=$tmpdir retained=0"
     rm -rf "$tmpdir"
+  else
+    debug_log "helper.cleanup tmpdir=$tmpdir retained=1"
   fi
 }
 
 trap cleanup EXIT
+debug_log "helper.start transport=$transport_mode send_mode=$send_mode msg_file=$msg_file orig_file=$orig_file tmpdir=$tmpdir"
 
 editor_name="$(basename -- "$editor_bin")"
 case "$editor_name" in
@@ -519,11 +557,24 @@ case "$editor_name" in
     ;;
 esac
 
+msg_bytes="$(wc -c < "$msg_file" | tr -d '[:space:]')"
+orig_bytes="$(wc -c < "$orig_file" | tr -d '[:space:]')"
+debug_log "helper.editor_done msg_bytes=$msg_bytes orig_bytes=$orig_bytes"
+
 if [[ -s "$msg_file" ]] && ! cmp -s "$msg_file" "$orig_file"; then
   content_changed="1"
   "$payload_builder" "$orig_file" "$msg_file" "$send_file" "$send_mode"
+  send_bytes="$(wc -c < "$send_file" | tr -d '[:space:]')"
+  has_droid_edit="0"
+  if grep -q '<droid_edit mode="' "$send_file" 2>/dev/null; then
+    has_droid_edit="1"
+  fi
+  debug_log "helper.payload_ready content_changed=1 send_bytes=$send_bytes has_droid_edit=$has_droid_edit"
+else
+  debug_log "helper.no_change content_changed=0"
 fi
 printf '%s' "$content_changed" > "$content_state_file"
+debug_log "helper.content_state_written path=$content_state_file value=$content_changed"
 
 cat > "$post_file" <<'POST'
 #!/usr/bin/env bash
@@ -538,50 +589,150 @@ interrupt_before_paste="$6"
 interrupt_after_paste="$7"
 interrupt_settle_delay="$8"
 submit_delay="$9"
+debug_log_file="${10}"
 did_pre_interrupt="0"
 
+debug_log() {
+  local message="$1"
+  {
+    printf '%s pid=%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$$" "$message"
+  } >> "$debug_log_file" 2>/dev/null || true
+}
+
+capture_reply_pane_snapshot() {
+  local lines="$1"
+  tmux capture-pane -p -t "$reply_pane" -S "-$lines" 2>/dev/null || return 1
+}
+
+log_reply_pane_snapshot() {
+  local label="$1"
+  local lines="${2:-40}"
+  local snapshot=""
+  local capture_bytes="0"
+
+  snapshot="$(capture_reply_pane_snapshot "$lines" 2>/dev/null || true)"
+  if [[ -z "$snapshot" ]]; then
+    debug_log "post.capture label=$label failed=1"
+    return 0
+  fi
+
+  capture_bytes="$(printf '%s' "$snapshot" | wc -c | tr -d '[:space:]')"
+  debug_log "post.capture label=$label bytes=$capture_bytes"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    debug_log "post.capture.$label $line"
+  done <<< "$snapshot"
+}
+
+reply_pane_has_structured_input() {
+  local snapshot="$1"
+  case "$snapshot" in
+    *"> [<droid_edit"*|*"> <droid_edit"*|*"<droid_edit mode="*|*"> [<edited_text"*|*"> <edited_text"*|*"<edited_text>"*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+wait_for_structured_input() {
+  local label="$1"
+  local attempts="${DROID_VIM_CAPTURE_PROBE_ATTEMPTS:-4}"
+  local delay="${DROID_VIM_CAPTURE_PROBE_DELAY:-0.08}"
+  local probe_lines="${DROID_VIM_CAPTURE_PROBE_LINES:-8}"
+  local fail_lines="${DROID_VIM_CAPTURE_FAIL_LINES:-40}"
+  local attempt=1
+  local snapshot=""
+
+  while (( attempt <= attempts )); do
+    snapshot="$(capture_reply_pane_snapshot "$probe_lines" 2>/dev/null || true)"
+    if [[ -n "$snapshot" ]] && reply_pane_has_structured_input "$snapshot"; then
+      debug_log "post.probe.ready label=$label attempt=$attempt"
+      return 0
+    fi
+    if (( attempt < attempts )); then
+      sleep "$delay"
+    fi
+    (( attempt += 1 ))
+  done
+
+  debug_log "post.probe.failed label=$label attempts=$attempts"
+  log_reply_pane_snapshot "${label}_failed" "$fail_lines"
+  return 1
+}
+
+send_exists="0"
+send_bytes="0"
+if [[ -f "$send_file" ]]; then
+  send_exists="1"
+  send_bytes="$(wc -c < "$send_file" | tr -d '[:space:]')"
+fi
+debug_log "post.start tmpdir=$tmpdir content_changed=$content_changed send_exists=$send_exists send_bytes=$send_bytes"
+
 sleep "$paste_delay"
+debug_log "post.after_paste_delay seconds=$paste_delay"
 
 if [[ "$content_changed" == "1" && "$interrupt_before_paste" != "0" ]]; then
+  debug_log "post.pre_interrupt action=escape"
   tmux send-keys -t "$reply_pane" Escape
   did_pre_interrupt="1"
   sleep "$interrupt_settle_delay"
+  debug_log "post.pre_interrupt_settled seconds=$interrupt_settle_delay"
 fi
 
 if [[ "$content_changed" == "1" ]]; then
   send_text="$(cat "$send_file")"
+  structured_probe_required="0"
+  if [[ "$send_text" == *"<droid_edit"* || "$send_text" == *"<edited_text"* ]]; then
+    structured_probe_required="1"
+  fi
   if [[ "$send_text" != *$'\n'* && "$send_text" == /* ]]; then
+    debug_log "post.send_literal bytes=$send_bytes"
     tmux send-keys -t "$reply_pane" -l "$send_text"
   else
+    debug_log "post.paste_buffer bytes=$send_bytes"
     tmux load-buffer "$send_file"
     tmux paste-buffer -p -t "$reply_pane"
   fi
   content_bytes=$(wc -c < "$send_file")
   paste_settle=$(awk "BEGIN { d = 0.10 + ${content_bytes} / 1024 * 0.03; if (d > 3.0) d = 3.0; printf \"%.2f\", d }")
   sleep "$paste_settle"
+  debug_log "post.after_paste_settle seconds=$paste_settle"
+  if [[ "$structured_probe_required" == "1" ]]; then
+    if ! wait_for_structured_input "after_paste"; then
+      debug_log "post.submit_skipped reason=missing_structured_input_after_paste"
+      rm -rf "$tmpdir"
+      exit 0
+    fi
+  fi
 fi
 
 if [[ "$interrupt_after_paste" != "0" ]]; then
   if [[ "$content_changed" == "1" && "$did_pre_interrupt" != "1" ]]; then
+    debug_log "post.post_interrupt action=escape reason=changed_without_pre_interrupt"
     tmux send-keys -t "$reply_pane" Escape
   elif [[ "$content_changed" != "1" ]]; then
+    debug_log "post.post_interrupt action=escape reason=no_change"
     tmux send-keys -t "$reply_pane" Escape
   fi
 fi
 
 if [[ "$content_changed" == "1" ]]; then
   sleep "$submit_delay"
+  debug_log "post.submit action=enter seconds=$submit_delay"
   tmux send-keys -t "$reply_pane" Enter
 fi
+debug_log "post.cleanup tmpdir=$tmpdir"
 rm -rf "$tmpdir"
 POST
 chmod +x "$post_file"
+debug_log "helper.post_script_ready path=$post_file transport=$transport_mode"
 if [[ "$transport_mode" == "popup" ]]; then
   retain_tmpdir="1"
+  debug_log "helper.exit popup=1 tmpdir_retained=1"
   exit 0
 fi
 trap - EXIT
-printf -v post_cmd '%q ' "$post_file" "$reply_pane" "$send_file" "$tmpdir" "$paste_delay" "$content_changed" "$interrupt_before_paste" "$interrupt_after_paste" "$interrupt_settle_delay" "$submit_delay"
+printf -v post_cmd '%q ' "$post_file" "$reply_pane" "$send_file" "$tmpdir" "$paste_delay" "$content_changed" "$interrupt_before_paste" "$interrupt_after_paste" "$interrupt_settle_delay" "$submit_delay" "$debug_log_file"
+debug_log "helper.queue_inline_post content_changed=$content_changed"
 tmux run-shell -b "$post_cmd"
 EOF
 chmod +x "$helper_file"
@@ -665,7 +816,9 @@ open_vim_tmux_popup() {
   target_client="$(resolve_tmux_target_client)" || return 1
   read -r popup_x popup_y popup_w popup_h < <(resolve_tmux_popup_geometry "$target_client")
   helper_cmd="$(build_helper_cmd)"
+  debug_log "popup.open client=$target_client x=$popup_x y=$popup_y w=$popup_w h=$popup_h"
   tmux display-popup -c "$target_client" -t "$src_pane" -d "$src_cwd" -x "$popup_x" -y "$popup_y" -w "$popup_w" -h "$popup_h" -T "$popup_title" -E "$helper_cmd"
+  debug_log "popup.closed client=$target_client tmpdir=$tmpdir"
   queue_post_run
 }
 
@@ -766,6 +919,7 @@ printf '%s\n' "$vim_offset" > "$tmpdir/offset"
 
 if [[ $# -gt 0 ]]; then
   printf '%s\n' "$*" > "$msg_file"
+  debug_log "seed.args bytes=$(wc -c < "$msg_file" | tr -d '[:space:]')"
 elif [[ "$seed_mode" == "session" ]]; then
   transcript_path=""
   if [[ -n "$src_pane_tty_key" ]]; then
@@ -773,6 +927,7 @@ elif [[ "$seed_mode" == "session" ]]; then
   fi
   if [[ -n "$transcript_path" && -f "$transcript_path" ]]; then
     "$seed_helper" "$src_cwd" "$msg_file" "$transcript_path" "$vim_offset"
+    debug_log "seed.session transcript_path=$transcript_path offset=$vim_offset bytes=$(wc -c < "$msg_file" | tr -d '[:space:]')"
   else
   droid_pid=""
   droid_tty=""
@@ -781,10 +936,13 @@ elif [[ "$seed_mode" == "session" ]]; then
     IFS=$'\t' read -r droid_pid droid_tty droid_args <<<"$info"
   fi
   capture_session_seed_to_file "$src_cwd" "$msg_file" "$droid_pid" "$droid_tty" "$droid_args" "$vim_offset"
+  debug_log "seed.capture pid=${droid_pid:-none} tty=${droid_tty:-none} offset=$vim_offset bytes=$(wc -c < "$msg_file" | tr -d '[:space:]')"
   fi
 else
   : > "$msg_file"
+  debug_log "seed.blank"
 fi
 
 cp "$msg_file" "$orig_file"
+debug_log "command.open_window msg_bytes=$(wc -c < "$msg_file" | tr -d '[:space:]') orig_bytes=$(wc -c < "$orig_file" | tr -d '[:space:]') debug_log=$debug_log_file"
 open_vim_window

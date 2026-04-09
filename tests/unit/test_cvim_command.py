@@ -89,6 +89,18 @@ def _append(event):
         fh.write(json.dumps(event) + "\\n")
 
 
+def _count_events(name):
+    if actions_path is None or not actions_path.exists():
+        return 0
+    count = 0
+    for line in actions_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        if json.loads(line).get("cmd") == name:
+            count += 1
+    return count
+
+
 def _pane_is_ready(now):
     min_ready_delay = float(os.environ.get("FAKE_TMUX_MIN_READY_DELAY", "0") or "0")
     if actions_path is None or min_ready_delay <= 0 or not actions_path.exists():
@@ -171,6 +183,18 @@ if cmd == "new-window":
     log_path.write_text(json.dumps(event))
     _append(event)
     _print(state.get("new_window_id", "@2"))
+    raise SystemExit(0)
+
+if cmd == "capture-pane":
+    capture_index = _count_events("capture-pane")
+    event = {"cmd": cmd, "args": args}
+    _append(event)
+    if os.environ.get("FAKE_TMUX_CAPTURE_PANE_SEQUENCE"):
+        sequence = json.loads(os.environ["FAKE_TMUX_CAPTURE_PANE_SEQUENCE"])
+        if sequence:
+            sys.stdout.write(sequence[min(capture_index, len(sequence) - 1)])
+    else:
+        sys.stdout.write(os.environ.get("FAKE_TMUX_CAPTURE_PANE_TEXT", ""))
     raise SystemExit(0)
 
 if cmd in {"send-keys", "load-buffer", "paste-buffer"}:
@@ -445,7 +469,10 @@ def test_edited_save_interrupts_before_paste_and_submits(tmp_path):
         panes=[
             {"id": "%1", "left": 0, "top": 0, "width": 200, "height": 100},
         ],
-        extra_env={"FAKE_EDITOR_APPEND_TEXT": "new line added"},
+        extra_env={
+            "FAKE_EDITOR_APPEND_TEXT": "new line added",
+            "FAKE_TMUX_CAPTURE_PANE_TEXT": "ready for input\n> [<droid_edit mode=\"text\"> pasted]",
+        },
     )
 
     escape_indexes = [
@@ -499,6 +526,7 @@ def test_popup_schedules_post_after_popup_exits(tmp_path):
         ],
         extra_env={
             "FAKE_EDITOR_APPEND_TEXT": "new line added",
+            "FAKE_TMUX_CAPTURE_PANE_TEXT": "ready for input\n> [<droid_edit mode=\"text\"> pasted]",
             "FAKE_TMUX_MARK_POPUP_CONTEXT": "1",
             "FAKE_TMUX_DROP_RUN_SHELL_IN_POPUP": "1",
         },
@@ -514,6 +542,99 @@ def test_popup_schedules_post_after_popup_exits(tmp_path):
         event["cmd"] == "send-keys" and event["args"][-1] == "Enter"
         for event in actions
     )
+
+
+def test_edited_save_waits_for_structured_input_before_submit(tmp_path):
+    actions = _run_command_actions(
+        tmp_path,
+        current_pane="%1",
+        panes=[
+            {"id": "%1", "left": 0, "top": 0, "width": 200, "height": 100},
+        ],
+        extra_env={
+            "FAKE_EDITOR_APPEND_TEXT": "new line added",
+            "FAKE_TMUX_CAPTURE_PANE_SEQUENCE": json.dumps([
+                "ready for input\n> still empty",
+                "ready for input\n> [<droid_edit mode=\"diff\"> pasted]",
+            ]),
+        },
+        use_default_delays=True,
+    )
+
+    capture_events = [event for event in actions if event["cmd"] == "capture-pane"]
+    enter_events = [
+        event for event in actions
+        if event["cmd"] == "send-keys" and event["args"][-1] == "Enter"
+    ]
+
+    assert len(capture_events) == 2
+    assert len(enter_events) == 1
+
+
+def test_edited_save_skips_submit_when_probe_never_finds_structured_input(tmp_path):
+    cache_dir = tmp_path / "cache"
+    actions = _run_command_actions(
+        tmp_path,
+        current_pane="%1",
+        panes=[
+            {"id": "%1", "left": 0, "top": 0, "width": 200, "height": 100},
+        ],
+        extra_env={
+            "FAKE_EDITOR_APPEND_TEXT": "new line added",
+            "FAKE_TMUX_CAPTURE_PANE_SEQUENCE": json.dumps([
+                "ready for input\n> still empty",
+                "ready for input\n> still empty",
+                "ready for input\n> still empty",
+                "ready for input\n> still empty",
+            ]),
+            "XDG_CACHE_HOME": str(cache_dir),
+        },
+        use_default_delays=True,
+    )
+
+    latest_file = cache_dir / "droid-vim" / "debug" / "latest"
+    log_path = Path(latest_file.read_text().strip())
+    log_text = log_path.read_text()
+
+    assert any(event["cmd"] == "paste-buffer" for event in actions)
+    assert len([event for event in actions if event["cmd"] == "capture-pane"]) == 5
+    assert not any(
+        event["cmd"] == "send-keys" and event["args"][-1] == "Enter"
+        for event in actions
+    )
+    assert "post.probe.failed label=after_paste attempts=4" in log_text
+    assert "post.submit_skipped reason=missing_structured_input_after_paste" in log_text
+    assert "post.capture.after_paste_failed > still empty" in log_text
+
+
+def test_popup_debug_log_records_sendback_stages(tmp_path):
+    cache_dir = tmp_path / "cache"
+    actions = _run_command_actions(
+        tmp_path,
+        current_pane="%1",
+        panes=[
+            {"id": "%1", "left": 0, "top": 0, "width": 200, "height": 100},
+        ],
+        extra_env={
+            "FAKE_EDITOR_APPEND_TEXT": "new line added",
+            "FAKE_TMUX_CAPTURE_PANE_TEXT": "ready for input\n> [<droid_edit mode=\"diff\"> pasted diff]",
+            "XDG_CACHE_HOME": str(cache_dir),
+        },
+        use_default_delays=True,
+    )
+
+    latest_file = cache_dir / "droid-vim" / "debug" / "latest"
+    log_path = Path(latest_file.read_text().strip())
+    log_text = log_path.read_text()
+
+    assert any(event["cmd"] == "paste-buffer" for event in actions)
+    assert len([event for event in actions if event["cmd"] == "capture-pane"]) == 1
+    assert "command.start" in log_text
+    assert "popup.open" in log_text
+    assert "helper.payload_ready" in log_text
+    assert "queue_post_run.enqueue" in log_text
+    assert "post.probe.ready label=after_paste attempt=1" in log_text
+    assert "post.submit" in log_text
 
 
 def test_unedited_save_interrupts_without_paste_or_submit(tmp_path):

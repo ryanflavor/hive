@@ -60,6 +60,7 @@ class Team:
         target = self.tmux_window
         if not target:
             return
+        tmux.enable_pane_border_status(target)
         tmux.set_window_option(target, "@hive-team", self.name)
         tmux.set_window_option(target, "@hive-workspace", self.workspace)
         if self.description:

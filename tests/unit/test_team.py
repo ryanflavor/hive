@@ -13,10 +13,12 @@ def test_terminal_to_dict_uses_liveness(monkeypatch):
 def test_team_create_inside_tmux_tags_lead_and_detects_session(configure_hive_home, monkeypatch):
     configure_hive_home(tmux_inside=True, current_pane="%7")
     tagged = []
+    borders = []
     monkeypatch.setattr("hive.agent.detect_current_session_id", lambda _cwd, model="", pane_id="": "sess-123")
     monkeypatch.setattr("hive.team.tmux.get_current_session_name", lambda: "dev")
     monkeypatch.setattr("hive.team.tmux.get_current_window_target", lambda: "dev:0")
     monkeypatch.setattr("hive.team.tmux.tag_pane", lambda *args: tagged.append(args))
+    monkeypatch.setattr("hive.team.tmux.enable_pane_border_status", lambda target: borders.append(target))
 
     team = Team.create("team-a", description="demo", workspace="/tmp/ws")
 
@@ -25,6 +27,7 @@ def test_team_create_inside_tmux_tags_lead_and_detects_session(configure_hive_ho
     assert team.tmux_session == "dev"
     assert team.tmux_window == "dev:0"
     assert tagged == [("%7", "agent", "orch", "team-a")]
+    assert borders == ["dev:0"]
 
 
 def test_team_create_rejects_outside_tmux(configure_hive_home):
@@ -40,7 +43,9 @@ def test_team_create_rejects_outside_tmux(configure_hive_home):
 
 def test_team_save_and_load_round_trip(configure_hive_home, monkeypatch):
     configure_hive_home()
+    borders = []
     monkeypatch.setattr("hive.team.tmux.is_pane_alive", lambda _pane: True)
+    monkeypatch.setattr("hive.team.tmux.enable_pane_border_status", lambda target: borders.append(target))
     team = Team(
         name="team-a",
         description="demo",
@@ -54,6 +59,7 @@ def test_team_save_and_load_round_trip(configure_hive_home, monkeypatch):
     team.terminals["shell"] = Terminal(name="shell", pane_id="%2")
 
     team.save()
+    assert borders == ["dev:0"]
 
     # Set up pane tags for load to find (in real usage, set during create/spawn)
     _tmux.tag_pane("%0", "lead", "orch", "team-a")

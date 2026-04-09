@@ -130,8 +130,15 @@ def set_pane_title(pane_id: str, title: str) -> None:
     ], check=False)
 
 
+_HIVE_PANE_BORDER_FORMAT = " #{?@hive-agent,#{@hive-agent},#{pane_title}} "
+
+
 def enable_pane_border_status(target: str) -> None:
-    """Enable pane border labels (shows pane titles at top of each pane)."""
+    """Enable pane border labels for a window.
+
+    Hive-tagged panes show their member name; untagged panes fall back to the
+    native tmux pane title.
+    """
     _run([
         "set-window-option", "-t", target,
         "pane-border-status", "top",
@@ -139,7 +146,7 @@ def enable_pane_border_status(target: str) -> None:
     _run([
         "set-window-option", "-t", target,
         "pane-border-format",
-        " #{pane_title} ",
+        _HIVE_PANE_BORDER_FORMAT,
     ], check=False)
 
 

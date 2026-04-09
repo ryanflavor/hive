@@ -224,6 +224,23 @@ def test_pane_option_helpers_and_tagging(monkeypatch):
     assert ("set-option", "-p", "-t", "%1", "-u", "@hive-team") in calls
 
 
+def test_enable_pane_border_status_uses_hive_member_format(monkeypatch):
+    calls = []
+
+    def _fake_run(args, check=False, timeout=5):
+        calls.append(tuple(args))
+        return subprocess.CompletedProcess(["tmux", *args], 0, "", "")
+
+    monkeypatch.setattr("hive.tmux._run", _fake_run)
+
+    tmux.enable_pane_border_status("dev:1")
+
+    assert calls[0] == ("set-window-option", "-t", "dev:1", "pane-border-status", "top")
+    assert calls[1] == (
+        "set-window-option", "-t", "dev:1", "pane-border-format", tmux._HIVE_PANE_BORDER_FORMAT
+    )
+
+
 def test_window_option_helpers_and_flash(monkeypatch):
     calls = []
 
