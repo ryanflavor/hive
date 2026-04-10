@@ -198,7 +198,7 @@ if [[ -z "$src_profile" ]]; then
   src_profile="unknown"
 fi
 
-case "${clear_input_before_paste_default,,}" in
+case "$(printf '%s' "$clear_input_before_paste_default" | tr '[:upper:]' '[:lower:]')" in
   auto)
     if [[ "$src_profile" == "droid" ]]; then
       clear_input_before_paste_default="0"
