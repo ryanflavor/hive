@@ -25,6 +25,9 @@ Requires: Python 3.11+, tmux, [droid](https://docs.factory.ai)
 
 ```bash
 pipx install git+https://github.com/notdp/hive.git
+
+# Update to latest
+pipx upgrade hive
 ```
 
 ## Quick Start
