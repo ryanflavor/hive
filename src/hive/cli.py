@@ -927,12 +927,18 @@ def delete(name: str, workspace: str, keep_workspace: bool):
 @click.option("--skill", default="hive", help="Base skill to load after startup ('none' to skip)")
 @click.option("--workflow", default="", help="Workflow skill to load after the base skill")
 @click.option("--env", "-e", multiple=True, help="Extra env vars (KEY=VALUE, repeatable)")
-@click.option("--cli", "cli_name", type=click.Choice(["droid", "claude", "codex"]), default="droid", help="Agent CLI to spawn")
+@click.option("--cli", "cli_name", type=click.Choice(["droid", "claude", "codex"]), default=None, help="Agent CLI to spawn (default: same as current pane)")
 def spawn(agent_name: str, model: str, prompt: str,
-          color: str, cwd: str, skill: str, workflow: str, env: tuple[str, ...], cli_name: str):
+          color: str, cwd: str, skill: str, workflow: str, env: tuple[str, ...], cli_name: str | None):
     """Spawn an agent pane."""
     team_name, t = _resolve_scoped_team(None, required=True)
     assert team_name is not None and t is not None
+    if cli_name is None:
+        current_pane = tmux.get_current_pane_id()
+        cli_name = tmux.get_pane_option(current_pane, "hive-cli") if current_pane else ""
+        if cli_name not in AGENT_CLI_NAMES:
+            profile = detect_profile_for_pane(current_pane) if current_pane else None
+            cli_name = profile.name if profile else "droid"
     extra_env = _parse_entries(env) if env else {}
     try:
         agent = t.spawn(

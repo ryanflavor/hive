@@ -43,7 +43,7 @@ def test_e2e_create_spawn_send_capture_and_status(tmp_path: Path):
         teams_payload = json.loads(teams_result.stdout)
         assert any(row["name"] == team for row in teams_payload)
 
-        spawn_result = run_in_pane(["spawn", "claude", "--cwd", str(workdir), "--skill", "none"])
+        spawn_result = run_in_pane(["spawn", "claude", "--cwd", str(workdir), "--skill", "none", "--cli", "droid"])
         assert spawn_result.returncode == 0, spawn_result.stdout
         assert "Agent 'claude' spawned in pane" in spawn_result.stdout
 
