@@ -1,1 +1,1 @@
-"""Hive: tmux-based multi-agent collaboration framework for droid."""
+"""Hive: tmux-based multi-agent collaboration framework for droid, claude, and codex."""
