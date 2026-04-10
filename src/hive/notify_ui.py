@@ -197,8 +197,6 @@ def notify(
         }
 
     notify_state.record_notification(pane_id, source=source, kind=kind, message=message)
-    if highlight:
-        tmux.flash_pane_border(pane_id, seconds=seconds)
     if window_status and window_target:
         tmux.flash_window_status(window_target, seconds=seconds)
     if window_target:

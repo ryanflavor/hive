@@ -16,7 +16,6 @@ def _setup_tmux_mocks(monkeypatch):
     monkeypatch.setattr("hive.agent.tmux.split_window", lambda target, horizontal=True, size=None, cwd=None: target)
     monkeypatch.setattr("hive.agent.tmux.get_pane_tty", lambda _pane: None)
     monkeypatch.setattr("hive.agent.tmux.set_pane_title", lambda *_: None)
-    monkeypatch.setattr("hive.agent.tmux.set_pane_border_color", lambda *_: None)
     monkeypatch.setattr("hive.agent.tmux.tag_pane", lambda *args, **_kwargs: tags.append(args))
     monkeypatch.setattr("hive.agent.tmux.wait_for_text", lambda *_args, **_kw: True)
     monkeypatch.setattr("hive.agent.tmux.wait_for_texts", lambda *_args, **_kw: True)

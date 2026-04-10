@@ -15,7 +15,7 @@ def test_notify_uses_window_flash(monkeypatch):
     calls: list[tuple] = []
 
     monkeypatch.setattr("hive.notify_ui.tmux.get_client_mode", lambda _pane: "terminal")
-    monkeypatch.setattr("hive.notify_ui.tmux.flash_pane_border", lambda pane, seconds=12: None)
+
     monkeypatch.setattr("hive.notify_ui.tmux.flash_window_status", lambda target, seconds=12: None)
     monkeypatch.setattr("hive.notify_ui.show_window_flash", lambda msg, pane, wt, wn, seconds=12: calls.append(("flash", msg, pane, wt, wn, seconds)))
 

@@ -31,7 +31,7 @@ Tests live under `tests/` and are split by level:
 
 ## Coding Style & Naming Conventions
 
-Use Python 3.11+ with 4-space indentation and type hints where practical. Match the existing style: small focused functions, minimal comments, and straightforward dataclass-based models. File names are lowercase with underscores. Test names should be explicit, e.g. `test_wait_status_times_out_without_match`.
+Use Python 3.11+ with 4-space indentation and type hints where practical. Match the existing style: small focused functions, minimal comments, and straightforward dataclass-based models. File names are lowercase with underscores. Test names should be explicit, e.g. `test_wait_status_times_out_without_match`. Do not leave dead code: if a function becomes a no-op or unused, delete it along with all call sites instead of leaving an empty body.
 
 ## Testing Guidelines
 

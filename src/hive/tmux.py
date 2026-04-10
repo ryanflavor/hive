@@ -116,8 +116,7 @@ def select_layout(target: str, layout: str = "tiled") -> None:
     _run(["select-layout", "-t", target, layout], check=False)
 
 
-def set_pane_border_color(pane_id: str, color: str) -> None:
-    pass
+
 
 
 def set_pane_title(pane_id: str, title: str) -> None:
@@ -393,13 +392,6 @@ def get_pane_count(pane_id: str) -> int:
         return 1
 
 
-def flash_pane_border(pane_id: str, color: str = "yellow", seconds: int = 12) -> None:
-    set_pane_border_color(pane_id, color)
-    reset_cmd = (
-        f"sleep {max(1, seconds)}; "
-        f"tmux select-pane -t {shlex.quote(pane_id)} -P {shlex.quote('fg=default')} >/dev/null 2>&1 || true"
-    )
-    _run(["run-shell", "-b", reset_cmd], check=False)
 
 
 def flash_window_status(window_target: str, style: str = "fg=colour235,bg=colour220,bold", seconds: int = 12) -> None:

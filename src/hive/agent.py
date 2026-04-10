@@ -145,7 +145,6 @@ class Agent:
 
         pane_id = tmux.split_window(target_pane, horizontal=split_horizontal, size=split_size)
         tmux.set_pane_title(pane_id, f"[{name}]")
-        tmux.set_pane_border_color(pane_id, color)
         tmux.tag_pane(pane_id, "agent", name, team_name, model=model, cli=cli, color=color)
 
         bin_path = CLI_BINS[cli]
