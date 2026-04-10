@@ -45,6 +45,9 @@ hive send dodo "Review the staged diff and write findings to an artifact"
 hive reply orch "review complete" --state done --artifact /tmp/review.md
 hive team   # inspect projected progress via the `statuses` field
 
+# Fork the current agent into a new split pane (auto-picks direction)
+hive fork              # or: hive vfork / hive hfork
+
 # Bring the human back only when needed
 hive notify "修复完成了，按 Space 回来确认"
 ```
@@ -70,8 +73,9 @@ hive send claude "Review the PR diff and write findings to the workspace artifac
 | `hive capture <agent>` / `hive interrupt <agent>` | Inspect or interrupt an agent pane |
 | `hive exec <terminal> "cmd"` / `hive terminal ...` | Drive registered terminal panes |
 | `hive plugin enable|disable|list` | Materialize first-party plugin scripts under `~/.factory/commands/` and link plugin skills |
+| `hive fork` | Fork the current agent session into a new split pane (auto-detects best direction) |
 | `hive cvim` / `hive vim` | Pop an external editor; send a structured diff (`cvim`) or a blank draft (`vim`) back to the current agent pane |
-| `hive vfork` / `hive hfork` | Fork the current agent session into a vertical or horizontal split |
+| `hive vfork` / `hive hfork` | Shorthand for `hive fork -s v` / `hive fork -s h` (runs in background, sends Escape to the source pane) |
 | `hive notify "message"` | Notify the human attached to the current pane |
 | `hive delete <team>` | Kill agents and remove team data |
 
