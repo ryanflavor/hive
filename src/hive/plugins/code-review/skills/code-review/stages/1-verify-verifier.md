@@ -71,7 +71,7 @@ grep -F 'code snippet from finding' path/to/file.py
 用 task 中的 Done Command 通知 orchestrator：
 
 ```bash
-hive reply orch "verify done verifier=<自己的名字> artifact=<result artifact path>" --reply-to <request message id> --artifact <result artifact path>
+hive reply orch "verify done verifier=<自己的名字> artifact=<result artifact path>" --artifact <result artifact path>
 ```
 
 **只发这一条，不要发其他消息。**

@@ -152,7 +152,7 @@ flowchart TB
     Orch --> Workspace
 ```
 
-- **消息驱动**：Orch → Agent（`hive send`），Agent → Orch（`hive reply orch --reply-to ...`）
+- **消息驱动**：Orch → Agent（`hive send`），Agent → Orch（`hive reply orch ...`）
 - Orch 发完任务后 idle；agent 完成后主动 `hive reply orch` 通知
 - 多行内容先写 artifact，再用 `hive send ... --artifact <path>` 或 `hive reply ... --artifact <path>` 发送
 - Agent 之间不直接通信，所有协调由 Orch 完成
@@ -172,7 +172,7 @@ flowchart TB
 
 发完任务后，你的 response 到此结束。禁止：
 - 轮询 artifact 文件（禁止 glob/ls/sleep/poll 循环）
-- 运行 `hive wait-status`
+- 运行轮询/等待状态
 - 提前读取 artifact
 - 写 python 脚本检查文件是否出现
 - 做 git diff / git show
@@ -194,7 +194,7 @@ flowchart TB
 - Subject
 - Diff Commands
 - Output Artifact
-- Done Command（`hive reply orch "review done reviewer=... verdict=... artifact=..." --reply-to <request message id> --artifact <artifact path>`）
+- Done Command（`hive reply orch "review done reviewer=... verdict=... artifact=..." --artifact <artifact path>`）
 - （PR 模式可选）PR Number / Base / Branch
 - （Fix 阶段可选）Validator Commands
 
@@ -206,8 +206,8 @@ flowchart TB
 | `hive team` | 查看团队成员 |
 | `hive init` | 初始化 team |
 | `hive spawn <agent>` | 启动 agent pane |
-| `hive send <agent> <msg>` | 发任务并返回 `messageId` |
-| `hive reply <agent> <msg> --reply-to <messageId>` | 对任务回传完成/阻塞/等待输入 |
+| `hive send <agent> <msg>` | 发任务 |
+| `hive reply <agent> <msg> --state done` | 对任务回传完成状态 |
 | `hive kill <agent>` | kill agent pane 并移除 |
 | `hive layout <preset>` | 调整 tmux 布局（main-vertical / tiled 等） |
 

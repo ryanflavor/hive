@@ -28,7 +28,7 @@ flowchart TD
 失败示例：
 
 ```bash
-hive reply orch "review done reviewer=<自己的名字> verdict=error artifact=none" --reply-to <request message id>
+hive reply orch "review done reviewer=<自己的名字> verdict=error artifact=none"
 ```
 
 ## 2. 读取 REVIEW.md
@@ -105,7 +105,7 @@ hive reply orch "review done reviewer=<自己的名字> verdict=error artifact=n
 用 request 里的 Done Command 回传。这条消息会直接发送到 orch 的 pane：
 
 ```bash
-hive reply orch "review done reviewer=<自己的名字> verdict=<ok|issues> artifact=<artifact path>" --reply-to <request message id> --artifact <artifact path>
+hive reply orch "review done reviewer=<自己的名字> verdict=<ok|issues> artifact=<artifact path>" --artifact <artifact path>
 ```
 
 **只发这一条，不要发其他消息。**
