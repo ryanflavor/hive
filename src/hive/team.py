@@ -131,8 +131,11 @@ class Team:
                     team.lead_pane_id = pane.pane_id
                     team.lead_name = pane.agent or LEAD_AGENT_NAME
                 elif pane.role == "agent":
-                    from .agent_cli import normalize_command
-                    resolved_cli = pane.cli or normalize_command(pane.command) or "droid"
+                    from .agent_cli import AGENT_CLI_NAMES, detect_profile_for_pane, normalize_command
+                    resolved_cli = pane.cli or normalize_command(pane.command)
+                    if resolved_cli not in AGENT_CLI_NAMES:
+                        profile = detect_profile_for_pane(pane.pane_id)
+                        resolved_cli = profile.name if profile else "droid"
                     agent = Agent(
                         name=pane.agent,
                         team_name=name,
