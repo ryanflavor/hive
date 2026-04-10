@@ -475,9 +475,9 @@ def test_init_resets_default_auto_workspace_before_reuse(runner, configure_hive_
         lambda _target: [PaneInfo("%5", "", command="droid"), PaneInfo("%6", "GPT", command="droid")],
     )
 
-    (auto_workspace / "status").mkdir(parents=True, exist_ok=True)
+    (auto_workspace / "events").mkdir(parents=True, exist_ok=True)
     (auto_workspace / "artifacts").mkdir(parents=True, exist_ok=True)
-    (auto_workspace / "status" / "orch.json").write_text(json.dumps({"state": "done"}))
+    (auto_workspace / "events" / "100-msg-old.json").write_text(json.dumps({"intent": "send"}))
     (auto_workspace / "artifacts" / "stale.txt").write_text("stale")
 
     result = runner.invoke(cli, ["init", "--no-notify"])
@@ -485,7 +485,7 @@ def test_init_resets_default_auto_workspace_before_reuse(runner, configure_hive_
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["workspace"] == str(auto_workspace)
-    assert list((auto_workspace / "status").iterdir()) == []
+    assert list((auto_workspace / "events").iterdir()) == []
     assert list((auto_workspace / "artifacts").iterdir()) == []
 
 
@@ -507,9 +507,9 @@ def test_init_with_explicit_workspace_does_not_reset_existing_managed_dirs(
     )
 
     workspace = tmp_path / "custom-ws"
-    (workspace / "status").mkdir(parents=True, exist_ok=True)
-    stale = workspace / "status" / "orch.json"
-    stale.write_text(json.dumps({"state": "done"}))
+    (workspace / "events").mkdir(parents=True, exist_ok=True)
+    stale = workspace / "events" / "100-msg-old.json"
+    stale.write_text(json.dumps({"intent": "send"}))
 
     result = runner.invoke(cli, ["init", "--workspace", str(workspace), "--no-notify"])
 
@@ -651,13 +651,13 @@ def test_root_help_groups_commands_by_area(runner):
     assert "Examples:" in result.output
     assert "hive init" in result.output
     assert "team   Show team overview." in result.output
-    assert "status       Show published statuses only." in result.output
+    assert "status  Show projected collaboration statuses." not in result.output
     assert "inject     Debug: inject raw input into an agent pane." in result.output
     assert "plugin  Manage first-party Hive plugins." in result.output
     assert "who" not in result.output
     assert "statuses     " not in result.output
     assert "status-show" not in result.output
-    assert "type" not in result.output
+    assert "  type " not in result.output
     assert "current  " not in result.output
 
 

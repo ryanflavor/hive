@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -36,6 +37,50 @@ def _factory_commands_dir() -> Path:
 
 def _factory_skills_dir() -> Path:
     return core_hooks.factory_home() / "skills"
+
+
+def _claude_home() -> Path:
+    return Path(os.environ.get("CLAUDE_HOME", str(Path.home() / ".claude")))
+
+
+def _claude_skills_dir() -> Path:
+    return _claude_home() / "skills"
+
+
+def _codex_home() -> Path:
+    return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+
+
+def _codex_skills_dir() -> Path:
+    return _codex_home() / "skills"
+
+
+def _skill_install_dirs() -> list[Path]:
+    """Target directories where real plugin skills are symlinked.
+
+    Command plugins (cvim/vim/vfork/hfork/notify) intentionally do NOT
+    receive Claude or Codex wrappers; those agents are expected to invoke
+    `hive <command>` via their built-in shell escape. Real model skills
+    (e.g. `code-review`) still land in all three agent skill dirs.
+    """
+    return [
+        _factory_skills_dir(),
+        _claude_skills_dir(),
+        _codex_skills_dir(),
+    ]
+
+
+def find_installed_command(plugin_name: str, command_name: str) -> Path | None:
+    """Return the installed plugin command script path, or None if not present.
+
+    Used by the top-level `hive cvim` / `hive vim` / `hive vfork` / `hive hfork`
+    CLI subcommands to forward execution into the plugin-materialized bash
+    helper without depending on Factory's slash command path.
+    """
+    path = _installed_root() / plugin_name / "commands" / command_name
+    if path.is_file():
+        return path
+    return None
 
 
 def _load_state() -> dict[str, Any]:
@@ -162,18 +207,58 @@ def _render_plugin_text(content: str, *, install_dir: Path) -> str:
     return content
 
 
-def _install_commands(install_dir: Path) -> list[str]:
+def _materialize_installed_commands(install_dir: Path) -> list[Path]:
     commands_dir = install_dir / "commands"
     if not commands_dir.is_dir():
         return []
-    materialized: list[str] = []
+    materialized: list[Path] = []
     for command_path in sorted(commands_dir.iterdir()):
         if command_path.name.startswith("."):
             continue
-        dst = _factory_commands_dir() / command_path.name
-        _copy_text_with_plugin_root(command_path.resolve(), dst, install_dir=install_dir)
-        materialized.append(str(dst))
+        command_path.write_text(_render_plugin_text(command_path.read_text(), install_dir=install_dir))
+        _ensure_executable_if_script(command_path)
+        materialized.append(command_path)
     return materialized
+
+
+def _generate_factory_shim(command_path: Path) -> str:
+    """Build a thin Factory slash-command shim that delegates to ``hive <name>``.
+
+    The shim preserves all ``# DROID:`` directive comments from the source
+    script so that Droid renders the correct description and honours the
+    "return control immediately" behaviour, but the actual logic is
+    forwarded to the ``hive`` CLI subcommand.
+    """
+    droid_lines: list[str] = []
+    for line in command_path.read_text().splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("# DROID:"):
+            droid_lines.append(stripped)
+    body = "\n".join(droid_lines)
+    name = command_path.name
+    return f"#!/usr/bin/env bash\n{body}\nset -euo pipefail\nexec hive {name} \"$@\"\n"
+
+
+def _install_commands(command_paths: list[Path]) -> list[str]:
+    """Install thin shim scripts under ``~/.factory/commands/``.
+
+    Each shim preserves the ``# DROID:`` comment directives from the plugin
+    source script and delegates execution to ``hive <command-name>``.  The
+    real logic stays in ``~/.hive/plugins/installed/<plugin>/commands/<name>``
+    (the installed origin), which ``hive <name>`` exec's into.
+    """
+    if not command_paths:
+        return []
+    installed: list[str] = []
+    target_dir = _factory_commands_dir()
+    for command_path in command_paths:
+        dst = target_dir / command_path.name
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        _remove_path(dst)
+        dst.write_text(_generate_factory_shim(command_path))
+        _ensure_executable_if_script(dst)
+        installed.append(str(dst))
+    return installed
 
 
 def _source_tmux_conf(conf: Path) -> bool:
@@ -209,20 +294,27 @@ def _is_plugin_managed_skill(path: Path) -> bool:
 
 
 def _install_skills(install_dir: Path) -> list[str]:
+    """Install plugin skill directories for Factory, Claude Code, and Codex.
+
+    Used for real model skills (e.g. `code-review`). Command plugins do not
+    reach this path because their source trees do not ship a `skills/`
+    directory; they only carry `commands/` scripts that land in Factory.
+    """
     skills_dir = install_dir / "skills"
     if not skills_dir.is_dir():
         return []
     linked: list[str] = []
     skipped: list[str] = []
-    for skill_dir in sorted(skills_dir.iterdir()):
-        if skill_dir.name.startswith("."):
-            continue
-        dst = _factory_skills_dir() / skill_dir.name
-        if dst.exists() and not _is_plugin_managed_skill(dst):
-            skipped.append(skill_dir.name)
-            continue
-        _link_path(skill_dir.resolve(), dst)
-        linked.append(str(dst))
+    for target_dir in _skill_install_dirs():
+        for skill_dir in sorted(skills_dir.iterdir()):
+            if skill_dir.name.startswith("."):
+                continue
+            dst = target_dir / skill_dir.name
+            if dst.exists() and not _is_plugin_managed_skill(dst):
+                skipped.append(str(dst))
+                continue
+            _link_path(skill_dir.resolve(), dst)
+            linked.append(str(dst))
     if skipped:
         import click
         click.echo(
@@ -290,7 +382,8 @@ def enable_plugin(name: str) -> dict[str, object]:
     install_dir.parent.mkdir(parents=True, exist_ok=True)
     _copy_tree(_plugin_resource_dir(name), install_dir)
 
-    commands = _install_commands(install_dir)
+    command_paths = _materialize_installed_commands(install_dir)
+    commands = _install_commands(command_paths)
     skills = _install_skills(install_dir)
     hook_defs = _plugin_hook_defs(install_dir)
     if hook_defs:

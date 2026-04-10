@@ -136,6 +136,8 @@ if cmd == "display-message":
     values = {
         "#{pane_id}": pane["id"],
         "#{pane_current_path}": pane.get("cwd", "/repo"),
+        "#{pane_current_command}": pane.get("command", "droid"),
+        "#{pane_title}": pane.get("title", ""),
         "#{session_id}": state.get("session_id", "$1"),
         "#{window_id}": state.get("window_id", "@1"),
         "#{pane_pid}": pane.get("pid", 1234),
@@ -498,7 +500,8 @@ def test_edited_save_waits_for_pane_ready_before_paste(tmp_path):
         tmp_path,
         current_pane="%1",
         panes=[
-            {"id": "%1", "left": 0, "top": 0, "width": 200, "height": 100},
+            {"id": "%1", "left": 0, "top": 0, "width": 200, "height": 100,
+             "command": "claude"},
         ],
         extra_env={
             "FAKE_EDITOR_APPEND_TEXT": "new line added",
@@ -515,6 +518,103 @@ def test_edited_save_waits_for_pane_ready_before_paste(tmp_path):
         if event["cmd"] in {"send-keys", "load-buffer", "paste-buffer"}
     )
     assert not paste_event.get("dropped", False)
+
+
+def test_claude_profile_clears_input_with_ctrl_u_before_paste(tmp_path):
+    actions = _run_command_actions(
+        tmp_path,
+        current_pane="%1",
+        panes=[
+            {
+                "id": "%1",
+                "left": 0,
+                "top": 0,
+                "width": 200,
+                "height": 100,
+                "command": "claude",
+                "title": "✳ Claude Code",
+            },
+        ],
+        extra_env={
+            "FAKE_EDITOR_APPEND_TEXT": "new line added",
+            "FAKE_TMUX_CAPTURE_PANE_TEXT": "ready for input\n> [<droid_edit mode=\"text\"> pasted]",
+        },
+    )
+
+    ctrl_u_index = next(
+        index for index, event in enumerate(actions)
+        if event["cmd"] == "send-keys" and event["args"][-1] == "C-u"
+    )
+    paste_index = next(
+        index for index, event in enumerate(actions)
+        if event["cmd"] == "paste-buffer"
+    )
+
+    assert ctrl_u_index < paste_index
+
+
+def test_claude_profile_accepts_pasted_placeholder_before_submit(tmp_path):
+    cache_dir = tmp_path / "cache"
+    actions = _run_command_actions(
+        tmp_path,
+        current_pane="%1",
+        panes=[
+            {
+                "id": "%1",
+                "left": 0,
+                "top": 0,
+                "width": 200,
+                "height": 100,
+                "command": "claude",
+                "title": "✳ Claude Code",
+            },
+        ],
+        extra_env={
+            "FAKE_EDITOR_APPEND_TEXT": "new line added",
+            "FAKE_TMUX_CAPTURE_PANE_TEXT": "❯ [Pasted text #1 +10 lines]",
+            "XDG_CACHE_HOME": str(cache_dir),
+        },
+        use_default_delays=True,
+    )
+
+    latest_file = cache_dir / "droid-vim" / "debug" / "latest"
+    log_path = Path(latest_file.read_text().strip())
+    log_text = log_path.read_text()
+
+    assert any(event["cmd"] == "paste-buffer" for event in actions)
+    assert any(
+        event["cmd"] == "send-keys" and event["args"][-1] == "Enter"
+        for event in actions
+    )
+    assert "matcher=claude_pasted_placeholder" in log_text
+
+
+def test_claude_profile_clears_input_even_when_editor_content_is_unchanged(tmp_path):
+    actions = _run_command_actions(
+        tmp_path,
+        current_pane="%1",
+        panes=[
+            {
+                "id": "%1",
+                "left": 0,
+                "top": 0,
+                "width": 200,
+                "height": 100,
+                "command": "claude",
+                "title": "✳ Claude Code",
+            },
+        ],
+    )
+
+    assert any(
+        event["cmd"] == "send-keys" and event["args"][-1] == "C-u"
+        for event in actions
+    )
+    assert not any(event["cmd"] in {"load-buffer", "paste-buffer"} for event in actions)
+    assert not any(
+        event["cmd"] == "send-keys" and event["args"][-1] == "Enter"
+        for event in actions
+    )
 
 
 def test_popup_schedules_post_after_popup_exits(tmp_path):
@@ -586,6 +686,7 @@ def test_edited_save_skips_submit_when_probe_never_finds_structured_input(tmp_pa
                 "ready for input\n> still empty",
                 "ready for input\n> still empty",
                 "ready for input\n> still empty",
+                "ready for input\n> still empty",
             ]),
             "XDG_CACHE_HOME": str(cache_dir),
         },
@@ -603,7 +704,7 @@ def test_edited_save_skips_submit_when_probe_never_finds_structured_input(tmp_pa
         for event in actions
     )
     assert "post.probe.failed label=after_paste attempts=4" in log_text
-    assert "post.submit_skipped reason=missing_structured_input_after_paste" in log_text
+    assert "post.submit_skipped reason=missing_submit_ready_input_after_paste" in log_text
     assert "post.capture.after_paste_failed > still empty" in log_text
 
 

@@ -1,11 +1,15 @@
 import json
 
+import pytest
+
 from hive.cli import cli
 
 
 def test_plugin_list_enable_and_disable_cvim(runner, configure_hive_home):
     hive_home = configure_hive_home(tmux_inside=False)
     factory_home = hive_home.parent / ".factory"
+    codex_home = hive_home.parent / ".codex"
+    claude_home = hive_home.parent / ".claude"
     (factory_home / "settings.json").parent.mkdir(parents=True, exist_ok=True)
     (factory_home / "settings.json").write_text(json.dumps({
         "hooks": {
@@ -37,15 +41,25 @@ def test_plugin_list_enable_and_disable_cvim(runner, configure_hive_home):
     assert enabled.exit_code == 0
     assert "Plugin 'cvim' enabled." in enabled.output
     assert "commands: cvim, vim" in enabled.output
+    # cvim is a pure command plugin; it must not register any Claude or Codex
+    # wrapper (the CLI now exposes `hive cvim` / `hive vim` instead).
+    assert "skills:" not in enabled.output
 
     enabled_json = runner.invoke(cli, ["plugin", "enable", "cvim", "--json"])
     assert enabled_json.exit_code == 0
     enable_payload = json.loads(enabled_json.output)
     assert enable_payload["enabled"] is True
-    assert (factory_home / "commands" / "vim").exists()
-    assert not (factory_home / "commands" / "vim").is_symlink()
-    assert (factory_home / "commands" / "cvim").exists()
-    assert not (factory_home / "commands" / "cvim").is_symlink()
+    assert enable_payload["skills"] == []
+    factory_commands_root = factory_home / "commands"
+    assert (factory_commands_root / "vim").exists()
+    assert not (factory_commands_root / "vim").is_symlink()
+    assert (factory_commands_root / "cvim").exists()
+    assert not (factory_commands_root / "cvim").is_symlink()
+    # Claude and Codex should NOT receive command wrappers for cvim/vim anymore.
+    assert not (claude_home / "commands" / "cvim.md").exists()
+    assert not (claude_home / "commands" / "vim.md").exists()
+    assert not (codex_home / "skills" / "cvim").exists()
+    assert not (codex_home / "skills" / "vim").exists()
     install_root = hive_home / "plugins" / "installed" / "cvim"
     installed_runner = install_root / "bin" / "droid-vim-command"
     installed_payload_builder = install_root / "bin" / "droid-vim-payload"
@@ -58,8 +72,6 @@ def test_plugin_list_enable_and_disable_cvim(runner, configure_hive_home):
     assert installed_session_helper.exists()
     assert installed_protocol.exists()
     installed_runner_text = installed_runner.read_text()
-    installed_cvim_text = (factory_home / "commands" / "cvim").read_text()
-    installed_vim_text = (factory_home / "commands" / "vim").read_text()
     assert "from hive." not in installed_runner_text
     assert 'src_pane_pid="$(tmux display-message -p -t "$src_pane" \'#{pane_pid}\')"' in installed_runner_text
     assert 'src_pane_tty="$(tmux display-message -p -t "$src_pane" \'#{pane_tty}\')"' in installed_runner_text
@@ -67,12 +79,12 @@ def test_plugin_list_enable_and_disable_cvim(runner, configure_hive_home):
     assert 'seed_helper="$script_dir/droid-vim-seed"' in installed_runner_text
     assert 'session_helper="$script_dir/droid-vim-session"' in installed_runner_text
     assert '"$seed_helper" "$cwd" "$dst" "$session_map_file" "$droid_pid" "$droid_tty" "$droid_args"' in installed_runner_text
-    assert 'transcript_path="$("$session_helper" "$session_map_file" "$src_cwd" "" "$src_pane_tty_key" "")"' in installed_runner_text
+    assert 'transcript_path="$("$session_helper" "$session_map_file" "$src_cwd" "" "$src_pane_tty_key" "" "$src_pane" 2>/dev/null || true)"' in installed_runner_text
     assert '"$seed_helper" "$src_cwd" "$msg_file" "$transcript_path"' in installed_runner_text
     assert 'capture_session_seed_to_file "$src_cwd" "$msg_file" "$droid_pid" "$droid_tty" "$droid_args"' in installed_runner_text
     assert '"$helper_file" "$reply_pane" "$editor_bin" "$msg_file" "$orig_file" "$tmpdir" "$output_mode"' in installed_runner_text
-    assert '"$submit_delay_default" "$cursor_mode" "$payload_builder"' in installed_runner_text
-    assert 'payload_builder="${13}"' in installed_runner_text
+    assert '"$submit_delay_default" "$clear_input_before_paste_default" "$cursor_mode" "$payload_builder"' in installed_runner_text
+    assert 'payload_builder="${14}"' in installed_runner_text
     assert "\"$payload_builder\" \"$orig_file\" \"$msg_file\" \"$send_file\" \"$send_mode\"" in installed_runner_text
     payload_builder_text = installed_payload_builder.read_text()
     assert "droid_edit_protocol.json" in payload_builder_text
@@ -80,11 +92,13 @@ def test_plugin_list_enable_and_disable_cvim(runner, configure_hive_home):
     protocol_text = installed_protocol.read_text()
     assert "紧邻上一条 assistant message" in protocol_text
     assert "previous_assistant_message" in protocol_text
-    assert str(installed_runner) in installed_cvim_text
-    assert str(installed_runner) in installed_vim_text
-    assert "previous_assistant_message</edit_target>" in installed_cvim_text
+    installed_cvim_text = (factory_commands_root / "cvim").read_text()
+    installed_vim_text = (factory_commands_root / "vim").read_text()
+    assert 'exec hive cvim "$@"' in installed_cvim_text
+    assert 'exec hive vim "$@"' in installed_vim_text
+    assert "# DROID:" in installed_cvim_text
     assert "immediately" in installed_cvim_text
-    assert "previous_assistant_message</edit_target>" in installed_vim_text
+    assert "# DROID:" in installed_vim_text
     assert "immediately" in installed_vim_text
 
     settings = json.loads((factory_home / "settings.json").read_text())
@@ -100,21 +114,32 @@ def test_plugin_list_enable_and_disable_cvim(runner, configure_hive_home):
     disabled = runner.invoke(cli, ["plugin", "disable", "cvim"])
     assert disabled.exit_code == 0
     assert "Plugin 'cvim' disabled." in disabled.output
-    assert not (factory_home / "commands" / "vim").exists()
-    assert not (factory_home / "commands" / "cvim").exists()
+    assert not (factory_commands_root / "vim").exists()
+    assert not (factory_commands_root / "cvim").exists()
+    assert not (claude_home / "commands" / "vim.md").exists()
+    assert not (claude_home / "commands" / "cvim.md").exists()
+    assert not (codex_home / "skills" / "vim").exists()
+    assert not (codex_home / "skills" / "cvim").exists()
     assert (hive_home / "core" / "bin" / "droid-session-map-hook").exists()
 
 
 def test_plugin_enable_code_review_materializes_skill(runner, configure_hive_home):
     hive_home = configure_hive_home(tmux_inside=False)
     factory_home = hive_home.parent / ".factory"
+    codex_home = hive_home.parent / ".codex"
+    claude_home = hive_home.parent / ".claude"
 
     enabled = runner.invoke(cli, ["plugin", "enable", "code-review"])
 
     assert enabled.exit_code == 0
     assert "Plugin 'code-review' enabled." in enabled.output
     assert "skills: code-review" in enabled.output
-    assert (factory_home / "skills" / "code-review").is_symlink()
+    for skill_root in (
+        factory_home / "skills",
+        claude_home / "skills",
+        codex_home / "skills",
+    ):
+        assert (skill_root / "code-review").is_symlink()
 
     # --- SKILL.md ---
     skill = hive_home / "plugins" / "installed" / "code-review" / "skills" / "code-review" / "SKILL.md"
@@ -146,7 +171,7 @@ def test_plugin_enable_code_review_materializes_skill(runner, configure_hive_hom
     assert "hive kill reviewer-a" in s1_pipeline
     assert "hive spawn verifier-a" in s1_pipeline
     assert "hive layout main-vertical" in s1_pipeline
-    assert "hive send orch" in s1_pipeline
+    assert "hive reply orch" in s1_pipeline
     assert "idle" in s1_pipeline.lower()
 
     # --- S1 reviewer ---
@@ -220,13 +245,21 @@ def test_plugin_reenable_preserves_user_skill_that_replaced_old_plugin_symlink(r
 def test_plugin_enable_notify_materializes_command_and_hooks(runner, configure_hive_home):
     hive_home = configure_hive_home(tmux_inside=False)
     factory_home = hive_home.parent / ".factory"
+    codex_home = hive_home.parent / ".codex"
+    claude_home = hive_home.parent / ".claude"
 
     enabled = runner.invoke(cli, ["plugin", "enable", "notify"])
 
     assert enabled.exit_code == 0
     assert "Plugin 'notify' enabled." in enabled.output
     assert "commands: notify" in enabled.output
+    # notify is a pure command plugin; it must not register any Claude/Codex
+    # wrapper anymore. Claude and Codex invoke `hive notify "<msg>"` via
+    # their built-in shell escape.
+    assert "skills:" not in enabled.output
     assert (factory_home / "commands" / "notify").exists()
+    assert not (claude_home / "commands" / "notify.md").exists()
+    assert not (codex_home / "skills" / "notify").exists()
 
     installed_root = hive_home / "plugins" / "installed" / "notify"
     hook_runner = installed_root / "bin" / "droid-notify-hook"
@@ -239,3 +272,65 @@ def test_plugin_enable_notify_materializes_command_and_hooks(runner, configure_h
         group = settings["hooks"][event][0]
         assert group["hooks"][0]["command"] == str(hook_runner)
         assert group["hooks"][0]["timeout"] == 5
+
+
+@pytest.fixture
+def capture_exec(monkeypatch):
+    calls: list[tuple[str, list[str]]] = []
+
+    def fake_execvp(file: str, argv: list[str]) -> None:
+        calls.append((file, list(argv)))
+        raise SystemExit(0)
+
+    monkeypatch.setattr("hive.cli.os.execvp", fake_execvp)
+    return calls
+
+
+@pytest.mark.parametrize(
+    "hive_command, plugin_name, plugin_command",
+    [
+        ("cvim", "cvim", "cvim"),
+        ("vim", "cvim", "vim"),
+        ("vfork", "fork", "vfork"),
+        ("hfork", "fork", "hfork"),
+    ],
+)
+def test_plugin_helper_commands_forward_to_installed_plugin_script(
+    runner,
+    configure_hive_home,
+    capture_exec,
+    hive_command,
+    plugin_name,
+    plugin_command,
+):
+    hive_home = configure_hive_home(tmux_inside=True)
+
+    enable_result = runner.invoke(cli, ["plugin", "enable", plugin_name])
+    assert enable_result.exit_code == 0, enable_result.output
+
+    result = runner.invoke(cli, [hive_command, "--", "--extra", "arg1"])
+    assert result.exit_code == 0, result.output
+
+    assert len(capture_exec) == 1
+    command_name, argv = capture_exec[0]
+    assert command_name == "bash"
+    expected_script = str(
+        hive_home / "plugins" / "installed" / plugin_name / "commands" / plugin_command
+    )
+    assert argv[0] == "bash"
+    assert argv[1] == expected_script
+    # Extra args from the hive command line should be forwarded verbatim.
+    assert argv[2:] == ["--extra", "arg1"]
+
+
+def test_plugin_helper_command_errors_when_plugin_not_enabled(
+    runner,
+    configure_hive_home,
+    capture_exec,
+):
+    configure_hive_home(tmux_inside=True)
+
+    result = runner.invoke(cli, ["cvim"])
+    assert result.exit_code != 0
+    assert "plugin 'cvim' is not enabled" in result.output
+    assert capture_exec == []

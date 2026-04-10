@@ -37,15 +37,17 @@ _COMMAND_HELP_SECTIONS = {
     "layout": "Team Setup",
     "workflow": "Team Setup",
     "send": "Communication",
-    "status": "Communication",
-    "status-set": "Communication",
-    "wait-status": "Communication",
+    "reply": "Communication",
     "inject": "Pane Control",
     "capture": "Pane Control",
     "interrupt": "Pane Control",
     "kill": "Pane Control",
     "exec": "Pane Control",
     "terminal": "Pane Control",
+    "cvim": "Plugin Helpers",
+    "vim": "Plugin Helpers",
+    "vfork": "Plugin Helpers",
+    "hfork": "Plugin Helpers",
     "plugin": "Extensions",
     "notify": "User Attention",
 }
@@ -54,6 +56,7 @@ _COMMAND_HELP_SECTION_ORDER = [
     "Team Setup",
     "Communication",
     "Pane Control",
+    "Plugin Helpers",
     "Extensions",
     "User Attention",
     "Other Commands",
@@ -61,9 +64,10 @@ _COMMAND_HELP_SECTION_ORDER = [
 _COMMAND_HELP_SECTION_DESCRIPTIONS = {
     "Context": "Inspect or bind the current tmux window to a Hive team.",
     "Team Setup": "Create teams and register panes for the current window.",
-    "Communication": "Exchange Hive messages and publish progress snapshots.",
+    "Communication": "Exchange Hive messages and inspect projected collaboration state.",
     "Pane Control": "Drive agent or terminal panes directly when needed.",
-    "Extensions": "Manage first-party Hive plugins that materialize Factory commands and skills.",
+    "Plugin Helpers": "Human-only editor and split helpers backed by enabled plugin scripts. Droid exposes them as native slash commands (`/cvim`, `/vim`, ...); in Claude Code and Codex the human types them inline via the shell escape (e.g. `!hive cvim`). These are NOT meant for the model to call on its own.",
+    "Extensions": "Manage first-party Hive plugins that materialize commands and skills for Factory, Claude Code, and Codex.",
     "User Attention": "Bring the human back to the right pane at the right time.",
 }
 _ROOT_HELP_EXAMPLES = '''# Inspect your team and current member
@@ -75,11 +79,14 @@ hive init
 # Show team overview
 hive team
 
-# Show published statuses only
-hive status
+# Inspect projected progress in the team payload
+hive team
 
-# Send a structured Hive message to another member
+# Send a structured Hive task to another member
 hive send <peer-name> "review this diff"
+
+# Reply to a task with a projected completion state
+hive reply orch "review complete" --reply-to <message-id> --artifact /tmp/review.md
 
 # Run a command in a registered terminal pane
 hive exec term-1 "tail -f app.log"
@@ -336,6 +343,94 @@ def _new_message_id() -> str:
     return f"msg-{secrets.token_hex(8)}"
 
 
+def _resolve_artifact_path(artifact: str) -> str:
+    resolved_artifact = str(Path(artifact).expanduser()) if artifact else ""
+    if resolved_artifact and not Path(resolved_artifact).exists():
+        _fail(f"artifact not found: {resolved_artifact}")
+    return resolved_artifact
+
+
+def _send_recorded_message(
+    *,
+    team: Team,
+    sender: str,
+    to_agent: str,
+    body: str,
+    intent: str,
+    reply_to: str = "",
+    message_id: str = "",
+    artifact: str = "",
+    state: str = "",
+    task: str = "",
+    waiting_on: str = "",
+    waiting_for: str = "",
+    blocked_by: str = "",
+    metadata: dict[str, str] | None = None,
+) -> dict[str, object]:
+    ws = _resolve_workspace(team, required=True)
+    target = _resolve_live_agent(team, to_agent)
+    resolved_message_id = message_id or _new_message_id()
+    resolved_artifact = _resolve_artifact_path(artifact)
+    normalized_body = body.strip()
+    envelope = _format_hive_envelope(
+        from_agent=sender,
+        to_agent=to_agent,
+        body=body,
+        artifact=resolved_artifact,
+        message_id=resolved_message_id,
+        intent=intent,
+        reply_to=reply_to,
+    )
+    target.send(envelope)
+    path = bus.write_event(
+        ws,
+        message_id=resolved_message_id,
+        from_agent=sender,
+        to_agent=to_agent,
+        intent=intent,
+        body=normalized_body,
+        reply_to=reply_to,
+        artifact=resolved_artifact,
+        state=state,
+        task=task,
+        waiting_on=waiting_on,
+        waiting_for=waiting_for,
+        blocked_by=blocked_by,
+        metadata=metadata,
+    )
+    payload: dict[str, object] = {
+        "messageId": resolved_message_id,
+        "intent": intent,
+        "from": sender,
+        "to": to_agent,
+        "replyTo": reply_to,
+        "artifact": resolved_artifact,
+        "path": str(path),
+    }
+    if normalized_body:
+        payload["summary"] = normalized_body
+    if intent == "reply":
+        payload["state"] = state or "done"
+        payload["metadata"] = metadata or {}
+        if task:
+            payload["task"] = task
+        if waiting_on:
+            payload["waitingOn"] = waiting_on
+        if waiting_for:
+            payload["waitingFor"] = waiting_for
+        if blocked_by:
+            payload["blockedBy"] = blocked_by
+    return payload
+
+
+def _status_migration_failure(command_name: str) -> None:
+    _fail(
+        f"`hive {command_name}` was removed; use `hive send` to assign work, "
+        "`hive reply --reply-to <message-id> --state ... [--artifact ...]` to report progress, "
+        "and `hive team` to inspect projected state under the `statuses` field"
+    )
+
+
 def _format_hive_envelope(
     *,
     from_agent: str,
@@ -373,18 +468,6 @@ def _tmux_runtime_required(argv: list[str]) -> bool:
     return positional[0] not in _TMUX_OPTIONAL_ROOT_COMMANDS
 
 
-def _status_matches(payload: dict[str, object] | None, state: str, metadata: dict[str, str]) -> bool:
-    if payload is None:
-        return False
-    if state and str(payload.get("state", "")) != state:
-        return False
-    payload_metadata = {str(k): str(v) for k, v in dict(payload.get("metadata", {})).items()}
-    for key, value in metadata.items():
-        if payload_metadata.get(key) != value:
-            return False
-    return True
-
-
 @click.group(cls=SectionedHelpGroup)
 @click.pass_context
 def cli(ctx: click.Context):
@@ -416,6 +499,21 @@ def _gc_dead_teams() -> None:
     ctx = hive_context.load_current_context()
     if ctx.get("team") and ctx["team"] not in live_names:
         hive_context.clear_current_context()
+
+
+def _exec_plugin_helper(plugin_name: str, command_name: str, args: tuple[str, ...]) -> None:
+    """Forward execution to the materialized plugin command script.
+
+    Replaces the current Python process with `bash <script> <args>` so the
+    plugin helper (and any tmux popups it spawns) owns the terminal lifetime.
+    """
+    script = plugin_manager.find_installed_command(plugin_name, command_name)
+    if script is None:
+        _fail(
+            f"plugin '{plugin_name}' is not enabled. Run "
+            f"`hive plugin enable {plugin_name}` first."
+        )
+    os.execvp("bash", ["bash", str(script), *args])
 
 
 @cli.command("fork")
@@ -898,53 +996,12 @@ def workflow_load(agent_name: str, workflow_name: str, prompt: str):
     click.echo(f"Workflow '{workflow_name}' loaded into {agent_name}.")
 
 
-@cli.command("wait-status")
-@click.argument("agent_name")
-@click.option("--state", "expected_state", default="", help="Expected state")
-@click.option("--meta", "metadata_entries", multiple=True, help="Required metadata KEY=VALUE")
-@click.option("--timeout", default=600, type=int, show_default=True, help="Timeout in seconds")
-@click.option("--interval", default=1.0, type=float, show_default=True, help="Poll interval in seconds")
-def wait_status(
-    agent_name: str,
-    expected_state: str,
-    metadata_entries: tuple[str, ...],
-    timeout: int,
-    interval: float,
-):
-    """Wait for a matching published status."""
-    _, t = _resolve_scoped_team(None, required=True)
-    ws = _resolve_workspace(t, required=True)
-    metadata = _parse_entries(metadata_entries)
-
-    start = time.time()
-    deadline = start + timeout
-    click.echo(f"Waiting for status from {agent_name}... [timeout: {timeout}s]")
-
-    while True:
-        payload = bus.read_status(ws, agent_name)
-        if _status_matches(payload, expected_state, metadata):
-            click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
-            return
-
-        if t:
-            member = next((m for m in list(t.status().get("members", [])) if m.get("name") == agent_name), None)
-            if member is not None and not member.get("alive", False):
-                click.echo(f"Error: {agent_name} is no longer alive", err=True)
-                try:
-                    click.echo(t.get(agent_name).capture(30), err=True)
-                except Exception:
-                    pass
-                sys.exit(1)
-
-        now = time.time()
-        if now >= deadline:
-            click.echo(f"Timed out after {timeout}s waiting for status from {agent_name}", err=True)
-            sys.exit(1)
-
-        elapsed = int(now - start)
-        if elapsed > 0 and elapsed % 30 == 0:
-            click.echo(f"  ... {elapsed}s elapsed")
-        time.sleep(interval)
+@cli.command("wait-status", hidden=True, context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
+@click.argument("legacy_args", nargs=-1, type=click.UNPROCESSED)
+def wait_status(legacy_args: tuple[str, ...]):
+    """Removed legacy status polling command."""
+    del legacy_args
+    _status_migration_failure("wait-status")
 
 
 @cli.command("inject")
@@ -991,111 +1048,36 @@ def layout_cmd(preset: str):
     click.echo(json.dumps({"layout": preset, "window": window_target}))
 
 
-@cli.command("status-set")
-@click.argument("state", type=click.Choice(_STATUS_STATES, case_sensitive=False))
-@click.argument("summary", required=False, default="")
-@click.option("--agent", "agent_name", default=None, help=f"Agent name (default: current tmux binding or {LEAD_AGENT_NAME})")
-@click.option("--task", default="", help="Structured task identifier")
-@click.option("--activity", default="", help="Short current activity label")
-@click.option("--waiting-on", default="", help="Agent or dependency currently being waited on")
-@click.option("--waiting-for", default="", help="Message or dependency ID currently being waited on")
-@click.option("--blocked-by", default="", help="Short blocker identifier")
-@click.option("--meta", "metadata_entries", multiple=True, help="Metadata KEY=VALUE")
-def status_set(
-    state: str,
-    summary: str,
-    agent_name: str | None,
-    task: str,
-    activity: str,
-    waiting_on: str,
-    waiting_for: str,
-    blocked_by: str,
-    metadata_entries: tuple[str, ...],
-):
-    """Publish a collaboration status."""
-    team_name, t = _resolve_scoped_team(None, required=True)
-    ws = _resolve_workspace(t, required=True)
-    sender = _resolve_sender(agent_name)
-    normalized_state = state.lower()
-    legacy_summary = summary.strip()
-    resolved_activity = activity.strip()
-    structured_fields_used = any([task, resolved_activity, waiting_on, waiting_for, blocked_by])
-    if legacy_summary and resolved_activity:
-        _fail("use either the legacy summary argument or --activity, not both")
-    if not resolved_activity and structured_fields_used:
-        resolved_activity = legacy_summary
-    if normalized_state == "waiting_input" and not (waiting_on or waiting_for):
-        _fail("waiting_input requires --waiting-on or --waiting-for")
-    if normalized_state == "blocked" and not blocked_by:
-        _fail("blocked requires --blocked-by")
-    metadata = _parse_entries(metadata_entries)
-    path = bus.write_status(
-        ws,
-        sender,
-        state=normalized_state,
-        summary=legacy_summary if not structured_fields_used else (legacy_summary or resolved_activity),
-        activity=resolved_activity if structured_fields_used else "",
-        task=task,
-        waiting_on=waiting_on,
-        waiting_for=waiting_for,
-        blocked_by=blocked_by,
-        metadata=metadata,
-    )
-    response: dict[str, object] = {
-        "agent": sender,
-        "state": normalized_state,
-        "metadata": metadata,
-        "path": str(path),
-    }
-    if legacy_summary or resolved_activity:
-        response["summary"] = legacy_summary or resolved_activity
-    if structured_fields_used:
-        if resolved_activity:
-            response["activity"] = resolved_activity
-        if task:
-            response["task"] = task
-        if waiting_on:
-            response["waitingOn"] = waiting_on
-        if waiting_for:
-            response["waitingFor"] = waiting_for
-        if blocked_by:
-            response["blockedBy"] = blocked_by
-    click.echo(json.dumps(response, indent=2, ensure_ascii=False))
+@cli.command("status-set", hidden=True, context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
+@click.argument("legacy_args", nargs=-1, type=click.UNPROCESSED)
+def status_set(legacy_args: tuple[str, ...]):
+    """Removed legacy status publishing command."""
+    del legacy_args
+    _status_migration_failure("status-set")
 
 
-@cli.command("status")
-@click.option("--agent", "agent_name", default=None, help="Agent name")
-def status_cmd(agent_name: str | None):
-    """Show published statuses only."""
-    _, t = _resolve_scoped_team(None, required=True)
-    ws = _resolve_workspace(t, required=True)
-    all_statuses = bus.read_all_statuses(ws)
-    filtered_statuses = _filter_statuses_to_members(
-        all_statuses,
-        list(t.status().get("members", [])) if t else None,
-        lead_name=t.lead_name if t else "",
-    )
-    if agent_name:
-        payload = filtered_statuses.get(agent_name)
-        if payload is None:
-            _fail(f"no published status for agent '{agent_name}'")
-        click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
-        return
-    click.echo(json.dumps(filtered_statuses, indent=2, ensure_ascii=False))
+@cli.command("status", hidden=True, context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
+@click.argument("legacy_args", nargs=-1, type=click.UNPROCESSED)
+def status_cmd(legacy_args: tuple[str, ...]):
+    """Removed projected-status command."""
+    del legacy_args
+    _status_migration_failure("status")
 
 
-@cli.command("statuses", hidden=True)
-@click.option("--agent", "agent_name", default=None, help="Agent name")
-def statuses_cmd(agent_name: str | None):
-    """Backward-compatible alias for `hive status`."""
-    status_cmd.callback(agent_name)  # type: ignore[attr-defined]
+@cli.command("statuses", hidden=True, context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
+@click.argument("legacy_args", nargs=-1, type=click.UNPROCESSED)
+def statuses_cmd(legacy_args: tuple[str, ...]):
+    """Backward-compatible alias for removed `hive status`."""
+    del legacy_args
+    _status_migration_failure("statuses")
 
 
-@cli.command("status-show", hidden=True)
-@click.option("--agent", "agent_name", default=None, help="Agent name")
-def status_show(agent_name: str | None):
-    """Backward-compatible alias for `hive status`."""
-    status_cmd.callback(agent_name)  # type: ignore[attr-defined]
+@cli.command("status-show", hidden=True, context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
+@click.argument("legacy_args", nargs=-1, type=click.UNPROCESSED)
+def status_show(legacy_args: tuple[str, ...]):
+    """Backward-compatible alias for removed `hive status`."""
+    del legacy_args
+    _status_migration_failure("status-show")
 
 
 @cli.command()
@@ -1119,44 +1101,78 @@ def send(
     team_name, t = _resolve_scoped_team(None, required=True)
     assert team_name is not None and t is not None
     sender = _resolve_sender(from_agent)
-    target = _resolve_live_agent(t, to_agent)
     normalized_intent = intent.lower()
     if normalized_intent == "reply" and not reply_to:
         _fail("--intent reply requires --reply-to")
     if reply_to and normalized_intent != "reply":
         _fail("--reply-to can only be used with --intent reply")
-    structured_send = bool(reply_to or message_id or normalized_intent != "send")
-    resolved_message_id = message_id or (_new_message_id() if structured_send else "")
-    resolved_artifact = str(Path(artifact).expanduser()) if artifact else ""
-    if resolved_artifact and not Path(resolved_artifact).exists():
-        _fail(f"artifact not found: {resolved_artifact}")
-    envelope = _format_hive_envelope(
-        from_agent=sender,
+    payload = _send_recorded_message(
+        team=t,
+        sender=sender,
         to_agent=to_agent,
         body=body,
-        artifact=resolved_artifact,
-        message_id=resolved_message_id,
-        intent=normalized_intent if structured_send else "",
+        intent=normalized_intent,
         reply_to=reply_to,
+        message_id=message_id,
+        artifact=artifact,
     )
-    target.send(envelope)
-    if not structured_send:
-        click.echo(f"Sent HIVE message to {to_agent}.")
-        return
-    click.echo(
-        json.dumps(
-            {
-                "messageId": resolved_message_id,
-                "intent": normalized_intent,
-                "from": sender,
-                "to": to_agent,
-                "replyTo": reply_to,
-                "artifact": resolved_artifact,
-            },
-            indent=2,
-            ensure_ascii=False,
-        )
+    click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+@cli.command("reply")
+@click.argument("to_agent")
+@click.argument("body", required=False, default="")
+@click.option("--from", "from_agent", default=None, help=f"Sender agent name (default: current tmux binding or {LEAD_AGENT_NAME})")
+@click.option("--reply-to", required=True, help="Original task message ID")
+@click.option("--message-id", default="", help="Structured reply message ID override")
+@click.option("--artifact", default="", help="Artifact path for large payloads")
+@click.option("--state", "reply_state", type=click.Choice(_STATUS_STATES, case_sensitive=False), default="done", show_default=True, help="Projected status to publish from this reply")
+@click.option("--task", default="", help="Structured task identifier")
+@click.option("--waiting-on", default="", help="Agent or dependency currently being waited on")
+@click.option("--waiting-for", default="", help="Message or dependency ID currently being waited on")
+@click.option("--blocked-by", default="", help="Short blocker identifier")
+@click.option("--meta", "metadata_entries", multiple=True, help="Metadata KEY=VALUE")
+def reply_cmd(
+    to_agent: str,
+    body: str,
+    from_agent: str | None,
+    reply_to: str,
+    message_id: str,
+    artifact: str,
+    reply_state: str,
+    task: str,
+    waiting_on: str,
+    waiting_for: str,
+    blocked_by: str,
+    metadata_entries: tuple[str, ...],
+):
+    """Reply to a prior Hive message and publish projected state."""
+    team_name, t = _resolve_scoped_team(None, required=True)
+    assert team_name is not None and t is not None
+    sender = _resolve_sender(from_agent)
+    normalized_state = reply_state.lower()
+    if normalized_state == "waiting_input" and not (waiting_on or waiting_for):
+        _fail("waiting_input requires --waiting-on or --waiting-for")
+    if normalized_state == "blocked" and not blocked_by:
+        _fail("blocked requires --blocked-by")
+    metadata = _parse_entries(metadata_entries)
+    payload = _send_recorded_message(
+        team=t,
+        sender=sender,
+        to_agent=to_agent,
+        body=body,
+        intent="reply",
+        reply_to=reply_to,
+        message_id=message_id,
+        artifact=artifact,
+        state=normalized_state,
+        task=task,
+        waiting_on=waiting_on,
+        waiting_for=waiting_for,
+        blocked_by=blocked_by,
+        metadata=metadata,
     )
+    click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
 @cli.command()
@@ -1190,6 +1206,50 @@ def kill(agent_name: str):
     if agent_name in t.agents:
         del t.agents[agent_name]
     click.echo(f"Killed {agent_name}.")
+
+
+@cli.command("cvim", context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
+@click.argument("args", nargs=-1, type=click.UNPROCESSED)
+def cvim_cmd(args: tuple[str, ...]) -> None:
+    """Human-only: open vim seeded with the previous assistant message and send the diff back.
+
+    Intended to be typed by the human via the agent's shell escape (e.g. `!hive cvim`)
+    in Claude Code or Codex. Not meant for the model to invoke on its own.
+    """
+    _exec_plugin_helper("cvim", "cvim", args)
+
+
+@cli.command("vim", context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
+@click.argument("args", nargs=-1, type=click.UNPROCESSED)
+def vim_cmd(args: tuple[str, ...]) -> None:
+    """Human-only: open a blank vim buffer and send the final result back to the agent pane.
+
+    Intended to be typed by the human via the agent's shell escape (e.g. `!hive vim`)
+    in Claude Code or Codex. Not meant for the model to invoke on its own.
+    """
+    _exec_plugin_helper("cvim", "vim", args)
+
+
+@cli.command("vfork", context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
+@click.argument("args", nargs=-1, type=click.UNPROCESSED)
+def vfork_cmd(args: tuple[str, ...]) -> None:
+    """Human-only: fork the current Hive session into a vertical split.
+
+    Intended to be typed by the human via the agent's shell escape (e.g. `!hive vfork`)
+    in Claude Code or Codex. Not meant for the model to invoke on its own.
+    """
+    _exec_plugin_helper("fork", "vfork", args)
+
+
+@cli.command("hfork", context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
+@click.argument("args", nargs=-1, type=click.UNPROCESSED)
+def hfork_cmd(args: tuple[str, ...]) -> None:
+    """Human-only: fork the current Hive session into a horizontal split.
+
+    Intended to be typed by the human via the agent's shell escape (e.g. `!hive hfork`)
+    in Claude Code or Codex. Not meant for the model to invoke on its own.
+    """
+    _exec_plugin_helper("fork", "hfork", args)
 
 
 @cli.command("notify")
@@ -1233,13 +1293,20 @@ def _render_plugin_mutation_result(action: str, payload: dict[str, object]) -> s
     install_root = str(payload.get("installRoot", "") or "")
     commands = [str(item) for item in payload.get("commands", [])]
     skills = [str(item) for item in payload.get("skills", [])]
+    command_names = list(
+        dict.fromkeys(
+            path.stem if path.suffix == ".md" else path.name
+            for path in (Path(item) for item in commands)
+        )
+    )
+    skill_names = list(dict.fromkeys(Path(path).name for path in skills))
 
     if install_root:
         lines.append(f"  install root: {install_root}")
-    if commands:
-        lines.append(f"  commands: {', '.join(Path(path).name for path in commands)}")
-    if skills:
-        lines.append(f"  skills: {', '.join(Path(path).name for path in skills)}")
+    if command_names:
+        lines.append(f"  commands: {', '.join(command_names)}")
+    if skill_names:
+        lines.append(f"  skills: {', '.join(skill_names)}")
     return "\n".join(lines)
 
 

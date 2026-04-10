@@ -15,8 +15,8 @@ tmux window
 hive current/init ─→ discover or bind the current tmux window
 hive spawn/fork ──→ add more agent panes when needed
 hive send ───────→ inject inline <HIVE ...> messages via tmux
-hive status-set ─→ publish per-agent state snapshots
-workspace ───────→ artifacts/ + status/ for durable coordination
+hive reply ──────→ reply to task messages and publish projected state
+workspace ───────→ artifacts/ + events/ for durable coordination
 ```
 
 ## Install
@@ -37,10 +37,10 @@ hive current
 hive init
 hive team
 
-# Send work to another pane and publish progress
+# Send work to another pane and inspect projected progress
 hive send dodo "Review the staged diff and write findings to an artifact"
-hive status-set busy "investigating cvim popup sendback"
-hive status
+hive reply orch "review complete" --reply-to <message-id> --artifact /tmp/review.md
+hive team   # inspect projected progress via the `statuses` field
 
 # Bring the human back only when needed
 hive notify "修复完成了，按 Space 回来确认"
@@ -61,13 +61,14 @@ hive send claude "Review the PR diff and write findings to the workspace artifac
 |---------|-------------|
 | `hive current` | Inspect the current tmux/Hive binding and get the next-step hint |
 | `hive init` / `hive create <team>` | Bind the current tmux window or create a fresh team |
-| `hive team` / `hive teams` | Show the current team or list known teams |
+| `hive team` / `hive teams` | Show the current team, including projected status in `statuses`, or list known teams |
 | `hive spawn <agent>` | Spawn a new agent pane |
-| `hive send <agent> "text"` | Deliver an inline `<HIVE ...>` message to another member |
-| `hive status` / `hive status-set` / `hive wait-status` | Publish and observe collaboration state |
+| `hive send <agent> "text"` / `hive reply <agent> "text"` | Deliver structured `<HIVE ...>` messages and publish projected state |
 | `hive capture <agent>` / `hive interrupt <agent>` | Inspect or interrupt an agent pane |
 | `hive exec <terminal> "cmd"` / `hive terminal ...` | Drive registered terminal panes |
-| `hive plugin enable|disable|list` | Materialize first-party Factory commands and skills |
+| `hive plugin enable|disable|list` | Materialize first-party plugin scripts under `~/.factory/commands/` and link plugin skills |
+| `hive cvim` / `hive vim` | Pop an external editor; send a structured diff (`cvim`) or a blank draft (`vim`) back to the current agent pane |
+| `hive vfork` / `hive hfork` | Fork the current agent session into a vertical or horizontal split |
 | `hive notify "message"` | Notify the human attached to the current pane |
 | `hive delete <team>` | Kill agents and remove team data |
 
@@ -78,8 +79,8 @@ When created with `--workspace`, hive initializes a workspace for durable workfl
 ```
 workspace/
 ├── state/          # Shared key-value state files
-├── presence/       # Team presence snapshots from `hive who` / `hive status`
-├── status/         # Per-agent workflow status snapshots
+├── presence/       # Team presence snapshots from `hive team`
+├── events/         # Append-only Hive message/event log
 └── artifacts/      # Large payloads exchanged by path
 ```
 
@@ -93,7 +94,7 @@ workspace/
 
 ## Plugins
 
-First-party plugins install Factory-facing commands and skills such as `/cvim`, `/vim`, `/notify`, and `code-review`:
+First-party plugins carry **human-only helper scripts** (`cvim`, `vim`, `vfork`, `hfork`, `notify`) and real model skills (`code-review`) that Hive materializes on `hive plugin enable`:
 
 ```bash
 hive plugin list
@@ -102,7 +103,26 @@ hive plugin enable notify
 hive plugin disable cvim
 ```
 
-Command files under `~/.factory/commands/` are materialized copies, while plugin skills are symlinked from `~/.hive/plugins/installed/`. Re-running `hive plugin enable ...` is therefore required whenever you change plugin command code locally.
+### How the human invokes plugin helper commands
+
+The plugin bash helpers live in `~/.hive/plugins/installed/<plugin>/commands/`. They are intended to be triggered **by the human**, not by the model. Hive exposes the same underlying scripts through two entry points:
+
+- **Factory / Droid** — `hive plugin enable` copies each helper into `~/.factory/commands/<name>`. Droid loads it as a native slash command, so the human types `/cvim`, `/vim`, `/vfork`, `/hfork`, or `/notify` in the Droid input box to run the underlying bash script.
+- **Claude Code and Codex** — no slash command or `.md` wrapper is installed. Instead, the human types the command inline via the agent's shell escape (`!` prefix):
+  ```
+  !hive cvim          # edit the previous assistant message as a diff
+  !hive cvim -1       # edit the message two turns back (index grows backwards)
+  !hive vim           # open a blank buffer and send the result back
+  !hive vfork         # fork the current session into a vertical split
+  !hive notify "build finished"
+  ```
+  The `hive cvim` / `hive vim` / `hive vfork` / `hive hfork` subcommands forward to the same materialized plugin helpers, so the editor popup, paste-back, and tmux split behavior are identical to Droid's `/cvim` flow.
+
+**These helpers are not exposed to the model.** There is no slash command, skill, or tool-call surface that lets Claude / Codex / Droid invoke `hive cvim` on their own — the shell escape `!hive cvim` is a human gesture in the agent's input box. The model should never be "taught" to call them.
+
+Plugin model skills (e.g. `code-review`) are still symlinked into `~/.factory/skills/`, `~/.claude/skills/`, and `~/.codex/skills/` from `~/.hive/plugins/installed/`.
+
+Re-running `hive plugin enable ...` is required whenever you change plugin command code locally, because the Factory commands directory contains materialized copies rather than symlinks.
 
 ## Local Development
 
@@ -110,7 +130,7 @@ Command files under `~/.factory/commands/` are materialized copies, while plugin
 # Editable install
 python3 -m pip install -e . --break-system-packages
 
-# After local plugin changes, refresh materialized Factory commands and installed plugin bundles
+# After local plugin changes, refresh materialized command copies and installed plugin bundles
 hive plugin enable code-review && hive plugin enable cvim && hive plugin enable fork && hive plugin enable notify
 
 # Full test suite
@@ -122,7 +142,7 @@ PYTHONPATH=src python -m pytest tests/unit/test_cvim_command.py tests/unit/test_
 
 ## How It Works
 
-Hive runs interactive `droid`/`claude`/`codex` sessions in tmux panes. Short coordination messages arrive inline as `<HIVE ...>` blocks via tmux `send_keys`; long payloads and durable completion signals live in workspace `artifacts/` and `status/`. No JSON-RPC, no daemon — just tmux + workspace files.
+Hive runs interactive `droid`/`claude`/`codex` sessions in tmux panes. Short coordination messages arrive inline as `<HIVE ...>` blocks via tmux `send_keys`; durable coordination lives in workspace `events/` and `artifacts/`, while projected collaboration state is surfaced in `hive team` under the `statuses` field. No JSON-RPC, no daemon — just tmux + workspace files.
 
 Each spawned agent is a full `droid` TUI session. You can `tmux select-pane` to interact with any agent directly.
 
