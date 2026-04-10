@@ -86,7 +86,7 @@ hive team
 hive send <peer-name> "review this diff"
 
 # Reply to a task with a projected completion state
-hive reply orch "review complete" --reply-to <message-id> --artifact /tmp/review.md
+hive reply orch "review complete" --state done --artifact /tmp/review.md
 
 # Run a command in a registered terminal pane
 hive exec term-1 "tail -f app.log"
@@ -339,8 +339,7 @@ def _resolve_target_pane() -> str:
     return ""
 
 
-def _new_message_id() -> str:
-    return f"msg-{secrets.token_hex(8)}"
+
 
 
 def _resolve_artifact_path(artifact: str) -> str:
@@ -357,8 +356,6 @@ def _send_recorded_message(
     to_agent: str,
     body: str,
     intent: str,
-    reply_to: str = "",
-    message_id: str = "",
     artifact: str = "",
     state: str = "",
     task: str = "",
@@ -369,7 +366,6 @@ def _send_recorded_message(
 ) -> dict[str, object]:
     ws = _resolve_workspace(team, required=True)
     target = _resolve_live_agent(team, to_agent)
-    resolved_message_id = message_id or _new_message_id()
     resolved_artifact = _resolve_artifact_path(artifact)
     normalized_body = body.strip()
     envelope = _format_hive_envelope(
@@ -377,19 +373,15 @@ def _send_recorded_message(
         to_agent=to_agent,
         body=body,
         artifact=resolved_artifact,
-        message_id=resolved_message_id,
         intent=intent,
-        reply_to=reply_to,
     )
     target.send(envelope)
     path = bus.write_event(
         ws,
-        message_id=resolved_message_id,
         from_agent=sender,
         to_agent=to_agent,
         intent=intent,
         body=normalized_body,
-        reply_to=reply_to,
         artifact=resolved_artifact,
         state=state,
         task=task,
@@ -399,11 +391,9 @@ def _send_recorded_message(
         metadata=metadata,
     )
     payload: dict[str, object] = {
-        "messageId": resolved_message_id,
         "intent": intent,
         "from": sender,
         "to": to_agent,
-        "replyTo": reply_to,
         "artifact": resolved_artifact,
         "path": str(path),
     }
@@ -426,7 +416,7 @@ def _send_recorded_message(
 def _status_migration_failure(command_name: str) -> None:
     _fail(
         f"`hive {command_name}` was removed; use `hive send` to assign work, "
-        "`hive reply --reply-to <message-id> --state ... [--artifact ...]` to report progress, "
+        "`hive reply <agent> --state ... [--artifact ...]` to report progress, "
         "and `hive team` to inspect projected state under the `statuses` field"
     )
 
@@ -437,23 +427,14 @@ def _format_hive_envelope(
     to_agent: str,
     body: str,
     artifact: str = "",
-    message_id: str = "",
     intent: str = "",
-    reply_to: str = "",
 ) -> str:
-    attrs: list[tuple[str, str]] = []
-    if message_id or intent or reply_to:
-        attrs.append(("protocol", "2"))
-    if message_id:
-        attrs.append(("id", message_id))
-    attrs.extend([
+    attrs: list[tuple[str, str]] = [
         ("from", from_agent),
         ("to", to_agent),
-    ])
+    ]
     if intent:
         attrs.append(("intent", intent))
-    if reply_to:
-        attrs.append(("replyTo", reply_to))
     if artifact:
         attrs.append(("artifact", artifact))
     header = "<HIVE " + " ".join(f"{key}={value}" for key, value in attrs) + ">"
@@ -1085,16 +1066,12 @@ def status_show(legacy_args: tuple[str, ...]):
 @click.argument("body", required=False, default="")
 @click.option("--from", "from_agent", default=None, help=f"Sender agent name (default: current tmux binding or {LEAD_AGENT_NAME})")
 @click.option("--intent", type=click.Choice(_MESSAGE_INTENTS, case_sensitive=False), default="send", show_default=True, help="Structured message intent")
-@click.option("--reply-to", default="", help="Structured reply target message ID")
-@click.option("--message-id", default="", help="Structured message ID override")
 @click.option("--artifact", default="", help="Artifact path for large payloads")
 def send(
     to_agent: str,
     body: str,
     from_agent: str | None,
     intent: str,
-    reply_to: str,
-    message_id: str,
     artifact: str,
 ):
     """Send a Hive message envelope."""
@@ -1102,18 +1079,12 @@ def send(
     assert team_name is not None and t is not None
     sender = _resolve_sender(from_agent)
     normalized_intent = intent.lower()
-    if normalized_intent == "reply" and not reply_to:
-        _fail("--intent reply requires --reply-to")
-    if reply_to and normalized_intent != "reply":
-        _fail("--reply-to can only be used with --intent reply")
     payload = _send_recorded_message(
         team=t,
         sender=sender,
         to_agent=to_agent,
         body=body,
         intent=normalized_intent,
-        reply_to=reply_to,
-        message_id=message_id,
         artifact=artifact,
     )
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -1123,8 +1094,6 @@ def send(
 @click.argument("to_agent")
 @click.argument("body", required=False, default="")
 @click.option("--from", "from_agent", default=None, help=f"Sender agent name (default: current tmux binding or {LEAD_AGENT_NAME})")
-@click.option("--reply-to", required=True, help="Original task message ID")
-@click.option("--message-id", default="", help="Structured reply message ID override")
 @click.option("--artifact", default="", help="Artifact path for large payloads")
 @click.option("--state", "reply_state", type=click.Choice(_STATUS_STATES, case_sensitive=False), default="done", show_default=True, help="Projected status to publish from this reply")
 @click.option("--task", default="", help="Structured task identifier")
@@ -1136,8 +1105,6 @@ def reply_cmd(
     to_agent: str,
     body: str,
     from_agent: str | None,
-    reply_to: str,
-    message_id: str,
     artifact: str,
     reply_state: str,
     task: str,
@@ -1162,8 +1129,6 @@ def reply_cmd(
         to_agent=to_agent,
         body=body,
         intent="reply",
-        reply_to=reply_to,
-        message_id=message_id,
         artifact=artifact,
         state=normalized_state,
         task=task,

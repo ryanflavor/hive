@@ -13,10 +13,12 @@ def test_init_workspace_creates_expected_directories(tmp_path):
 
 def test_reset_workspace_recreates_managed_dirs_and_clears_contents(tmp_path):
     workspace = bus.init_workspace(tmp_path / "ws")
-    (workspace / "status" / "orch.json").write_text('{"state":"done"}')
+    (workspace / "events" / "old.json").write_text('{"intent":"send"}')
     (workspace / "presence" / "team.json").write_text('{"team":"dev"}')
     (workspace / "artifacts" / "note.txt").write_text("artifact")
     (workspace / "state" / "mode").write_text("busy")
+    (workspace / "status" / "legacy.json").parent.mkdir(parents=True, exist_ok=True)
+    (workspace / "status" / "legacy.json").write_text('{"state":"done"}')
     (workspace / "keep.txt").write_text("keep")
 
     bus.reset_workspace(workspace)
@@ -25,6 +27,7 @@ def test_reset_workspace_recreates_managed_dirs_and_clears_contents(tmp_path):
         root = workspace / name
         assert root.is_dir()
         assert list(root.iterdir()) == []
+    assert not (workspace / "status").exists()
     assert (workspace / "keep.txt").read_text() == "keep"
 
 
@@ -50,74 +53,118 @@ def test_parse_key_value_rejects_invalid_entries():
         raise AssertionError("expected ValueError")
 
 
-def test_write_and_read_status_round_trip(tmp_path, monkeypatch):
+def test_write_event_and_project_reply_status_round_trip(tmp_path, monkeypatch):
     monkeypatch.setattr("hive.bus._now_iso", lambda: "2026-03-17T10:00:00Z")
+    monkeypatch.setattr("hive.bus.time.time_ns", lambda: 1001)
     workspace = bus.init_workspace(tmp_path / "ws")
 
-    path = bus.write_status(
+    path = bus.write_event(
         workspace,
-        "claude",
-        state="busy",
-        summary="reviewing",
-        metadata={"artifact": "/tmp/review.md"},
+        from_agent="claude",
+        to_agent="orch",
+        intent="reply",
+        body="review complete",
+        artifact="/tmp/review.md",
+        state="done",
+        metadata={"verdict": "issues"},
     )
 
-    assert path == workspace / "status" / "claude.json"
+    assert path == workspace / "events" / "1001.json"
+    assert bus.read_all_events(workspace) == [{
+        "from": "claude",
+        "to": "orch",
+        "intent": "reply",
+        "body": "review complete",
+        "artifact": "/tmp/review.md",
+        "state": "done",
+        "metadata": {"verdict": "issues"},
+        "createdAt": "2026-03-17T10:00:00Z",
+    }]
     payload = bus.read_status(workspace, "claude")
     assert payload == {
         "agent": "claude",
-        "state": "busy",
-        "summary": "reviewing",
-        "metadata": {"artifact": "/tmp/review.md"},
+        "state": "done",
+        "summary": "review complete",
+        "artifact": "/tmp/review.md",
+        "metadata": {"verdict": "issues"},
         "updatedAt": "2026-03-17T10:00:00Z",
     }
 
 
-def test_write_and_read_structured_status_round_trip(tmp_path, monkeypatch):
+def test_reply_projection_preserves_structured_fields(tmp_path, monkeypatch):
     monkeypatch.setattr("hive.bus._now_iso", lambda: "2026-03-17T10:00:00Z")
+    monkeypatch.setattr("hive.bus.time.time_ns", lambda: 1002)
     workspace = bus.init_workspace(tmp_path / "ws")
 
-    path = bus.write_status(
+    bus.write_event(
         workspace,
-        "claude",
+        from_agent="claude",
+        to_agent="orch",
+        intent="reply",
+        body="wait-reply",
         state="waiting_input",
-        summary="wait-reply",
-        activity="wait-reply",
         task="protocol-redesign",
         waiting_on="orch",
-        waiting_for="msg-123",
+        waiting_for="msg-request-2",
         metadata={"artifact": "/tmp/review.md"},
     )
 
-    assert path == workspace / "status" / "claude.json"
     payload = bus.read_status(workspace, "claude")
     assert payload == {
         "agent": "claude",
         "state": "waiting_input",
         "summary": "wait-reply",
-        "activity": "wait-reply",
         "task": "protocol-redesign",
         "waitingOn": "orch",
-        "waitingFor": "msg-123",
+        "waitingFor": "msg-request-2",
         "metadata": {"artifact": "/tmp/review.md"},
         "updatedAt": "2026-03-17T10:00:00Z",
     }
 
 
-def test_read_status_returns_none_when_missing(tmp_path):
-    assert bus.read_status(tmp_path / "missing", "claude") is None
-
-
-def test_read_all_statuses_returns_sorted_map(tmp_path):
+def test_send_events_project_target_busy_status(tmp_path, monkeypatch):
+    times = iter(["2026-03-17T10:00:00Z", "2026-03-17T10:00:01Z"])
+    seq = iter([1003, 1004])
+    monkeypatch.setattr("hive.bus._now_iso", lambda: next(times))
+    monkeypatch.setattr("hive.bus.time.time_ns", lambda: next(seq))
     workspace = bus.init_workspace(tmp_path / "ws")
-    (workspace / "status" / "gpt.json").write_text(json.dumps({"state": "done"}))
-    (workspace / "status" / "claude.json").write_text(json.dumps({"state": "busy"}))
+
+    bus.write_event(
+        workspace,
+        from_agent="orch",
+        to_agent="claude",
+        intent="send",
+        body="review this diff",
+    )
+    bus.write_event(
+        workspace,
+        from_agent="orch",
+        to_agent="gpt",
+        intent="ask",
+        body="pick a strategy",
+    )
 
     payload = bus.read_all_statuses(workspace)
+    assert payload == {
+        "claude": {
+            "agent": "claude",
+            "state": "busy",
+            "summary": "review this diff",
+            "metadata": {},
+            "updatedAt": "2026-03-17T10:00:00Z",
+        },
+        "gpt": {
+            "agent": "gpt",
+            "state": "busy",
+            "summary": "pick a strategy",
+            "metadata": {},
+            "updatedAt": "2026-03-17T10:00:01Z",
+        },
+    }
 
-    assert list(payload.keys()) == ["claude", "gpt"]
-    assert payload["claude"]["state"] == "busy"
-    assert payload["gpt"]["state"] == "done"
+
+def test_read_status_returns_none_when_missing(tmp_path):
+    assert bus.read_status(tmp_path / "missing", "claude") is None
 
 
 def test_write_presence_snapshot_writes_team_and_agent_files(tmp_path, monkeypatch):

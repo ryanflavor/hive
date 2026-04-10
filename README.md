@@ -39,7 +39,7 @@ hive team
 
 # Send work to another pane and inspect projected progress
 hive send dodo "Review the staged diff and write findings to an artifact"
-hive reply orch "review complete" --reply-to <message-id> --artifact /tmp/review.md
+hive reply orch "review complete" --state done --artifact /tmp/review.md
 hive team   # inspect projected progress via the `statuses` field
 
 # Bring the human back only when needed

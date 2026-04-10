@@ -58,27 +58,30 @@ def test_e2e_create_spawn_send_capture_and_status(tmp_path: Path):
         assert "Injected raw input into claude." in inject_result.stdout
         send_result = run_in_pane(["send", "claude", "hello envelope"])
         assert send_result.returncode == 0, send_result.stdout
-        assert "Sent HIVE message to claude." in send_result.stdout
+        send_payload = json.loads(send_result.stdout)
+        assert send_payload["to"] == "claude"
+        assert send_payload["intent"] == "send"
 
         wait_for(lambda: "plain ping" in capture_claude() and "hello envelope" in capture_claude())
         captured = capture_claude()
-        assert "<HIVE from=orch to=claude>" in captured
+        assert "<HIVE from=orch to=claude intent=send>" in captured
         assert "plain ping" in captured
 
-        status_set_result = run_in_pane(["status-set", "busy", "working", "--agent", "orch"])
-        assert status_set_result.returncode == 0, status_set_result.stdout
-        payload = json.loads(status_set_result.stdout)
-        assert payload["agent"] == "orch"
-        assert payload["state"] == "busy"
-
-        status_result = run_in_pane(["status"])
+        status_result = run_in_pane(["team"])
         assert status_result.returncode == 0, status_result.stdout
         payload = json.loads(status_result.stdout)
-        assert payload["orch"]["state"] == "busy"
+        assert payload["statuses"]["claude"]["state"] == "busy"
 
-        wait_result = run_in_pane(["wait-status", "orch", "--state", "busy", "--timeout", "1"])
-        assert wait_result.returncode == 0, wait_result.stdout
-        assert '"state": "busy"' in wait_result.stdout
+        reply_result = run_in_pane(["reply", "claude", "done"])
+        assert reply_result.returncode == 0, reply_result.stdout
+        reply_payload = json.loads(reply_result.stdout)
+        assert reply_payload["from"] == "orch"
+        assert reply_payload["state"] == "done"
+
+        status_done_result = run_in_pane(["team"])
+        assert status_done_result.returncode == 0, status_done_result.stdout
+        done_payload = json.loads(status_done_result.stdout)
+        assert done_payload["statuses"]["orch"]["state"] == "done"
 
         delete_result = run_in_pane(["delete", team])
         assert delete_result.returncode == 0, delete_result.stdout
