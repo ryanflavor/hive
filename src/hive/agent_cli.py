@@ -50,9 +50,9 @@ PROFILES: dict[str, CLIProfile] = {
     "droid": CLIProfile(
         name="droid",
         ready_text="for help",
-        resume_cmd="droid -r {session_id}",
-        fork_cmd="/fork",
-        fork_needs_tui=True,
+        resume_cmd="droid --fork {session_id}",
+        fork_cmd=None,
+        fork_needs_tui=False,
         skill_cmd="/{name}",
     ),
     "claude": CLIProfile(
