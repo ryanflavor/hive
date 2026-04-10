@@ -83,7 +83,7 @@ def extract_last_assistant_text(file_path: Path, offset: int = 0) -> str:
                 text = item.get("text") or ""
                 if text.strip():
                     parts.append(text.rstrip("\n"))
-            elif item.get("type") == "tool_use" and item.get("name") == "ExitSpecMode":
+            elif item.get("type") == "tool_use" and item.get("name") in ("ExitSpecMode", "ExitPlanMode"):
                 tool_input = item.get("input") or {}
                 plan = tool_input.get("plan") if isinstance(tool_input, dict) else ""
                 title = tool_input.get("title") if isinstance(tool_input, dict) else ""
@@ -207,7 +207,7 @@ def _assistant_text_from_normalized_message(message: Any) -> str:
             text = getattr(item, "text", "") or ""
             if isinstance(text, str) and text.strip():
                 parts.append(text.rstrip("\n"))
-        elif kind == "tool_use" and getattr(item, "tool_name", "") == "ExitSpecMode":
+        elif kind == "tool_use" and getattr(item, "tool_name", "") in ("ExitSpecMode", "ExitPlanMode"):
             tool_input = getattr(item, "tool_input", None) or {}
             if not isinstance(tool_input, dict):
                 continue
