@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SESSION_HELPER = ROOT / "src" / "hive" / "plugins" / "cvim" / "bin" / "droid-vim-session"
+SESSION_HELPER = ROOT / "src" / "hive" / "plugins" / "cvim" / "bin" / "cvim-session"
 
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:

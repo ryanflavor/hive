@@ -3,14 +3,14 @@ from __future__ import annotations
 
 import sys
 
-from _droid_vim_shared import resolve_transcript_path_for_pane
+from _cvim_shared import resolve_transcript_path_for_pane
 
 
 def main() -> int:
     args = sys.argv[1:]
     if len(args) not in {5, 6}:
         raise SystemExit(
-            "usage: droid-vim-session <session_map_file> <cwd> <pid> <tty> <droid_args> [pane_id]"
+            "usage: cvim-session <session_map_file> <cwd> <pid> <tty> <droid_args> [pane_id]"
         )
 
     transcript_path = resolve_transcript_path_for_pane(

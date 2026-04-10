@@ -7,16 +7,16 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SEED_HELPER = ROOT / "src" / "hive" / "plugins" / "cvim" / "bin" / "droid-vim-seed"
+SEED_HELPER = ROOT / "src" / "hive" / "plugins" / "cvim" / "bin" / "cvim-seed"
 SHARED_DIR = ROOT / "src" / "hive" / "plugins" / "cvim" / "bin"
 
 
 def _import_shared():
     if str(SHARED_DIR) not in sys.path:
         sys.path.insert(0, str(SHARED_DIR))
-    import _droid_vim_shared
+    import _cvim_shared
 
-    return _droid_vim_shared
+    return _cvim_shared
 
 
 def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:

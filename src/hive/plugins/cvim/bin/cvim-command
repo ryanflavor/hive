@@ -37,14 +37,14 @@ src_pane_tty_key="${src_pane_tty#/dev/}"
 src_client_tty="$(tmux display-message -p -t "$src_pane" '#{client_tty}')"
 src_client_pid="$(tmux display-message -p -t "$src_pane" '#{client_pid}')"
 script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-seed_helper="$script_dir/droid-vim-seed"
-session_helper="$script_dir/droid-vim-session"
-payload_builder="$script_dir/droid-vim-payload"
-tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/droid-vim.XXXXXX")"
+seed_helper="$script_dir/cvim-seed"
+session_helper="$script_dir/cvim-session"
+payload_builder="$script_dir/cvim-payload"
+tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/cvim.XXXXXX")"
 msg_file="$tmpdir/message.md"
 orig_file="$tmpdir/original.md"
 helper_file="$tmpdir/run.sh"
-debug_root="${DROID_VIM_DEBUG_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/droid-vim/debug}"
+debug_root="${CVIM_DEBUG_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/cvim/debug}"
 mkdir -p "$debug_root" >/dev/null 2>&1 || true
 debug_log_file="$(mktemp "${debug_root}/cvim.XXXXXX" 2>/dev/null || true)"
 if [[ -z "$debug_log_file" ]]; then
@@ -52,7 +52,7 @@ if [[ -z "$debug_log_file" ]]; then
   : > "$debug_log_file" 2>/dev/null || true
 fi
 printf '%s\n' "$debug_log_file" > "$debug_root/latest" 2>/dev/null || true
-iterm2_api_dir="${DROID_VIM_ITERM2_API_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/droid-vim/iterm2py}"
+iterm2_api_dir="${CVIM_ITERM2_API_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/cvim/iterm2py}"
 ghostty_app="${DROID_VIM_GHOSTTY_APP:-/Applications/Ghostty.app}"
 iterm2_window_x="${DROID_VIM_ITERM2_WINDOW_X:-}"
 iterm2_window_y="${DROID_VIM_ITERM2_WINDOW_Y:-}"
@@ -533,7 +533,7 @@ start_editor_session() {
   local helper_cmd
   local editor_session_name
   helper_cmd="$(build_helper_cmd)"
-  editor_session_name="droid-vim-$(basename "$tmpdir" | tr -cd '[:alnum:]_-')"
+  editor_session_name="cvim-$(basename "$tmpdir" | tr -cd '[:alnum:]_-')"
   tmux new-session -d -P -F '#{session_name}' -s "$editor_session_name" -c "$src_cwd" "$helper_cmd"
 }
 

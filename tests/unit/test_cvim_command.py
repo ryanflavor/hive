@@ -10,15 +10,15 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-COMMAND = ROOT / "src" / "hive" / "plugins" / "cvim" / "bin" / "droid-vim-command"
+COMMAND = ROOT / "src" / "hive" / "plugins" / "cvim" / "bin" / "cvim-command"
 SHARED_DIR = ROOT / "src" / "hive" / "plugins" / "cvim" / "bin"
 
 
 def _import_shared():
     if str(SHARED_DIR) not in sys.path:
         sys.path.insert(0, str(SHARED_DIR))
-    import _droid_vim_shared
-    return _droid_vim_shared
+    import _cvim_shared
+    return _cvim_shared
 
 
 def _make_session(tmp_path: Path, messages: list[dict]) -> Path:
@@ -251,7 +251,7 @@ def _materialize_cvim_bundle(tmp_path: Path) -> Path:
     for file_path in (bundle_root / "bin").iterdir():
         if file_path.is_file():
             file_path.chmod(0o755)
-    return bundle_root / "bin" / "droid-vim-command"
+    return bundle_root / "bin" / "cvim-command"
 
 
 def _run_command(
@@ -577,7 +577,7 @@ def test_claude_profile_accepts_pasted_placeholder_before_submit(tmp_path):
         use_default_delays=True,
     )
 
-    latest_file = cache_dir / "droid-vim" / "debug" / "latest"
+    latest_file = cache_dir / "cvim" / "debug" / "latest"
     log_path = Path(latest_file.read_text().strip())
     log_text = log_path.read_text()
 
@@ -693,7 +693,7 @@ def test_edited_save_skips_submit_when_probe_never_finds_structured_input(tmp_pa
         use_default_delays=True,
     )
 
-    latest_file = cache_dir / "droid-vim" / "debug" / "latest"
+    latest_file = cache_dir / "cvim" / "debug" / "latest"
     log_path = Path(latest_file.read_text().strip())
     log_text = log_path.read_text()
 
@@ -724,7 +724,7 @@ def test_popup_debug_log_records_sendback_stages(tmp_path):
         use_default_delays=True,
     )
 
-    latest_file = cache_dir / "droid-vim" / "debug" / "latest"
+    latest_file = cache_dir / "cvim" / "debug" / "latest"
     log_path = Path(latest_file.read_text().strip())
     log_text = log_path.read_text()
 

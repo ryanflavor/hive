@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from _droid_vim_shared import capture_session_seed, write_seed
+from _cvim_shared import capture_session_seed, write_seed
 
 
 def main() -> int:
@@ -36,7 +36,7 @@ def main() -> int:
         )
         return 0
 
-    raise SystemExit("usage: droid-vim-seed <cwd> <dst> [preferred] [offset] | <cwd> <dst> <session_map_file> <pid> <tty> <droid_args> [offset]")
+    raise SystemExit("usage: cvim-seed <cwd> <dst> [preferred] [offset] | <cwd> <dst> <session_map_file> <pid> <tty> <droid_args> [offset]")
     return 0
 
 

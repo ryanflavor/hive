@@ -184,7 +184,7 @@ def _copy_text_with_plugin_root(src: Path, dst: Path, *, install_dir: Path) -> N
 
 
 def _cvim_diff_comment_block(install_dir: Path) -> str:
-    path = install_dir / "resources" / "droid_edit_protocol.json"
+    path = install_dir / "resources" / "cvim_edit_protocol.json"
     if not path.is_file():
         return ""
     try:

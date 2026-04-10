@@ -14,4 +14,4 @@ set -euo pipefail
 export DROID_VIM_SEED_MODE=blank
 export DROID_VIM_CURSOR_MODE=end
 export DROID_VIM_TRANSPORT=popup
-exec "${HIVE_PLUGIN_ROOT}/bin/droid-vim-command" "$@"
+exec "${HIVE_PLUGIN_ROOT}/bin/cvim-command" "$@"

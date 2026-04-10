@@ -7,11 +7,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from _droid_vim_shared import resolve_assistant_offset
+from _cvim_shared import resolve_assistant_offset
 
 
 def _protocol(script_path: Path) -> dict[str, Any]:
-    path = script_path.resolve().parent.parent / "resources" / "droid_edit_protocol.json"
+    path = script_path.resolve().parent.parent / "resources" / "cvim_edit_protocol.json"
     return json.loads(path.read_text())
 
 

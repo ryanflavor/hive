@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-PAYLOAD_BUILDER = ROOT / "src" / "hive" / "plugins" / "cvim" / "bin" / "droid-vim-payload"
+PAYLOAD_BUILDER = ROOT / "src" / "hive" / "plugins" / "cvim" / "bin" / "cvim-payload"
 
 
 def _build_payload(tmp_path: Path, *, orig: str, edited: str, mode: str, offset: int = 0) -> str:

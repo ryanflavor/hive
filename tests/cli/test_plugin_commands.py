@@ -61,11 +61,11 @@ def test_plugin_list_enable_and_disable_cvim(runner, configure_hive_home):
     assert not (codex_home / "skills" / "cvim").exists()
     assert not (codex_home / "skills" / "vim").exists()
     install_root = hive_home / "plugins" / "installed" / "cvim"
-    installed_runner = install_root / "bin" / "droid-vim-command"
-    installed_payload_builder = install_root / "bin" / "droid-vim-payload"
-    installed_seed_helper = install_root / "bin" / "droid-vim-seed"
-    installed_session_helper = install_root / "bin" / "droid-vim-session"
-    installed_protocol = install_root / "resources" / "droid_edit_protocol.json"
+    installed_runner = install_root / "bin" / "cvim-command"
+    installed_payload_builder = install_root / "bin" / "cvim-payload"
+    installed_seed_helper = install_root / "bin" / "cvim-seed"
+    installed_session_helper = install_root / "bin" / "cvim-session"
+    installed_protocol = install_root / "resources" / "cvim_edit_protocol.json"
     assert installed_runner.exists()
     assert installed_payload_builder.exists()
     assert installed_seed_helper.exists()
@@ -76,8 +76,8 @@ def test_plugin_list_enable_and_disable_cvim(runner, configure_hive_home):
     assert 'src_pane_pid="$(tmux display-message -p -t "$src_pane" \'#{pane_pid}\')"' in installed_runner_text
     assert 'src_pane_tty="$(tmux display-message -p -t "$src_pane" \'#{pane_tty}\')"' in installed_runner_text
     assert 'src_pane_tty_key="${src_pane_tty#/dev/}"' in installed_runner_text
-    assert 'seed_helper="$script_dir/droid-vim-seed"' in installed_runner_text
-    assert 'session_helper="$script_dir/droid-vim-session"' in installed_runner_text
+    assert 'seed_helper="$script_dir/cvim-seed"' in installed_runner_text
+    assert 'session_helper="$script_dir/cvim-session"' in installed_runner_text
     assert '"$seed_helper" "$cwd" "$dst" "$session_map_file" "$droid_pid" "$droid_tty" "$droid_args"' in installed_runner_text
     assert 'transcript_path="$("$session_helper" "$session_map_file" "$src_cwd" "" "$src_pane_tty_key" "" "$src_pane" 2>/dev/null || true)"' in installed_runner_text
     assert '"$seed_helper" "$src_cwd" "$msg_file" "$transcript_path"' in installed_runner_text
@@ -87,7 +87,7 @@ def test_plugin_list_enable_and_disable_cvim(runner, configure_hive_home):
     assert 'payload_builder="${14}"' in installed_runner_text
     assert "\"$payload_builder\" \"$orig_file\" \"$msg_file\" \"$send_file\" \"$send_mode\"" in installed_runner_text
     payload_builder_text = installed_payload_builder.read_text()
-    assert "droid_edit_protocol.json" in payload_builder_text
+    assert "cvim_edit_protocol.json" in payload_builder_text
     assert "<edit_target>" in payload_builder_text
     protocol_text = installed_protocol.read_text()
     assert "紧邻上一条 assistant message" in protocol_text
