@@ -104,7 +104,7 @@ def test_spawn_hive_bootstraps_and_sends_prompt(monkeypatch):
     )
 
     assert "/hive" in calls
-    assert any("Use `hive team`, `hive send`, and `hive status-set`" in c for c in calls)
+    assert any("Use `hive team`, `hive send`, and `hive reply`" in c for c in calls)
     assert any("<HIVE ...> ... </HIVE>" in c for c in calls)
     assert "Please check your inbox." in calls
 
@@ -119,7 +119,7 @@ def test_spawn_codex_hive_bootstraps_and_sends_prompt(monkeypatch):
     )
 
     assert "$hive" in calls
-    assert any("Use `hive team`, `hive send`, and `hive status-set`" in c for c in calls)
+    assert any("Use `hive team`, `hive send`, and `hive reply`" in c for c in calls)
     assert "Please check your inbox." in calls
     assert calls.count("<Enter>") == 6
 
@@ -135,7 +135,7 @@ def test_spawn_hive_can_skip_bootstrap_message(monkeypatch):
     )
 
     assert "/hive" in calls
-    assert not any("Use `hive team`, `hive send`, and `hive status-set`" in c for c in calls)
+    assert not any("Use `hive team`, `hive send`, and `hive reply`" in c for c in calls)
     assert "Please check your inbox." in calls
 
 

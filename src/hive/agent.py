@@ -223,7 +223,7 @@ class Agent:
                 _submit_interactive_text(
                     pane_id,
                     "I am a hive teammate. "
-                    "Use `hive team`, `hive send`, and `hive status-set` to collaborate. "
+                    "Use `hive team`, `hive send`, and `hive reply` to collaborate. "
                     "Hive messages arrive inline as `<HIVE ...> ... </HIVE>` blocks.",
                     cli,
                 )
