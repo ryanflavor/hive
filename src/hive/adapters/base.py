@@ -93,6 +93,127 @@ def safe_json_loads(line: str) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+# --- Send gate helpers ---
+# Detect whether the target agent is waiting for a user answer
+# (AskUserQuestion) before allowing message injection.
+
+_ASK_TOOL_NAMES = frozenset({"AskUserQuestion"})
+
+_MAX_TAIL_BYTES = 128 * 1024  # 128KB upper bound for tail reads
+
+
+@dataclass(frozen=True)
+class GateResult:
+    status: str   # "waiting" | "clear" | "unknown"
+    reason: str = ""
+
+
+def _extract_content_blocks(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract content blocks from a JSONL record, handling droid/claude/codex."""
+    msg = payload.get("message")
+    if isinstance(msg, dict):
+        content = msg.get("content")
+        if isinstance(content, list):
+            return content
+    return []
+
+
+def _is_assistant_ask(payload: dict[str, Any]) -> bool:
+    """Check whether a raw JSONL record is an assistant turn with AskUserQuestion.
+
+    Handles all three CLI formats:
+    - droid: {"type": "message", "message": {"role": "assistant", "content": [...]}}
+    - claude: {"type": "assistant", "message": {"role": "assistant", "content": [...]}}
+    - codex: {"type": "response_item", "payload": {"type": "function_call", "name": ...}}
+    """
+    record_type = payload.get("type", "")
+
+    # droid: type == "message", message.role == "assistant"
+    if record_type == "message":
+        msg = payload.get("message")
+        if isinstance(msg, dict) and msg.get("role") == "assistant":
+            for block in _extract_content_blocks(payload):
+                if block.get("type") == "tool_use" and block.get("name") in _ASK_TOOL_NAMES:
+                    return True
+        return False
+
+    # claude: type == "assistant"
+    if record_type == "assistant":
+        for block in _extract_content_blocks(payload):
+            if block.get("type") == "tool_use" and block.get("name") in _ASK_TOOL_NAMES:
+                return True
+        return False
+
+    # codex: type == "response_item", payload.type == "function_call"
+    if record_type == "response_item":
+        inner = payload.get("payload")
+        if isinstance(inner, dict) and inner.get("type") == "function_call":
+            if inner.get("name") in _ASK_TOOL_NAMES:
+                return True
+        return False
+
+    return False
+
+
+def check_input_gate(path: Path) -> GateResult:
+    """Check if the agent owning *path* is waiting for a user answer.
+
+    Reads the tail of the JSONL file, expanding the window if no relevant
+    record is found (8KB → 16KB → ... → 128KB).
+
+    Returns GateResult with status:
+      - "waiting": last relevant record is an unanswered AskUserQuestion
+      - "clear": last relevant record is a user turn (question answered)
+      - "unknown": could not determine (file missing, empty, parse issues)
+    """
+    try:
+        file_size = path.stat().st_size
+    except OSError as e:
+        return GateResult("unknown", f"cannot stat file: {e}")
+    if file_size == 0:
+        return GateResult("unknown", "empty transcript")
+
+    chunk = 8192
+    while chunk <= _MAX_TAIL_BYTES:
+        offset = max(0, file_size - chunk)
+        try:
+            with path.open("rb") as f:
+                f.seek(offset)
+                raw = f.read()
+            data = raw.decode("utf-8", errors="replace")
+        except OSError as e:
+            return GateResult("unknown", f"read error: {e}")
+
+        lines = data.split("\n")
+        # First line may be partial if we seeked mid-line; skip it unless offset == 0
+        if offset > 0:
+            lines = lines[1:]
+
+        # Parse all lines, collect relevant records
+        records: list[dict[str, Any]] = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            parsed = safe_json_loads(line)
+            if parsed is not None:
+                records.append(parsed)
+
+        # Scan in reverse for the last relevant record
+        for record in reversed(records):
+            if _is_user_turn(record):
+                return GateResult("clear", "last record is user turn")
+            if _is_assistant_ask(record):
+                return GateResult("waiting", "AskUserQuestion pending")
+
+        # No relevant record found — expand window if possible
+        if offset == 0:
+            break  # Already read the entire file
+        chunk *= 2
+
+    return GateResult("unknown", "no relevant record found")
+
+
 # --- ACK helpers ---
 # These operate on raw JSONL lines to detect whether a sent message was
 # accepted by the receiver's CLI session transcript.  The _is_user_turn

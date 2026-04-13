@@ -73,6 +73,7 @@ def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home
         "path": payload["path"],
         "summary": "please review this",
         "ack": "skipped",
+        "gate": "skipped",
     }
     assert payload["path"].endswith(".json")
     assert len(sent) == 1
@@ -134,6 +135,7 @@ def test_send_supports_structured_intent(runner, configure_hive_home, monkeypatc
         "path": payload["path"],
         "summary": "please choose",
         "ack": "skipped",
+        "gate": "skipped",
     }
     assert payload["path"].endswith(".json")
     assert len(sent) == 1
@@ -242,6 +244,7 @@ def test_reply_writes_event_and_projects_status(runner, configure_hive_home, mon
         "state": "done",
         "metadata": {"verdict": "issues"},
         "ack": "skipped",
+        "gate": "skipped",
     }
     assert payload["path"].endswith(".json")
     assert len(sent) == 1
@@ -479,6 +482,7 @@ def test_send_ack_confirmed(runner, configure_hive_home, monkeypatch, tmp_path):
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["ack"] == "confirmed"
+    assert payload["gate"] == "unknown"  # empty transcript at gate check time
 
 
 def test_send_ack_unconfirmed_on_timeout(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -519,6 +523,7 @@ def test_send_ack_unconfirmed_on_timeout(runner, configure_hive_home, monkeypatc
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["ack"] == "unconfirmed"
+    assert payload["gate"] == "unknown"
 
 
 def test_send_ack_skipped_when_transcript_unresolvable(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -554,6 +559,7 @@ def test_send_ack_skipped_when_transcript_unresolvable(runner, configure_hive_ho
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["ack"] == "skipped"
+    assert payload["gate"] == "skipped"
 
 
 def test_reply_ack_confirmed(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -597,3 +603,168 @@ def test_reply_ack_confirmed(runner, configure_hive_home, monkeypatch, tmp_path)
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["ack"] == "confirmed"
+    assert payload["gate"] == "unknown"
+
+
+# --- Send gate tests ---
+
+
+def _gate_test_setup(monkeypatch, tmp_path, transcript_records=None):
+    """Common setup for gate tests. Returns (workspace, transcript, sent list)."""
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+
+    transcript = tmp_path / "session.jsonl"
+    if transcript_records is not None:
+        transcript.write_text(
+            "\n".join(json.dumps(r) for r in transcript_records) + "\n"
+        )
+    else:
+        transcript.write_text("")
+
+    sent: list[str] = []
+
+    class _FakeAgent:
+        pane_id = "%99"
+        name = "gpt"
+
+        def is_alive(self) -> bool:
+            return True
+
+        def send(self, text: str) -> None:
+            sent.append(text)
+
+    class _FakeTeam:
+        def __init__(self):
+            self.workspace = str(workspace)
+            self.name = "team-x"
+            self.tmux_session = "dev"
+            self.tmux_window = "dev:0"
+
+        def get(self, _name: str):
+            return _FakeAgent()
+
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
+    monkeypatch.setattr("hive.cli.secrets.token_hex", lambda _n=2: FIXED_ID)
+    monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, transcript.stat().st_size), raising=False)
+    monkeypatch.setattr("hive.adapters.base.wait_for_id_in_transcript", lambda path, message_id, baseline, timeout=45.0: False)
+
+    return workspace, transcript, sent
+
+
+def test_send_blocked_by_gate(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    _gate_test_setup(monkeypatch, tmp_path, transcript_records=[
+        {"type": "user", "message": {"role": "user", "content": "do something"}},
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": "AskUserQuestion", "input": {"question": "proceed?"}},
+                ],
+            },
+        },
+    ])
+
+    result = runner.invoke(cli, ["send", "gpt", "hello", "--from", "claude"])
+
+    assert result.exit_code != 0
+    assert "waiting for a user answer" in result.output
+    assert "--force" in result.output
+
+
+def test_send_force_bypasses_gate(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    _gate_test_setup(monkeypatch, tmp_path, transcript_records=[
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": "AskUserQuestion", "input": {"question": "proceed?"}},
+                ],
+            },
+        },
+    ])
+
+    result = runner.invoke(cli, ["send", "gpt", "hello", "--from", "claude", "--force"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["gate"] == "forced"
+
+
+def test_gate_fail_open_no_transcript(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    _patch_ack(monkeypatch)
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+
+    class _FakeAgent:
+        pane_id = "%99"
+
+        def is_alive(self) -> bool:
+            return True
+
+        def send(self, text: str) -> None:
+            pass
+
+    class _FakeTeam:
+        def __init__(self):
+            self.workspace = str(workspace)
+            self.name = "team-x"
+            self.tmux_session = "dev"
+            self.tmux_window = "dev:0"
+
+        def get(self, _name: str):
+            return _FakeAgent()
+
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
+
+    result = runner.invoke(cli, ["send", "gpt", "hello", "--from", "claude"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["gate"] == "skipped"
+
+
+def test_reply_blocked_by_gate(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    _gate_test_setup(monkeypatch, tmp_path, transcript_records=[
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": "AskUserQuestion", "input": {"question": "sure?"}},
+                ],
+            },
+        },
+    ])
+
+    result = runner.invoke(cli, ["reply", "gpt", "done", "--from", "claude", "--state", "done"])
+
+    assert result.exit_code != 0
+    assert "waiting for a user answer" in result.output
+
+
+def test_reply_force_bypasses_gate(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    _gate_test_setup(monkeypatch, tmp_path, transcript_records=[
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": "AskUserQuestion", "input": {"question": "sure?"}},
+                ],
+            },
+        },
+    ])
+
+    result = runner.invoke(cli, ["reply", "gpt", "done", "--from", "claude", "--state", "done", "--force"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["gate"] == "forced"
