@@ -176,6 +176,11 @@ def test_plugin_enable_code_review_materializes_skill(runner, configure_hive_hom
     assert 'Run Artifact Root: $ARTIFACT_DIR' in s1_pipeline
     assert 'Run State Root: $STATE_DIR' in s1_pipeline
     assert 'rm -rf "$WORKSPACE/artifacts" "$WORKSPACE/state" "$WORKSPACE/events"' not in s1_pipeline
+    assert "## Decision Boundaries" in s1_pipeline
+    assert "Agent 自主完成（不问人）：" in s1_pipeline
+    assert "必须升级给人类：" in s1_pipeline
+    assert "gh pr comment（对外可见）" in s1_pipeline
+    assert "review 范围超出原始 diff" in s1_pipeline
 
     # --- S1 reviewer ---
     s1_reviewer = (stages_dir / "1-review-reviewer.md").read_text()

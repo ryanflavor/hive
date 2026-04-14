@@ -194,3 +194,23 @@ printf '%s' '<confirmed 数量>' > "$STATE_DIR/confirmed-count"
 
 - confirmed = 0 → 跳到阶段 3（summary）
 - confirmed > 0 → 进入阶段 2（fix）
+
+## Decision Boundaries
+
+Agent 自主完成（不问人）：
+
+- review 策略选择（文件顺序、深度）
+- finding 过滤/去重/合并
+- verify fail 后自动进入下一轮 fix
+- retry 失败的 tool call
+- confirmed findings 为 0 时直接出 summary
+- fix 超 3 轮仍 fail 时自主终止并在 summary 标注
+- reviewer 超时无响应时 kill + 重 spawn
+
+必须升级给人类：
+
+- gh pr comment（对外可见）
+- push 代码
+- 跳过 fix 阶段
+- 覆盖已 confirm 的 finding
+- review 范围超出原始 diff
