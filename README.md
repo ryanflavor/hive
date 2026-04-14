@@ -1,15 +1,15 @@
 # Hive
 
-tmux-based multi-agent collaboration framework for [Factory](https://factory.ai)'s `droid` CLI.
+tmux-based multi-agent collaboration framework for `droid` and compatible `claude` / `codex` CLIs.
 
-Spawn multiple droid agents in tmux panes, orchestrate them via CLI, inject short control messages inline via tmux, and persist workflow state in a workspace.
+Spawn multiple agent CLIs in tmux panes, orchestrate them via CLI, inject short control messages inline via tmux, and persist workflow state in a workspace.
 
 ## Architecture
 
 ```
 tmux window
 ┌──────────────┬──────────────┬──────────────┐
-│  orch (you)  │    agent     │   terminal   │
+│  lead pane   │  peer agent  │  terminal*   │
 └──────────────┴──────────────┴──────────────┘
 
 hive current/init ─→ discover or bind the current tmux window
@@ -19,9 +19,11 @@ hive answer ─────→ answer a pending AskUserQuestion remotely
 workspace ───────→ artifacts/ + hive.db for durable coordination
 ```
 
+图里只是最小示意：`lead pane` 是当前 team 的主 pane，不等于 human；`orchestrator` 只是 workflow 里的角色，不是 Hive kernel 的固定身份；`terminal*` 可选。
+
 ## Install
 
-Requires: Python 3.11+, tmux, [droid](https://docs.factory.ai)
+Requires: Python 3.11+, tmux, and at least one supported agent CLI (`droid`, `claude`, or `codex`)
 
 ```bash
 pipx install git+https://github.com/notdp/hive.git

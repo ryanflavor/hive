@@ -67,11 +67,11 @@ hive teams                            # 列出已知 team
 
 ## 协议边界
 
-- `hive send` 是发送消息的唯一入口，会写入 workspace `events/`
+- `hive send` 是发送消息的唯一入口，会写入 workspace durable store（当前是 `hive.db`）
 - `hive answer` 用于回答 agent 的 pending question（AskUserQuestion）；只有目标处于 `waiting_user` 时才允许
 - `hive team` 的 `inputState` 字段是从 agent session transcript 实时探测的 runtime 状态，不是事件投影
 - GitHub PR comment / review 属于 workflow 层职责；需要发评论时直接用 `gh` / `gh api`，不要把这类 API 混进 Hive kernel 命令
-- Hive 不是严格可靠消息队列：没有幂等性或 backpressure；需要恢复上下文时，应依赖 `events/` 和 workspace artifact
+- Hive 不是严格可靠消息队列：没有幂等性或 backpressure；需要恢复上下文时，应依赖 durable store 投影（如 `hive inbox` / hidden `hive delivery`）和 workspace artifact
 
 ## 加载 workflow
 
