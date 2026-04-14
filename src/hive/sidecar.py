@@ -67,10 +67,14 @@ def _inject_exception(pane_id: str, message_id: str, target_agent: str, result: 
     if result == "unconfirmed":
         body = (
             f"Message {message_id} to {target_agent} was not confirmed within "
-            f"{int(OBSERVATION_TIMEOUT)}s. Do not assume delivery."
+            f"{int(OBSERVATION_TIMEOUT)}s. Delivery is unconfirmed. "
+            "Retry only if duplicate delivery is acceptable."
         )
     else:
-        body = f"Message {message_id} to {target_agent}: delivery tracking lost."
+        body = (
+            f"Message {message_id} to {target_agent}: delivery tracking was lost. "
+            "Final delivery is unknown; inspect before retrying."
+        )
 
     block = (
         f"<HIVE-SYSTEM type=delivery-exception msgId={message_id} "

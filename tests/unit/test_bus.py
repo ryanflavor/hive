@@ -122,3 +122,38 @@ def test_write_event_multiple_events(tmp_path, monkeypatch):
     assert [event["msgId"] for event in events] == ["aa01", "bb02"]
     assert events[0]["body"] == "review this diff"
     assert events[1]["body"] == "pick a strategy"
+
+
+def test_format_msg_id_is_short_and_unique_for_small_range():
+    values = [bus.format_msg_id(i) for i in range(1, 2000)]
+
+    assert all(len(value) == 4 for value in values)
+    assert len(set(values)) == len(values)
+
+
+def test_write_send_event_assigns_msg_id_without_followup_patch(tmp_path, monkeypatch):
+    monkeypatch.setattr("hive.bus._now_iso", lambda: "2026-03-17T10:00:00Z")
+    workspace = bus.init_workspace(tmp_path / "ws")
+
+    result = bus.write_send_event(
+        workspace,
+        from_agent="claude",
+        to_agent="orch",
+        body="review complete",
+        artifact="/tmp/review.md",
+        reply_to="r1",
+    )
+
+    assert result.seq == 1
+    assert result.msg_id == bus.format_msg_id(1)
+    assert bus.read_all_events(workspace) == [{
+        "msgId": result.msg_id,
+        "from": "claude",
+        "to": "orch",
+        "intent": "send",
+        "body": "review complete",
+        "artifact": "/tmp/review.md",
+        "inReplyTo": "r1",
+        "metadata": {},
+        "createdAt": "2026-03-17T10:00:00Z",
+    }]

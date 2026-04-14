@@ -5,7 +5,7 @@ import json
 from hive import bus
 from hive.cli import cli
 
-FIXED_ID = "ab12"
+FIXED_ID = bus.format_msg_id(1)
 
 
 def _setup_team(monkeypatch, workspace, sent=None):
@@ -44,7 +44,6 @@ def _setup_team(monkeypatch, workspace, sent=None):
 
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _t, required=True: ("team-x", _FakeTeam()))
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _f=None: "claude")
-    monkeypatch.setattr("hive.cli.secrets.token_urlsafe", lambda _n=4: FIXED_ID)
     return _FakeTeam()
 
 
@@ -128,6 +127,72 @@ def test_delivery_prefers_observation_result(runner, configure_hive_home, monkey
     assert payload["observedAt"] == "2026-04-14T00:00:00Z"
 
 
+def test_delivery_failed_reports_retry_guidance(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    _setup_team(monkeypatch, workspace)
+
+    seq = bus.write_event(
+        workspace,
+        from_agent="claude",
+        to_agent="gpt",
+        intent="send",
+        body="broken msg",
+        message_id="f1",
+    )
+    bus.patch_event(
+        workspace,
+        seq,
+        injectStatus="failed",
+        turnObserved="unavailable",
+    )
+
+    result = runner.invoke(cli, ["delivery", "f1"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["state"] == "failed"
+    assert payload["recommendedAction"] == "retry"
+    assert "failed before delivery tracking began" in payload["meaning"]
+
+
+def test_delivery_unconfirmed_reports_cautious_retry_guidance(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    _setup_team(monkeypatch, workspace)
+
+    seq = bus.write_event(
+        workspace,
+        from_agent="claude",
+        to_agent="gpt",
+        intent="send",
+        body="slow msg",
+        message_id="u1",
+    )
+    bus.patch_event(
+        workspace,
+        seq,
+        injectStatus="submitted",
+        turnObserved="pending",
+    )
+    bus.write_event(
+        workspace,
+        from_agent="_system",
+        to_agent="",
+        intent="observation",
+        message_id="u1",
+        metadata={"msgId": "u1", "result": "unconfirmed", "observedAt": "2026-04-14T00:00:00Z"},
+    )
+
+    result = runner.invoke(cli, ["delivery", "u1"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["state"] == "unconfirmed"
+    assert payload["recommendedAction"] == "cautious_retry"
+    assert "not confirmed" in payload["meaning"]
+
+
 # --- inbox ---
 
 
@@ -149,7 +214,7 @@ def test_inbox_shows_messages_to_self(runner, configure_hive_home, monkeypatch, 
     assert payload["messages"][0]["body"] == "hello claude"
 
 
-def test_inbox_advances_cursor(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_inbox_does_not_advance_cursor_by_default(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
@@ -161,6 +226,25 @@ def test_inbox_advances_cursor(runner, configure_hive_home, monkeypatch, tmp_pat
     )
 
     runner.invoke(cli, ["inbox"])
+
+    result = runner.invoke(cli, ["inbox"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["unread"] == 1
+
+
+def test_inbox_ack_advances_cursor(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    _setup_team(monkeypatch, workspace)
+
+    bus.write_event(
+        workspace, from_agent="gpt", to_agent="claude",
+        intent="send", body="first", message_id="m1",
+    )
+
+    runner.invoke(cli, ["inbox", "--ack"])
 
     result = runner.invoke(cli, ["inbox"])
     assert result.exit_code == 0
@@ -212,7 +296,7 @@ def test_inbox_tracking_lost_not_repeated(runner, configure_hive_home, monkeypat
         turnObserved="pending",
     )
 
-    result1 = runner.invoke(cli, ["inbox"])
+    result1 = runner.invoke(cli, ["inbox", "--ack"])
     assert result1.exit_code == 0
     p1 = json.loads(result1.output)
     assert p1["unread"] >= 1

@@ -486,6 +486,25 @@ def _present_delivery_state(
     return "pending"
 
 
+def _delivery_guidance(state: str) -> dict[str, str] | None:
+    if state == "failed":
+        return {
+            "meaning": "Local submit attempt failed before delivery tracking began.",
+            "recommendedAction": "retry",
+        }
+    if state == "tracking_lost":
+        return {
+            "meaning": "Delivery tracking was lost. Final delivery is unknown.",
+            "recommendedAction": "investigate",
+        }
+    if state == "unconfirmed":
+        return {
+            "meaning": "Delivery was not confirmed before the timeout window elapsed.",
+            "recommendedAction": "cautious_retry",
+        }
+    return None
+
+
 def _resolve_artifact_path(artifact: str, workspace: str | Path = "") -> str:
     if not artifact:
         return ""
@@ -570,7 +589,7 @@ def _send_recorded_message(
     normalized_body = body.strip()
 
     # ACK preparation — resolve transcript baseline before injection.
-    message_id = secrets.token_urlsafe(4)  # 4 bytes = 32 bit, 6 chars base64url
+    message_id = ""
     transcript_path: Path | None = None
     baseline: int = 0
     try:
@@ -581,23 +600,23 @@ def _send_recorded_message(
     # Send gate — block if target is waiting for a user answer.
     gate_status = _check_send_gate(target, transcript_path)
 
+    # Write event BEFORE pane injection so the collaboration log is never
+    # lost, even if tmux send-keys fails.
+    event = bus.write_send_event(
+        ws,
+        from_agent=sender,
+        to_agent=to_agent,
+        body=normalized_body,
+        artifact=resolved_artifact,
+        reply_to=reply_to,
+    )
+    event_seq = event.seq
+    message_id = event.msg_id
+
     envelope = _format_hive_envelope(
         from_agent=sender,
         to_agent=to_agent,
         body=body,
-        artifact=resolved_artifact,
-        message_id=message_id,
-        reply_to=reply_to,
-    )
-
-    # Write event BEFORE pane injection so the collaboration log is never
-    # lost, even if tmux send-keys fails.
-    event_seq = bus.write_event(
-        ws,
-        from_agent=sender,
-        to_agent=to_agent,
-        intent="send",
-        body=normalized_body,
         artifact=resolved_artifact,
         message_id=message_id,
         reply_to=reply_to,
@@ -1573,6 +1592,9 @@ def delivery(message_id: str):
             payload["queueSource"] = queue_source
         if observed_at:
             payload["observedAt"] = observed_at
+        guidance = _delivery_guidance(str(payload["state"]))
+        if guidance is not None:
+            payload.update(guidance)
         click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
         return
 
@@ -1591,12 +1613,16 @@ def delivery(message_id: str):
         payload["runtimeQueueState"] = runtime_queue_state
     if queue_source:
         payload["queueSource"] = queue_source
+    guidance = _delivery_guidance(str(payload["state"]))
+    if guidance is not None:
+        payload.update(guidance)
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
 @cli.command()
-def inbox():
-    """Show unread messages and observation results."""
+@click.option("--ack", is_flag=True, help="Advance the inbox cursor to the current latest event")
+def inbox(ack: bool):
+    """Show unread messages and optionally acknowledge them."""
     _, t = _resolve_scoped_team(None, required=True)
     assert t is not None
     ws = _resolve_workspace(t, required=True)
@@ -1652,10 +1678,10 @@ def inbox():
                 if obs is not None:
                     unread.append(obs)
 
-    # Advance cursor to the actual latest event (including any newly written observations)
+    # Acknowledge to the actual latest event (including any newly written observations).
     actual_latest = bus.get_latest_event_ns(ws)
     final_ns = max(latest_ns, actual_latest)
-    if final_ns > cursor:
+    if ack and final_ns > cursor:
         bus.write_cursor(ws, self_name, final_ns)
 
     payload = {

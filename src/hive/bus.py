@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
 from pathlib import Path
@@ -16,6 +17,12 @@ WORKSPACE_DIRS = (
 )
 LEGACY_WORKSPACE_DIRS = ("status", "presence", "events", "cursors")
 DB_FILENAME = "hive.db"
+_MSG_ID_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+_MSG_ID_WIDTH = 4
+_MSG_ID_SPACE = len(_MSG_ID_ALPHABET) ** _MSG_ID_WIDTH
+# Keep short IDs non-obvious without introducing collisions inside the 4-char space.
+_MSG_ID_MULTIPLIER = 131071
+_MSG_ID_OFFSET = 8191
 
 
 def _now_iso() -> str:
@@ -24,6 +31,30 @@ def _now_iso() -> str:
 
 def _db_path(workspace: str | Path) -> Path:
     return Path(workspace).expanduser() / DB_FILENAME
+
+
+def _encode_base62(value: int) -> str:
+    if value < 0:
+        raise ValueError("value must be non-negative")
+    if value == 0:
+        return _MSG_ID_ALPHABET[0]
+    base = len(_MSG_ID_ALPHABET)
+    encoded: list[str] = []
+    current = value
+    while current > 0:
+        current, digit = divmod(current, base)
+        encoded.append(_MSG_ID_ALPHABET[digit])
+    return "".join(reversed(encoded))
+
+
+def format_msg_id(event_seq: int) -> str:
+    """Derive a short deterministic msgId from the durable row sequence."""
+    if event_seq <= 0:
+        raise ValueError("event_seq must be positive")
+    if event_seq < _MSG_ID_SPACE:
+        mixed = (event_seq * _MSG_ID_MULTIPLIER + _MSG_ID_OFFSET) % _MSG_ID_SPACE
+        return _encode_base62(mixed).rjust(_MSG_ID_WIDTH, _MSG_ID_ALPHABET[0])
+    return _encode_base62(event_seq)
 
 
 def _connect(workspace: str | Path) -> sqlite3.Connection:
@@ -35,6 +66,12 @@ def _connect(workspace: str | Path) -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous=NORMAL")
     _init_schema(conn)
     return conn
+
+
+@dataclass(frozen=True)
+class EventWriteResult:
+    seq: int
+    msg_id: str = ""
 
 
 def _init_schema(conn: sqlite3.Connection) -> None:
@@ -182,10 +219,54 @@ def write_event(
         return int(cur.lastrowid)
 
 
+def write_send_event(
+    workspace: str | Path,
+    *,
+    from_agent: str,
+    to_agent: str,
+    body: str = "",
+    artifact: str = "",
+    metadata: dict[str, str] | None = None,
+    reply_to: str = "",
+) -> EventWriteResult:
+    """Write a send event with its deterministic msgId in one transaction."""
+    normalized_body = body.strip()
+    metadata_json = json.dumps(metadata or {}, ensure_ascii=False)
+    created_at = _now_iso()
+    with _connect(workspace) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM messages").fetchone()
+        assert row is not None
+        event_seq = int(row["seq"])
+        msg_id = format_msg_id(event_seq)
+        conn.execute(
+            """
+            INSERT INTO messages (
+                seq, msg_id, from_agent, to_agent, intent, body, artifact,
+                in_reply_to, metadata_json, created_at
+            ) VALUES (?, ?, ?, ?, 'send', ?, ?, ?, ?, ?)
+            """,
+            (
+                event_seq,
+                msg_id,
+                from_agent,
+                to_agent,
+                normalized_body,
+                artifact,
+                reply_to,
+                metadata_json,
+                created_at,
+            ),
+        )
+        conn.commit()
+        return EventWriteResult(seq=event_seq, msg_id=msg_id)
+
+
 def patch_event(workspace: str | Path, event_seq: int, **fields: object) -> None:
     if not event_seq:
         return
     column_map = {
+        "msgId": "msg_id",
         "injectStatus": "inject_status",
         "turnObserved": "turn_observed",
         "runtimeQueueState": "runtime_queue_state",

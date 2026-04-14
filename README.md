@@ -45,6 +45,9 @@ hive team
 # Send work to another pane
 hive send dodo "Review the staged diff and write findings to an artifact"
 hive send orch "review complete" --artifact /tmp/review.md
+
+# Stream a long report from stdin and let Hive materialize the artifact
+printf '%s\n' "# Findings" "- ..." | hive send orch "review complete" --artifact -
 hive team   # inspect runtime input state per agent
 
 # Answer a pending question in another agent's pane
@@ -156,6 +159,8 @@ PYTHONPATH=src python -m pytest tests/unit/test_cvim_command.py tests/unit/test_
 ## How It Works
 
 Hive runs interactive `droid`/`claude`/`codex` sessions in tmux panes. Short coordination messages arrive inline as `<HIVE ...>` blocks via tmux `send_keys`; durable coordination lives in workspace `hive.db` and `artifacts/`. Runtime input state (whether each agent can accept messages or is waiting for a user answer) is probed directly from session transcripts and surfaced in `hive team`. A team-scoped sidecar handles pending-send tracking through a workspace-local socket.
+
+For long or structured payloads, prefer `hive send ... --artifact -` and pipe the content over stdin instead of creating ad-hoc temp files by hand.
 
 Each spawned agent is a full `droid` TUI session. You can `tmux select-pane` to interact with any agent directly.
 

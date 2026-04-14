@@ -4,12 +4,11 @@ from hive import bus
 import hive.cli as cli_module
 from hive.cli import cli
 
-FIXED_ID = "ab12"
+FIXED_ID = bus.format_msg_id(1)
 
 
 def _patch_ack(monkeypatch):
     """Disable ACK resolution so tests don't need a real transcript."""
-    monkeypatch.setattr("hive.cli.secrets.token_urlsafe", lambda _n=4: FIXED_ID)
     monkeypatch.setattr(
         "hive.cli._resolve_ack_baseline",
         lambda _target: (_ for _ in ()).throw(RuntimeError("no transcript")),
@@ -292,7 +291,6 @@ def test_send_ack_confirmed(runner, configure_hive_home, monkeypatch, tmp_path):
             return _FakeAgent()
 
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
-    monkeypatch.setattr("hive.cli.secrets.token_urlsafe", lambda _n=4: FIXED_ID)
     monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
 
@@ -333,7 +331,6 @@ def test_send_ack_unconfirmed_on_timeout(runner, configure_hive_home, monkeypatc
             return _FakeAgent()
 
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
-    monkeypatch.setattr("hive.cli.secrets.token_urlsafe", lambda _n=4: FIXED_ID)
     monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
     monkeypatch.setattr("hive.adapters.base.wait_for_id_in_transcript", lambda path, message_id, baseline, timeout=45.0: False)
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
@@ -413,7 +410,6 @@ def test_send_async_pending_enqueues_sidecar(runner, configure_hive_home, monkey
 
     enqueued = []
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
-    monkeypatch.setattr("hive.cli.secrets.token_urlsafe", lambda _n=4: FIXED_ID)
     monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
     monkeypatch.setattr(
         "hive.sidecar.detect_runtime_queue_state",
@@ -466,7 +462,6 @@ def test_send_async_queued_reports_runtime_queue_state(runner, configure_hive_ho
 
     enqueued: list[tuple[tuple[object, ...], dict[str, object]]] = []
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
-    monkeypatch.setattr("hive.cli.secrets.token_urlsafe", lambda _n=4: FIXED_ID)
     monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
     monkeypatch.setattr(
         "hive.sidecar.detect_runtime_queue_state",
@@ -544,7 +539,6 @@ def test_send_grace_window_waits_for_queue_before_falling_back(
 
     enqueued: list[tuple[tuple[object, ...], dict[str, object]]] = []
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
-    monkeypatch.setattr("hive.cli.secrets.token_urlsafe", lambda _n=4: FIXED_ID)
     monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
     monkeypatch.setattr("hive.cli.time.monotonic", _mono)
@@ -594,7 +588,6 @@ def test_send_inject_failure_no_sidecar(runner, configure_hive_home, monkeypatch
             return _BrokenAgent()
 
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
-    monkeypatch.setattr("hive.cli.secrets.token_urlsafe", lambda _n=4: FIXED_ID)
     monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
 
@@ -648,7 +641,6 @@ def _gate_test_setup(monkeypatch, tmp_path, transcript_records=None):
             return _FakeAgent()
 
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
-    monkeypatch.setattr("hive.cli.secrets.token_urlsafe", lambda _n=4: FIXED_ID)
     monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, transcript.stat().st_size), raising=False)
     monkeypatch.setattr("hive.adapters.base.wait_for_id_in_transcript", lambda path, message_id, baseline, timeout=45.0: False)
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")

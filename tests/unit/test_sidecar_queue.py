@@ -116,3 +116,31 @@ def test_check_pending_uses_post_queue_timeout_after_queue_disappears(monkeypatc
     }
 
     assert sidecar._check_pending(record) == "unconfirmed"
+
+
+def test_inject_exception_uses_honest_unconfirmed_wording(monkeypatch):
+    sent: list[tuple[str, str, bool]] = []
+    monkeypatch.setattr(
+        "hive.tmux.send_keys",
+        lambda pane_id, text, enter=True: sent.append((pane_id, text, enter)),
+    )
+
+    sidecar._inject_exception("%1", "ab12", "orch", "unconfirmed")
+
+    assert len(sent) == 1
+    assert "Delivery is unconfirmed" in sent[0][1]
+    assert "Retry only if duplicate delivery is acceptable." in sent[0][1]
+
+
+def test_inject_exception_uses_tracking_lost_wording(monkeypatch):
+    sent: list[tuple[str, str, bool]] = []
+    monkeypatch.setattr(
+        "hive.tmux.send_keys",
+        lambda pane_id, text, enter=True: sent.append((pane_id, text, enter)),
+    )
+
+    sidecar._inject_exception("%1", "ab12", "orch", "tracking_lost")
+
+    assert len(sent) == 1
+    assert "delivery tracking was lost" in sent[0][1]
+    assert "Final delivery is unknown" in sent[0][1]
