@@ -67,7 +67,7 @@ def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home
     assert payload["from"] == "claude"
     assert payload["to"] == "gpt"
     assert payload["artifact"] == str(artifact)
-    assert payload["summary"] == "please review this"
+    assert "summary" not in payload
     assert payload["injectStatus"] == "submitted"
     assert payload["turnObserved"] == "unavailable"
     assert payload["followUp"]["command"] == "hive doctor gpt"

@@ -635,8 +635,6 @@ def _send_recorded_message(
     }
     if observer_pid is not None:
         payload["observerPid"] = observer_pid
-    if normalized_body:
-        payload["summary"] = normalized_body
     follow_up = _delivery_follow_up(
         to_agent=to_agent,
         message_id=message_id,
