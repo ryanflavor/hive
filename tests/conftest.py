@@ -30,15 +30,10 @@ class FakeTmuxState:
         key = option.removeprefix("@")
         self.window_options.get(target, {}).pop(key, None)
 
-    def tag_pane(self, pane_id: str, role: str, agent: str, team: str,
-                 *, model: str = "", cli: str = "", color: str = "") -> None:
+    def tag_pane(self, pane_id: str, role: str, agent: str, team: str, *, cli: str = "") -> None:
         opts = {"hive-role": role, "hive-agent": agent, "hive-team": team}
-        if model:
-            opts["hive-model"] = model
         if cli:
             opts["hive-cli"] = cli
-        if color:
-            opts["hive-color"] = color
         self.pane_options[pane_id] = {**self.pane_options.get(pane_id, {}), **opts}
 
     def get_pane_option(self, pane_id: str, key: str) -> str | None:
@@ -81,9 +76,7 @@ class FakeTmuxState:
                     role=opts.get("hive-role", ""),
                     agent=opts.get("hive-agent", ""),
                     team=opts.get("hive-team", ""),
-                    model=opts.get("hive-model", ""),
                     cli=opts.get("hive-cli", ""),
-                    color=opts.get("hive-color", ""),
                 ))
         return result
 

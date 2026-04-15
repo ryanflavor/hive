@@ -21,6 +21,7 @@ class SessionMeta:
     title: str | None
     started_at: datetime | None
     jsonl_path: Path
+    model: str | None = None
 
 
 @dataclass(frozen=True)

@@ -8,21 +8,11 @@ from dataclasses import dataclass, field
 
 from . import tmux
 from .agent import Agent
-from .agent_cli import member_role_for_pane, resolve_session_id_for_pane
+from .agent_cli import member_role_for_pane
 
 HIVE_HOME = __import__("pathlib").Path(os.environ.get("HIVE_HOME", str(__import__("pathlib").Path.home() / ".hive")))
-COLORS = ["green", "blue", "yellow", "red", "magenta", "cyan"]
 LEAD_AGENT_NAME = "orch"
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
-
-
-def _session_id_for_pane(pane_id: str, current_session_id: str | None = None) -> str | None:
-    if current_session_id:
-        return current_session_id
-    if not pane_id:
-        return current_session_id
-    return resolve_session_id_for_pane(pane_id) or current_session_id
-
 
 @dataclass
 class Terminal:
@@ -140,8 +130,6 @@ class Team:
                         name=pane.agent,
                         team_name=name,
                         pane_id=pane.pane_id,
-                        model=pane.model,
-                        color=pane.color or "green",
                         cli=resolved_cli,
                         cwd=tmux.display_value(pane.pane_id, "#{pane_current_path}") or "",
                     )
@@ -172,6 +160,7 @@ class Team:
             name=self.lead_name,
             team_name=self.name,
             pane_id=self.lead_pane_id,
+            cli=tmux.get_pane_option(self.lead_pane_id, "hive-cli") or "",
             cwd=os.getcwd(),
             session_id=self.lead_session_id,
         )
@@ -183,7 +172,6 @@ class Team:
         name: str,
         model: str = "",
         prompt: str = "",
-        color: str = "",
         cwd: str = "",
         skill: str = "hive",
         workflow: str = "",
@@ -195,10 +183,6 @@ class Team:
             raise ValueError(f"Agent '{name}' already exists in team '{self.name}'")
         if not tmux.is_inside_tmux():
             raise ValueError(_TMUX_REQUIRED_MESSAGE)
-
-        if not color:
-            idx = len(self.agents) % len(COLORS)
-            color = COLORS[idx]
 
         is_first = len(self.agents) == 0
         if is_first:
@@ -219,7 +203,6 @@ class Team:
             target_pane=target,
             model=model,
             prompt=prompt,
-            color=color,
             cwd=cwd or os.getcwd(),
             is_first=is_first,
             split_horizontal=split_horizontal,
@@ -230,8 +213,7 @@ class Team:
             send_bootstrap_prompt=initial_skill == "hive",
         )
 
-        tmux.tag_pane(agent.pane_id, "agent", name, self.name,
-                      model=model, cli=cli, color=color)
+        tmux.tag_pane(agent.pane_id, "agent", name, self.name, cli=cli)
         self.agents[name] = agent
 
         window_target = tmux.get_current_window_target()
@@ -261,39 +243,22 @@ class Team:
         members: list[dict[str, object]] = []
         lead = self.lead_agent()
         if lead is not None:
-            refreshed_lead_session = _session_id_for_pane(lead.pane_id, lead.session_id)
-            if refreshed_lead_session != lead.session_id:
-                lead.session_id = refreshed_lead_session
-                self.lead_session_id = refreshed_lead_session
             members.append({
                 "name": lead.name,
                 "role": member_role_for_pane(lead.pane_id),
-                "alive": lead.is_alive(),
                 "pane": lead.pane_id,
-                "model": lead.model,
-                "color": lead.color,
-                "sessionId": refreshed_lead_session,
             })
         for name in sorted(self.agents):
-            agent = self.agents[name]
-            refreshed_session = _session_id_for_pane(agent.pane_id, agent.session_id)
-            if refreshed_session != agent.session_id:
-                agent.session_id = refreshed_session
             members.append({
                 "name": name,
                 "role": "agent",
-                "alive": agent.is_alive(),
-                "pane": agent.pane_id,
-                "model": agent.model,
-                "color": agent.color,
-                "sessionId": refreshed_session,
+                "pane": self.agents[name].pane_id,
             })
         for name in sorted(self.terminals):
             terminal = self.terminals[name]
             members.append({
                 "name": name,
                 "role": "terminal",
-                "alive": terminal.is_alive(),
                 "pane": terminal.pane_id,
             })
         return {

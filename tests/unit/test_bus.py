@@ -1,4 +1,4 @@
-import json
+import sqlite3
 
 from hive import bus
 
@@ -154,6 +154,79 @@ def test_write_send_event_assigns_msg_id_without_followup_patch(tmp_path, monkey
         "body": "review complete",
         "artifact": "/tmp/review.md",
         "inReplyTo": "r1",
+        "metadata": {},
+        "createdAt": "2026-03-17T10:00:00Z",
+    }]
+
+
+def test_init_workspace_migrates_legacy_runtime_columns(tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True, exist_ok=True)
+    db_path = workspace / bus.DB_FILENAME
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE messages (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            msg_id TEXT NOT NULL DEFAULT '',
+            from_agent TEXT NOT NULL,
+            to_agent TEXT NOT NULL,
+            intent TEXT NOT NULL,
+            body TEXT NOT NULL DEFAULT '',
+            artifact TEXT NOT NULL DEFAULT '',
+            in_reply_to TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            inject_status TEXT NOT NULL DEFAULT '',
+            turn_observed TEXT NOT NULL DEFAULT '',
+            runtime_queue_state TEXT NOT NULL DEFAULT '',
+            queue_source TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO messages (
+            msg_id, from_agent, to_agent, intent, body, artifact,
+            in_reply_to, metadata_json, created_at,
+            inject_status, turn_observed, runtime_queue_state, queue_source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "a1b2",
+            "orch",
+            "claude",
+            "send",
+            "hello",
+            "",
+            "",
+            "{}",
+            "2026-03-17T10:00:00Z",
+            "submitted",
+            "pending",
+            "queued",
+            "capture",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    bus.init_workspace(workspace)
+
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute("PRAGMA table_info(messages)").fetchall()
+    conn.close()
+    columns = {row[1] for row in rows}
+    assert "inject_status" not in columns
+    assert "turn_observed" not in columns
+    assert "runtime_queue_state" not in columns
+    assert "queue_source" not in columns
+    assert bus.read_all_events(workspace) == [{
+        "msgId": "a1b2",
+        "from": "orch",
+        "to": "claude",
+        "intent": "send",
+        "body": "hello",
         "metadata": {},
         "createdAt": "2026-03-17T10:00:00Z",
     }]

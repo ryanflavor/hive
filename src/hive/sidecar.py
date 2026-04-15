@@ -17,6 +17,14 @@ from typing import Any
 
 from . import bus
 from .agent_cli import detect_profile_for_pane
+from .runtime_state import (
+    build_queue_probe_text,
+    delivery_guidance,
+    format_hive_envelope,
+    present_delivery_state,
+    present_send_state,
+    project_inbox_event,
+)
 
 IDLE_SLEEP = 5.0
 ACTIVE_SLEEP = 0.5
@@ -24,6 +32,9 @@ OBSERVATION_TIMEOUT = 60.0
 POST_QUEUE_TIMEOUT = 10.0
 SOCKET_READY_TIMEOUT = 2.0
 SOCKET_RETRY_INTERVAL = 0.1
+SEND_GRACE_TIMEOUT = 3.0
+SEND_REQUEST_TIMEOUT = SEND_GRACE_TIMEOUT + 2.0
+SIDECAR_API_VERSION = 3
 
 
 def _now_iso() -> str:
@@ -44,19 +55,31 @@ def _lock_path(workspace: str) -> Path:
     return _run_dir(workspace) / "sidecar.lock"
 
 
-def _write_observation(workspace: str, message_id: str, result: str) -> None:
+def _write_observation(
+    workspace: str,
+    message_id: str,
+    result: str,
+    *,
+    metadata: dict[str, str] | None = None,
+) -> None:
     ts = _now_iso()
+    event_metadata: dict[str, str] = {
+        "msgId": message_id,
+        "result": result,
+        "observedAt": ts,
+    }
+    if metadata:
+        for key, value in metadata.items():
+            if value in ("", None):
+                continue
+            event_metadata[key] = value
     bus.write_event(
         workspace,
         from_agent="_system",
         to_agent="",
         intent="observation",
         message_id=message_id,
-        metadata={
-            "msgId": message_id,
-            "result": result,
-            "observedAt": ts,
-        },
+        metadata=event_metadata,
     )
 
 
@@ -84,55 +107,6 @@ def _inject_exception(pane_id: str, message_id: str, target_agent: str, result: 
         tmux.send_keys(pane_id, block, enter=True)
     except Exception:
         pass
-
-
-def enqueue_pending(
-    workspace: str,
-    message_id: str,
-    sender_agent: str,
-    sender_pane: str,
-    target_agent: str,
-    transcript_path: str,
-    baseline: int,
-    *,
-    target_pane: str = "",
-    target_cli: str = "",
-    runtime_queue_state: str = "unknown",
-    queue_source: str = "none",
-    queue_probe_text: str = "",
-) -> bool:
-    """Queue a pending send for sidecar tracking."""
-    record = {
-        "msgId": message_id,
-        "senderAgent": sender_agent,
-        "senderPane": sender_pane,
-        "targetAgent": target_agent,
-        "targetPane": target_pane,
-        "targetCli": target_cli,
-        "targetTranscript": transcript_path,
-        "baseline": baseline,
-        "runtimeQueueState": runtime_queue_state,
-        "queueSource": queue_source,
-        "queueProbeText": queue_probe_text,
-        "createdAt": _now_iso(),
-        "deadlineAt": time.time() + OBSERVATION_TIMEOUT,
-    }
-    if runtime_queue_state == "queued":
-        now = time.time()
-        record["firstQueuedAt"] = now
-        record["lastQueuedAt"] = now
-    record["lastQueueProbeAt"] = time.time()
-
-    for _ in range(int(SOCKET_READY_TIMEOUT / SOCKET_RETRY_INTERVAL)):
-        response = _request_sidecar(
-            workspace,
-            {"action": "enqueue", "record": record},
-            timeout=SOCKET_RETRY_INTERVAL,
-        )
-        if response and response.get("ok") is True:
-            return True
-        time.sleep(SOCKET_RETRY_INTERVAL)
-    return False
 
 
 def detect_runtime_queue_state(
@@ -272,7 +246,11 @@ def _apply_queue_probe(record: dict[str, Any], probe: dict[str, str]) -> None:
 
 def _socket_alive(workspace: str) -> bool:
     response = _request_sidecar(workspace, {"action": "ping"}, timeout=SOCKET_RETRY_INTERVAL)
-    return bool(response and response.get("ok") is True)
+    return bool(
+        response
+        and response.get("ok") is True
+        and response.get("apiVersion") == SIDECAR_API_VERSION
+    )
 
 
 def _cleanup_socket(workspace: str) -> None:
@@ -308,6 +286,720 @@ def _request_sidecar(workspace: str, payload: dict[str, Any], *, timeout: float)
     except json.JSONDecodeError:
         return None
     return response if isinstance(response, dict) else None
+
+
+def request_send(
+    workspace: str,
+    *,
+    team: str,
+    sender_agent: str,
+    sender_pane: str,
+    target_agent: str,
+    body: str,
+    artifact: str = "",
+    reply_to: str = "",
+    wait: bool = False,
+) -> dict[str, Any] | None:
+    timeout = OBSERVATION_TIMEOUT if wait else SEND_REQUEST_TIMEOUT
+    return _request_sidecar(
+        workspace,
+        {
+            "action": "send",
+            "team": team,
+            "senderAgent": sender_agent,
+            "senderPane": sender_pane,
+            "targetAgent": target_agent,
+            "body": body,
+            "artifact": artifact,
+            "replyTo": reply_to,
+            "wait": wait,
+        },
+        timeout=timeout,
+    )
+
+
+def request_answer(
+    workspace: str,
+    *,
+    team: str,
+    sender_agent: str,
+    target_agent: str,
+    text: str,
+) -> dict[str, Any] | None:
+    return _request_sidecar(
+        workspace,
+        {
+            "action": "answer",
+            "team": team,
+            "senderAgent": sender_agent,
+            "targetAgent": target_agent,
+            "text": text,
+        },
+        timeout=15.0,
+    )
+
+
+def request_delivery(workspace: str, message_id: str) -> dict[str, Any] | None:
+    return _request_sidecar(
+        workspace,
+        {"action": "delivery", "msgId": message_id},
+        timeout=SOCKET_RETRY_INTERVAL,
+    )
+
+
+def request_inbox(workspace: str, *, agent_name: str, ack: bool = False) -> dict[str, Any] | None:
+    return _request_sidecar(
+        workspace,
+        {"action": "inbox", "agent": agent_name, "ack": ack},
+        timeout=SOCKET_RETRY_INTERVAL,
+    )
+
+
+def request_doctor(
+    workspace: str,
+    *,
+    team: str,
+    target_agent: str,
+) -> dict[str, Any] | None:
+    return _request_sidecar(
+        workspace,
+        {"action": "doctor", "team": team, "agent": target_agent},
+        timeout=SOCKET_READY_TIMEOUT,
+    )
+
+
+def request_team_runtime(
+    workspace: str,
+    *,
+    team: str,
+) -> dict[str, Any] | None:
+    return _request_sidecar(
+        workspace,
+        {"action": "team-runtime", "team": team},
+        timeout=SOCKET_READY_TIMEOUT,
+    )
+
+
+def _resolve_live_agent(team_name: str, agent_name: str):
+    from .team import Team
+
+    team = Team.load(team_name)
+    agent = team.get(agent_name)
+    if not agent.is_alive():
+        raise RuntimeError(f"agent '{agent_name}' is not alive")
+    return team, agent
+
+
+def _resolve_ack_baseline(target) -> tuple[Path, int]:
+    from . import adapters
+    from .adapters.base import get_transcript_baseline
+
+    profile = detect_profile_for_pane(target.pane_id)
+    if not profile:
+        raise RuntimeError("cannot detect CLI profile for target pane")
+    adapter = adapters.get(profile.name)
+    if not adapter:
+        raise RuntimeError(f"no adapter for CLI '{profile.name}'")
+    session_id = adapter.resolve_current_session_id(target.pane_id)
+    if not session_id:
+        raise RuntimeError("cannot resolve session id for target pane")
+    from . import tmux
+    cwd_hint = tmux.display_value(target.pane_id, "#{pane_current_path}")
+    transcript = adapter.find_session_file(session_id, cwd=cwd_hint)
+    if not transcript:
+        raise RuntimeError(f"transcript file not found for session {session_id}")
+    return transcript, get_transcript_baseline(transcript)
+
+
+def _check_send_gate(transcript_path: Path | None) -> str:
+    if transcript_path is None:
+        return "skipped"
+    from .adapters.base import check_input_gate
+
+    result = check_input_gate(transcript_path)
+    if result.status == "waiting":
+        raise RuntimeError(
+            "target agent is waiting for a user answer; use `hive answer` or answer in the target pane directly"
+        )
+    return result.status
+
+
+def _observe_send_grace(
+    *,
+    pane_id: str,
+    transcript_path: Path | None,
+    message_id: str,
+    baseline: int,
+    queue_probe_text: str,
+    cli_name: str,
+) -> tuple[str, dict[str, str]]:
+    from .adapters.base import transcript_has_id_in_new_user_turn
+
+    deadline = time.monotonic() + SEND_GRACE_TIMEOUT
+    last_probe: dict[str, str] = {"state": "unknown", "source": "none", "observedAt": ""}
+
+    while True:
+        if transcript_path is not None and transcript_has_id_in_new_user_turn(transcript_path, message_id, baseline):
+            return "confirmed", last_probe
+
+        last_probe = detect_runtime_queue_state(
+            pane_id=pane_id,
+            message_id=message_id,
+            queue_probe_text=queue_probe_text,
+            transcript_path=str(transcript_path) if transcript_path is not None else "",
+            baseline=baseline,
+            cli_name=cli_name,
+        )
+        if last_probe.get("state") == "queued":
+            return "queued", last_probe
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return "pending", last_probe
+        time.sleep(min(0.2, remaining))
+
+
+def _pending_record(
+    *,
+    message_id: str,
+    sender_agent: str,
+    sender_pane: str,
+    target_agent: str,
+    target_pane: str,
+    target_cli: str,
+    transcript_path: str,
+    baseline: int,
+    runtime_queue_state: str,
+    queue_source: str,
+    queue_probe_text: str,
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "msgId": message_id,
+        "senderAgent": sender_agent,
+        "senderPane": sender_pane,
+        "targetAgent": target_agent,
+        "targetPane": target_pane,
+        "targetCli": target_cli,
+        "targetTranscript": transcript_path,
+        "baseline": baseline,
+        "runtimeQueueState": runtime_queue_state,
+        "queueSource": queue_source,
+        "queueProbeText": queue_probe_text,
+        "createdAt": _now_iso(),
+        "deadlineAt": time.time() + OBSERVATION_TIMEOUT,
+    }
+    if runtime_queue_state == "queued":
+        now = time.time()
+        record["firstQueuedAt"] = now
+        record["lastQueuedAt"] = now
+    record["lastQueueProbeAt"] = time.time()
+    return record
+
+
+def _send_payload(
+    *,
+    workspace: str,
+    team_name: str,
+    pending: dict[str, dict[str, Any]],
+    sender_agent: str,
+    sender_pane: str,
+    target_agent: str,
+    body: str,
+    artifact: str,
+    reply_to: str,
+    wait: bool,
+) -> dict[str, Any]:
+    team, target = _resolve_live_agent(team_name, target_agent)
+    normalized_body = body.strip()
+
+    message_id = ""
+    transcript_path: Path | None = None
+    baseline = 0
+    try:
+        transcript_path, baseline = _resolve_ack_baseline(target)
+    except Exception:
+        transcript_path = None
+
+    _check_send_gate(transcript_path)
+
+    event = bus.write_send_event(
+        workspace,
+        from_agent=sender_agent,
+        to_agent=target_agent,
+        body=normalized_body,
+        artifact=artifact,
+        reply_to=reply_to,
+    )
+    message_id = event.msg_id
+    envelope = format_hive_envelope(
+        from_agent=sender_agent,
+        to_agent=target_agent,
+        body=body,
+        artifact=artifact,
+        message_id=message_id,
+        reply_to=reply_to,
+    )
+
+    inject_status = "submitted"
+    try:
+        target.send(envelope)
+    except Exception:
+        inject_status = "failed"
+
+    runtime_queue_state = "unknown"
+    probe: dict[str, str] = {"source": "none"}
+    turn_observed = "pending"
+
+    if inject_status == "failed":
+        turn_observed = "unavailable"
+        _write_observation(
+            workspace,
+            message_id,
+            "failed",
+            metadata={
+                "injectStatus": "failed",
+                "turnObserved": "unavailable",
+            },
+        )
+    elif wait and transcript_path is not None:
+        from .adapters.base import wait_for_id_in_transcript
+
+        if wait_for_id_in_transcript(transcript_path, message_id, baseline):
+            turn_observed = "confirmed"
+            _write_observation(
+                workspace,
+                message_id,
+                "confirmed",
+                metadata={
+                    "injectStatus": "submitted",
+                    "turnObserved": "confirmed",
+                },
+            )
+        else:
+            turn_observed = "unconfirmed"
+            _write_observation(
+                workspace,
+                message_id,
+                "unconfirmed",
+                metadata={
+                    "injectStatus": "submitted",
+                    "turnObserved": "unconfirmed",
+                },
+            )
+    else:
+        profile = detect_profile_for_pane(target.pane_id)
+        queue_probe_text = build_queue_probe_text(normalized_body)
+        grace_state, probe = _observe_send_grace(
+            pane_id=target.pane_id,
+            transcript_path=transcript_path,
+            message_id=message_id,
+            baseline=baseline,
+            queue_probe_text=queue_probe_text,
+            cli_name=profile.name if profile else "",
+        )
+        if grace_state == "confirmed":
+            turn_observed = "confirmed"
+            _write_observation(
+                workspace,
+                message_id,
+                "confirmed",
+                metadata={
+                    "injectStatus": "submitted",
+                    "turnObserved": "confirmed",
+                },
+            )
+        else:
+            runtime_queue_state = "queued" if grace_state == "queued" else "unknown"
+            pending[message_id] = _pending_record(
+                message_id=message_id,
+                sender_agent=sender_agent,
+                sender_pane=sender_pane,
+                target_agent=target_agent,
+                target_pane=target.pane_id,
+                target_cli=profile.name if profile else "",
+                transcript_path=str(transcript_path) if transcript_path is not None else "",
+                baseline=baseline,
+                runtime_queue_state=runtime_queue_state,
+                queue_source=probe.get("source", "none"),
+                queue_probe_text=queue_probe_text,
+            )
+            turn_observed = "pending"
+
+    return {
+        "ok": True,
+        "from": sender_agent,
+        "to": target_agent,
+        "msgId": message_id,
+        "artifact": artifact,
+        "state": present_send_state(
+            inject_status=inject_status,
+            turn_observed=turn_observed,
+            runtime_queue_state=runtime_queue_state,
+        ),
+    }
+
+
+def _answer_payload(
+    *,
+    workspace: str,
+    team_name: str,
+    sender_agent: str,
+    target_agent: str,
+    text: str,
+) -> dict[str, Any]:
+    _, target = _resolve_live_agent(team_name, target_agent)
+    transcript_path, _ = _resolve_ack_baseline(target)
+
+    from .adapters.base import check_input_gate, extract_pending_question
+    gate = check_input_gate(transcript_path)
+    if gate.status != "waiting":
+        raise RuntimeError(f"agent '{target_agent}' is not waiting for an answer (inputState: {gate.status})")
+
+    pending_question = extract_pending_question(transcript_path)
+    bus.write_event(
+        workspace,
+        from_agent=sender_agent,
+        to_agent=target_agent,
+        intent="answer",
+        body=text.strip(),
+    )
+
+    from .agent import _submit_interactive_text
+    _submit_interactive_text(target.pane_id, text, target.cli)
+
+    ack_status = "unconfirmed"
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline:
+        time.sleep(0.5)
+        result = check_input_gate(transcript_path)
+        if result.status == "clear":
+            ack_status = "confirmed"
+            break
+
+    payload: dict[str, Any] = {
+        "ok": True,
+        "from": sender_agent,
+        "to": target_agent,
+        "ack": ack_status,
+    }
+    if pending_question:
+        payload["question"] = pending_question
+    if text.strip():
+        payload["answer"] = text.strip()
+    return payload
+
+
+def _delivery_payload(workspace: str, pending: dict[str, dict[str, Any]], message_id: str) -> dict[str, Any]:
+    send_event = bus.find_send_event(workspace, message_id)
+    if send_event is None:
+        return {"ok": False, "error": f"no send event found with msgId '{message_id}'"}
+
+    obs = bus.find_latest_observation(workspace, message_id)
+    if obs is None and message_id not in pending:
+        _write_observation(
+            workspace,
+            message_id,
+            "tracking_lost",
+            metadata={
+                "injectStatus": "submitted",
+                "turnObserved": "pending",
+            },
+        )
+        obs = bus.find_latest_observation(workspace, message_id)
+
+    inject_status = "submitted"
+    turn_observed = "pending"
+    runtime_queue_state = "unknown"
+    queue_source = ""
+
+    if message_id in pending:
+        record = pending[message_id]
+        runtime_queue_state = str(record.get("runtimeQueueState", "unknown"))
+        queue_source = str(record.get("queueSource", "none"))
+        payload: dict[str, Any] = {
+            "ok": True,
+            "msgId": message_id,
+            "to": send_event.get("to", ""),
+            "state": present_delivery_state(
+                inject_status=inject_status,
+                turn_observed="pending",
+                runtime_queue_state=runtime_queue_state,
+            ),
+            "injectStatus": inject_status,
+            "turnObserved": "pending",
+        }
+        if runtime_queue_state != "unknown":
+            payload["runtimeQueueState"] = runtime_queue_state
+        if queue_source:
+            payload["queueSource"] = queue_source
+        guidance = delivery_guidance(str(payload["state"]))
+        if guidance is not None:
+            payload.update(guidance)
+        return payload
+
+    if obs is not None:
+        metadata = obs.get("metadata", {})
+        result = metadata.get("result", "") if isinstance(metadata, dict) else ""
+        observed_at = metadata.get("observedAt", "") if isinstance(metadata, dict) else ""
+        inject_status = (
+            str(metadata.get("injectStatus", ""))
+            if isinstance(metadata, dict)
+            else ""
+        ) or ("failed" if result == "failed" else "submitted")
+        turn_observed = (
+            str(metadata.get("turnObserved", ""))
+            if isinstance(metadata, dict)
+            else ""
+        )
+        if not turn_observed:
+            if result in {"confirmed", "unconfirmed"}:
+                turn_observed = str(result)
+            elif result == "failed":
+                turn_observed = "unavailable"
+            else:
+                turn_observed = "pending"
+        runtime_queue_state = (
+            str(metadata.get("runtimeQueueState", "unknown"))
+            if isinstance(metadata, dict)
+            else "unknown"
+        )
+        queue_source = (
+            str(metadata.get("queueSource", ""))
+            if isinstance(metadata, dict)
+            else ""
+        )
+        payload = {
+            "ok": True,
+            "msgId": message_id,
+            "to": send_event.get("to", ""),
+            "state": present_delivery_state(
+                inject_status=inject_status,
+                turn_observed=turn_observed,
+                runtime_queue_state=runtime_queue_state,
+                observation_result=str(result),
+            ),
+            "injectStatus": inject_status,
+            "turnObserved": turn_observed,
+        }
+        if runtime_queue_state != "unknown":
+            payload["runtimeQueueState"] = runtime_queue_state
+        if queue_source:
+            payload["queueSource"] = queue_source
+        if observed_at:
+            payload["observedAt"] = observed_at
+        guidance = delivery_guidance(str(payload["state"]))
+        if guidance is not None:
+            payload.update(guidance)
+        return payload
+
+    payload = {
+        "ok": True,
+        "msgId": message_id,
+        "to": send_event.get("to", ""),
+        "state": present_delivery_state(
+            inject_status=inject_status,
+            turn_observed=turn_observed,
+            runtime_queue_state=runtime_queue_state,
+        ),
+        "injectStatus": inject_status,
+        "turnObserved": turn_observed,
+    }
+    if runtime_queue_state != "unknown":
+        payload["runtimeQueueState"] = runtime_queue_state
+    if queue_source:
+        payload["queueSource"] = queue_source
+    guidance = delivery_guidance(str(payload["state"]))
+    if guidance is not None:
+        payload.update(guidance)
+    return payload
+
+
+def _inbox_payload(workspace: str, pending: dict[str, dict[str, Any]], agent_name: str, ack: bool) -> dict[str, Any]:
+    cursor = bus.read_cursor(workspace, agent_name)
+    events = bus.read_events_with_ns(workspace)
+
+    unread: list[dict[str, object]] = []
+    latest_ns = cursor
+    for ns, ev in events:
+        if ns <= cursor:
+            continue
+        latest_ns = max(latest_ns, ns)
+        if ev.get("to") == agent_name:
+            unread.append(project_inbox_event(ev))
+
+    actual_latest = bus.get_latest_event_ns(workspace)
+    final_ns = max(latest_ns, actual_latest)
+    if ack and final_ns > cursor:
+        bus.write_cursor(workspace, agent_name, final_ns)
+
+    return {
+        "ok": True,
+        "agent": agent_name,
+        "unread": len(unread),
+        "messages": unread,
+    }
+
+
+def _doctor_payload(workspace: str, team_name: str, target_agent: str) -> dict[str, Any]:
+    from .team import Team
+
+    team = Team.load(team_name)
+    try:
+        target = team.get(target_agent)
+    except KeyError as exc:
+        raise RuntimeError(str(exc))
+
+    alive = target.is_alive()
+    diag: dict[str, object] = {
+        "ok": True,
+        "agent": target_agent,
+        "team": team.name,
+        "pane": target.pane_id,
+        "teamMembers": len(list(team.agents.values())),
+    }
+    runtime = _member_runtime_payload(target.pane_id, role="agent")
+    diag["alive"] = bool(runtime.get("alive", alive))
+    if runtime.get("model"):
+        diag["model"] = runtime["model"]
+    if runtime.get("sessionId"):
+        diag["sessionId"] = runtime["sessionId"]
+    if runtime.get("_cli"):
+        diag["cli"] = runtime["_cli"]
+    if "_transcript" in runtime:
+        diag["transcript"] = runtime["_transcript"]
+    if "_transcriptExists" in runtime:
+        diag["transcriptExists"] = runtime["_transcriptExists"]
+    if "_transcriptSize" in runtime:
+        diag["transcriptSize"] = runtime["_transcriptSize"]
+    if "_gate" in runtime:
+        diag["gate"] = runtime["_gate"]
+    if "_gateReason" in runtime:
+        diag["gateReason"] = runtime["_gateReason"]
+
+    diag["workspace"] = str(workspace)
+    diag["eventCount"] = bus.count_events(workspace)
+    diag["cursor"] = bus.read_cursor(workspace, target_agent)
+    return diag
+
+
+def _agent_runtime_payload(pane_id: str) -> dict[str, Any]:
+    from . import adapters, tmux
+    from .adapters.base import check_input_gate, extract_pending_question
+    from .agent_cli import resolve_model_for_pane
+
+    runtime: dict[str, Any] = {
+        "alive": tmux.is_pane_alive(pane_id),
+    }
+    if not runtime["alive"]:
+        runtime["inputState"] = "offline"
+        runtime["inputReason"] = "pane_dead"
+        return runtime
+
+    profile = detect_profile_for_pane(pane_id)
+    runtime["_cli"] = profile.name if profile else "unknown"
+
+    resolved_model = resolve_model_for_pane(
+        pane_id,
+        cli_name=profile.name if profile else "",
+        current_model="",
+    )
+    if resolved_model:
+        runtime["model"] = resolved_model
+
+    if not profile:
+        runtime["inputState"] = "unknown"
+        runtime["inputReason"] = "no_session"
+        return runtime
+
+    adapter = adapters.get(profile.name)
+    if not adapter:
+        runtime["inputState"] = "unknown"
+        runtime["inputReason"] = "no_session"
+        return runtime
+
+    session_id = adapter.resolve_current_session_id(pane_id)
+    runtime["sessionId"] = session_id or "unresolved"
+    if not session_id:
+        runtime["inputState"] = "unknown"
+        runtime["inputReason"] = "no_session"
+        return runtime
+
+    cwd_hint = tmux.display_value(pane_id, "#{pane_current_path}")
+    transcript = adapter.find_session_file(session_id, cwd=cwd_hint)
+    runtime["_transcript"] = str(transcript) if transcript else None
+    if not transcript:
+        runtime["inputState"] = "unknown"
+        runtime["inputReason"] = "transcript_missing"
+        return runtime
+
+    runtime["_transcriptExists"] = transcript.exists()
+    if not transcript.exists():
+        runtime["inputState"] = "unknown"
+        runtime["inputReason"] = "transcript_missing"
+        return runtime
+
+    runtime["_transcriptSize"] = transcript.stat().st_size
+    gate = check_input_gate(transcript)
+    runtime["_gate"] = gate.status
+    runtime["_gateReason"] = gate.reason
+    if gate.status == "waiting":
+        runtime["inputState"] = "waiting_user"
+        runtime["inputReason"] = "ask_pending"
+        question = extract_pending_question(transcript)
+        if question:
+            runtime["pendingQuestion"] = question
+    elif gate.status == "clear":
+        runtime["inputState"] = "ready"
+        runtime["inputReason"] = ""
+    else:
+        runtime["inputState"] = "unknown"
+        runtime["inputReason"] = gate.reason or "read_error"
+    return runtime
+
+
+def _member_runtime_payload(pane_id: str, *, role: str) -> dict[str, Any]:
+    from . import tmux
+
+    if role != "agent":
+        return {"alive": tmux.is_pane_alive(pane_id)}
+    return _agent_runtime_payload(pane_id)
+
+
+def _team_runtime_payload(team_name: str) -> dict[str, Any]:
+    from .team import Team
+    from .agent_cli import member_role_for_pane
+
+    team = Team.load(team_name)
+    members: dict[str, dict[str, Any]] = {}
+    needs_answer: list[str] = []
+
+    lead = team.lead_agent()
+    if lead is not None:
+        role = member_role_for_pane(lead.pane_id)
+        runtime = _member_runtime_payload(lead.pane_id, role=role)
+        members[lead.name] = runtime
+        if runtime.get("inputState") == "waiting_user":
+            needs_answer.append(lead.name)
+
+    for name in sorted(team.agents):
+        agent = team.agents[name]
+        runtime = _member_runtime_payload(agent.pane_id, role="agent")
+        members[name] = runtime
+        if runtime.get("inputState") == "waiting_user":
+            needs_answer.append(name)
+
+    for name in sorted(team.terminals):
+        terminal = team.terminals[name]
+        members[name] = _member_runtime_payload(terminal.pane_id, role="terminal")
+
+    payload: dict[str, Any] = {
+        "ok": True,
+        "team": team_name,
+        "members": members,
+    }
+    if needs_answer:
+        payload["needsAnswer"] = needs_answer
+    return payload
 
 
 def _is_tmux_window_alive(tmux_window: str) -> bool:
@@ -389,18 +1081,73 @@ def _live_state(record: dict[str, Any]) -> str:
 def _handle_request(
     *,
     workspace: str,
+    team: str,
     pending: dict[str, dict[str, Any]],
     request: dict[str, Any],
 ) -> tuple[dict[str, Any], bool]:
     action = request.get("action")
     if action == "ping":
-        return {"ok": True}, True
+        return {"ok": True, "apiVersion": SIDECAR_API_VERSION}, True
+    if action == "send":
+        try:
+            response = _send_payload(
+                workspace=workspace,
+                team_name=str(request.get("team") or team),
+                pending=pending,
+                sender_agent=str(request.get("senderAgent", "")),
+                sender_pane=str(request.get("senderPane", "")),
+                target_agent=str(request.get("targetAgent", "")),
+                body=str(request.get("body", "")),
+                artifact=str(request.get("artifact", "")),
+                reply_to=str(request.get("replyTo", "")),
+                wait=bool(request.get("wait", False)),
+            )
+        except Exception as exc:
+            response = {"ok": False, "error": str(exc)}
+        return response, True
+    if action == "answer":
+        try:
+            response = _answer_payload(
+                workspace=workspace,
+                team_name=str(request.get("team") or team),
+                sender_agent=str(request.get("senderAgent", "")),
+                target_agent=str(request.get("targetAgent", "")),
+                text=str(request.get("text", "")),
+            )
+        except Exception as exc:
+            response = {"ok": False, "error": str(exc)}
+        return response, True
     if action == "enqueue":
         record = request.get("record")
         if not isinstance(record, dict) or not record.get("msgId"):
             return {"ok": False, "error": "invalid record"}, True
         pending[str(record["msgId"])] = record
         return {"ok": True, "state": _live_state(record)}, True
+    if action == "delivery":
+        return _delivery_payload(workspace, pending, str(request.get("msgId", ""))), True
+    if action == "inbox":
+        return _inbox_payload(
+            workspace,
+            pending,
+            str(request.get("agent", "")),
+            bool(request.get("ack", False)),
+        ), True
+    if action == "doctor":
+        try:
+            response = _doctor_payload(
+                workspace,
+                str(request.get("team") or team),
+                str(request.get("agent", "")),
+            )
+        except Exception as exc:
+            response = {"ok": False, "error": str(exc)}
+        return response, True
+    if action == "team-runtime":
+        try:
+            response = _team_runtime_payload(str(request.get("team") or team))
+        except Exception as exc:
+            response = {"ok": False, "error": str(exc)}
+        return response, True
     if action == "status":
         message_id = request.get("msgId", "")
         if message_id in pending:
@@ -427,6 +1174,7 @@ def _serve_requests(
     *,
     server: socket.socket,
     workspace: str,
+    team: str,
     pending: dict[str, dict[str, Any]],
     timeout: float,
 ) -> bool:
@@ -462,6 +1210,7 @@ def _serve_requests(
                 request = {}
             response, keep_running = _handle_request(
                 workspace=workspace,
+                team=team,
                 pending=pending,
                 request=request if isinstance(request, dict) else {},
             )
@@ -492,6 +1241,7 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str) -> None:
             if not _serve_requests(
                 server=server,
                 workspace=workspace,
+                team=team,
                 pending=pending,
                 timeout=ACTIVE_SLEEP if pending else IDLE_SLEEP,
             ):
@@ -501,7 +1251,12 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str) -> None:
                 result = _check_pending(record)
                 if result is None:
                     continue
-                _write_observation(workspace, message_id, result)
+                _write_observation(
+                    workspace,
+                    message_id,
+                    result,
+                    metadata=_observation_metadata_for_pending(record, result),
+                )
                 if result in ("unconfirmed", "tracking_lost"):
                     sender_pane = record.get("senderPane", "")
                     target_agent = record.get("targetAgent", "")
@@ -562,6 +1317,23 @@ def _check_pending(record: dict[str, Any]) -> str | None:
     return None
 
 
+def _observation_metadata_for_pending(record: dict[str, Any], result: str) -> dict[str, str]:
+    metadata: dict[str, str] = {
+        "injectStatus": "submitted",
+    }
+    if result == "confirmed":
+        metadata["turnObserved"] = "confirmed"
+    elif result == "unconfirmed":
+        metadata["turnObserved"] = "unconfirmed"
+    elif result == "tracking_lost":
+        metadata["turnObserved"] = "pending"
+    if str(record.get("runtimeQueueState", "unknown")) != "unknown":
+        metadata["runtimeQueueState"] = str(record["runtimeQueueState"])
+    if str(record.get("queueSource", "")) not in ("", "none"):
+        metadata["queueSource"] = str(record["queueSource"])
+    return metadata
+
+
 def stop_sidecar(workspace: str) -> None:
     _request_sidecar(workspace, {"action": "shutdown"}, timeout=SOCKET_READY_TIMEOUT)
     deadline = time.monotonic() + SOCKET_READY_TIMEOUT
@@ -570,22 +1342,3 @@ def stop_sidecar(workspace: str) -> None:
             return
         time.sleep(SOCKET_RETRY_INTERVAL)
     _cleanup_socket(workspace)
-
-
-def check_stale_sidecar(workspace: str, message_id: str) -> str | None:
-    """Check whether a message is still actively tracked by the sidecar."""
-    from .observer import find_observation
-
-    obs = find_observation(workspace, message_id)
-    if obs is not None:
-        metadata = obs.get("metadata", {})
-        if isinstance(metadata, dict):
-            return str(metadata.get("result", ""))
-        return None
-
-    response = _request_sidecar(workspace, {"action": "status", "msgId": message_id}, timeout=SOCKET_RETRY_INTERVAL)
-    if response and response.get("tracked") is True:
-        return None
-
-    _write_observation(workspace, message_id, "tracking_lost")
-    return "tracking_lost"

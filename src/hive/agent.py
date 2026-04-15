@@ -103,7 +103,6 @@ class Agent:
     pane_id: str
     model: str = ""
     prompt: str = ""
-    color: str = "green"
     cwd: str = field(default_factory=os.getcwd)
     session_id: str | None = None
     spawned_at: float = field(default_factory=time.time)
@@ -119,7 +118,6 @@ class Agent:
         target_pane: str,
         model: str = "",
         prompt: str = "",
-        color: str = "green",
         cwd: str = "",
         session_id: str | None = None,
         is_first: bool = False,
@@ -145,7 +143,7 @@ class Agent:
 
         pane_id = tmux.split_window(target_pane, horizontal=split_horizontal, size=split_size)
         tmux.set_pane_title(pane_id, f"[{name}]")
-        tmux.tag_pane(pane_id, "agent", name, team_name, model=model, cli=cli, color=color)
+        tmux.tag_pane(pane_id, "agent", name, team_name, cli=cli)
 
         bin_path = CLI_BINS[cli]
         cmd_parts = ["exec", _shell_escape(bin_path)]
@@ -193,7 +191,6 @@ class Agent:
             pane_id=pane_id,
             model=model,
             prompt=prompt,
-            color=color,
             cwd=cwd,
             session_id=session_id,
             cli=cli,
@@ -272,7 +269,6 @@ class Agent:
             "name": self.name,
             "model": self.model,
             "prompt": self.prompt,
-            "color": self.color,
             "cwd": self.cwd,
             "tmuxPaneId": self.pane_id,
             "sessionId": self.session_id,

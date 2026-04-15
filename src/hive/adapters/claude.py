@@ -101,6 +101,7 @@ class ClaudeAdapter:
         session_id: str | None = None
         cwd: str | None = None
         timestamp = None
+        model: str | None = None
         try:
             with path.open() as handle:
                 for _ in range(_META_SCAN_LIMIT):
@@ -113,7 +114,11 @@ class ClaudeAdapter:
                     session_id = session_id or _str_or_none(payload.get("sessionId"))
                     cwd = cwd or _str_or_none(payload.get("cwd"))
                     timestamp = timestamp or parse_iso_timestamp(payload.get("timestamp"))
-                    if session_id and cwd:
+                    if not model:
+                        msg = payload.get("message")
+                        if isinstance(msg, dict):
+                            model = _str_or_none(msg.get("model"))
+                    if session_id and cwd and model:
                         break
         except OSError:
             return None
@@ -126,6 +131,7 @@ class ClaudeAdapter:
             title=None,
             started_at=timestamp,
             jsonl_path=path,
+            model=model,
         )
 
     def iter_messages(self, path: Path) -> Iterator[Message]:

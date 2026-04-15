@@ -101,6 +101,20 @@ class CodexAdapter:
         try:
             with path.open() as handle:
                 first_line = handle.readline().strip()
+                model = None
+                for _ in range(20):
+                    raw = handle.readline()
+                    if not raw:
+                        break
+                    extra = safe_json_loads(raw.strip())
+                    if not extra:
+                        continue
+                    if extra.get("type") == "turn_context":
+                        payload = extra.get("payload")
+                        if isinstance(payload, dict):
+                            model = _str_or_none(payload.get("model"))
+                            if model:
+                                break
         except OSError:
             return None
         payload = safe_json_loads(first_line)
@@ -119,6 +133,7 @@ class CodexAdapter:
             title=None,
             started_at=parse_iso_timestamp(payload.get("timestamp") or body.get("timestamp")),
             jsonl_path=path,
+            model=model or _str_or_none(body.get("model")),
         )
 
     def iter_messages(self, path: Path) -> Iterator[Message]:

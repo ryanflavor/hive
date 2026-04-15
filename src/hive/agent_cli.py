@@ -117,3 +117,28 @@ def resolve_session_id_for_pane(pane_id: str, profile: CLIProfile | None = None)
     if not adapter:
         return None
     return adapter.resolve_current_session_id(pane_id)
+
+
+def resolve_model_for_pane(
+    pane_id: str,
+    *,
+    cli_name: str = "",
+    current_model: str = "",
+) -> str:
+    profile = get_profile(cli_name) if cli_name else detect_profile_for_pane(pane_id)
+    if not profile:
+        return current_model
+    adapter = adapters.get(profile.name)
+    if not adapter:
+        return current_model
+    session_id = adapter.resolve_current_session_id(pane_id)
+    if not session_id:
+        return current_model
+    cwd_hint = tmux.display_value(pane_id, "#{pane_current_path}")
+    transcript = adapter.find_session_file(session_id, cwd=cwd_hint)
+    if transcript is None:
+        return current_model
+    meta = adapter.read_meta(transcript)
+    if meta is None or not meta.model:
+        return current_model
+    return meta.model

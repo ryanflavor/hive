@@ -113,6 +113,7 @@ class DroidAdapter:
             title=_str_or_none(payload.get("sessionTitle") or payload.get("title")),
             started_at=None,
             jsonl_path=path,
+            model=_str_or_none(payload.get("model")),
         )
 
     def iter_messages(self, path: Path) -> Iterator[Message]:

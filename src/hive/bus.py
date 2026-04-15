@@ -17,6 +17,12 @@ WORKSPACE_DIRS = (
 )
 LEGACY_WORKSPACE_DIRS = ("status", "presence", "events", "cursors")
 DB_FILENAME = "hive.db"
+_LEGACY_MESSAGE_RUNTIME_COLUMNS = (
+    "inject_status",
+    "turn_observed",
+    "runtime_queue_state",
+    "queue_source",
+)
 _MSG_ID_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 _MSG_ID_WIDTH = 4
 _MSG_ID_SPACE = len(_MSG_ID_ALPHABET) ** _MSG_ID_WIDTH
@@ -87,11 +93,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             artifact TEXT NOT NULL DEFAULT '',
             in_reply_to TEXT NOT NULL DEFAULT '',
             metadata_json TEXT NOT NULL DEFAULT '{}',
-            created_at TEXT NOT NULL,
-            inject_status TEXT NOT NULL DEFAULT '',
-            turn_observed TEXT NOT NULL DEFAULT '',
-            runtime_queue_state TEXT NOT NULL DEFAULT '',
-            queue_source TEXT NOT NULL DEFAULT ''
+            created_at TEXT NOT NULL
         );
 
         CREATE INDEX IF NOT EXISTS idx_messages_msg_intent_seq
@@ -103,7 +105,58 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    _migrate_messages_table(conn)
     conn.commit()
+
+
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> tuple[str, ...]:
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return tuple(str(row["name"]) for row in rows)
+
+
+def _migrate_messages_table(conn: sqlite3.Connection) -> None:
+    columns = _table_columns(conn, "messages")
+    if not columns:
+        return
+    if not any(column in columns for column in _LEGACY_MESSAGE_RUNTIME_COLUMNS):
+        return
+
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute("DROP INDEX IF EXISTS idx_messages_msg_intent_seq")
+    conn.execute("ALTER TABLE messages RENAME TO messages_legacy")
+    conn.execute(
+        """
+        CREATE TABLE messages (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            msg_id TEXT NOT NULL DEFAULT '',
+            from_agent TEXT NOT NULL,
+            to_agent TEXT NOT NULL,
+            intent TEXT NOT NULL,
+            body TEXT NOT NULL DEFAULT '',
+            artifact TEXT NOT NULL DEFAULT '',
+            in_reply_to TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO messages (
+            seq, msg_id, from_agent, to_agent, intent, body, artifact,
+            in_reply_to, metadata_json, created_at
+        )
+        SELECT
+            seq, msg_id, from_agent, to_agent, intent, body, artifact,
+            in_reply_to, metadata_json, created_at
+        FROM messages_legacy
+        ORDER BY seq ASC
+        """
+    )
+    conn.execute("DROP TABLE messages_legacy")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_msg_intent_seq ON messages(msg_id, intent, seq)"
+    )
 
 
 def _row_to_event(row: sqlite3.Row) -> dict[str, object]:
@@ -130,14 +183,6 @@ def _row_to_event(row: sqlite3.Row) -> dict[str, object]:
         event["body"] = row["body"]
     if row["artifact"]:
         event["artifact"] = row["artifact"]
-    if row["inject_status"]:
-        event["injectStatus"] = row["inject_status"]
-    if row["turn_observed"]:
-        event["turnObserved"] = row["turn_observed"]
-    if row["runtime_queue_state"]:
-        event["runtimeQueueState"] = row["runtime_queue_state"]
-    if row["queue_source"]:
-        event["queueSource"] = row["queue_source"]
     return event
 
 
@@ -260,36 +305,6 @@ def write_send_event(
         )
         conn.commit()
         return EventWriteResult(seq=event_seq, msg_id=msg_id)
-
-
-def patch_event(workspace: str | Path, event_seq: int, **fields: object) -> None:
-    if not event_seq:
-        return
-    column_map = {
-        "msgId": "msg_id",
-        "injectStatus": "inject_status",
-        "turnObserved": "turn_observed",
-        "runtimeQueueState": "runtime_queue_state",
-        "queueSource": "queue_source",
-    }
-    assignments: list[str] = []
-    values: list[object] = []
-    for key, column in column_map.items():
-        value = fields.get(key)
-        if value is None:
-            continue
-        assignments.append(f"{column} = ?")
-        values.append(value)
-    if not assignments:
-        return
-    values.append(event_seq)
-    with _connect(workspace) as conn:
-        conn.execute(
-            f"UPDATE messages SET {', '.join(assignments)} WHERE seq = ?",
-            values,
-        )
-        conn.commit()
-
 
 def read_all_events(workspace: str | Path) -> list[dict[str, object]]:
     with _connect(workspace) as conn:

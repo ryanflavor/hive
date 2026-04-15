@@ -144,3 +144,19 @@ def test_inject_exception_uses_tracking_lost_wording(monkeypatch):
     assert len(sent) == 1
     assert "delivery tracking was lost" in sent[0][1]
     assert "Final delivery is unknown" in sent[0][1]
+
+
+def test_socket_alive_requires_matching_api_version(monkeypatch):
+    monkeypatch.setattr(
+        sidecar,
+        "_request_sidecar",
+        lambda *_args, **_kwargs: {"ok": True},
+    )
+    assert sidecar._socket_alive("/tmp/ws") is False
+
+    monkeypatch.setattr(
+        sidecar,
+        "_request_sidecar",
+        lambda *_args, **_kwargs: {"ok": True, "apiVersion": sidecar.SIDECAR_API_VERSION},
+    )
+    assert sidecar._socket_alive("/tmp/ws") is True

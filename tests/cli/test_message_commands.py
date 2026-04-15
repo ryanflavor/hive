@@ -10,10 +10,80 @@ FIXED_ID = bus.format_msg_id(1)
 def _patch_ack(monkeypatch):
     """Disable ACK resolution so tests don't need a real transcript."""
     monkeypatch.setattr(
-        "hive.cli._resolve_ack_baseline",
+        "hive.sidecar._resolve_ack_baseline",
         lambda _target: (_ for _ in ()).throw(RuntimeError("no transcript")),
         raising=False,
     )
+
+
+def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
+    if pending is None:
+        pending = {}
+
+    monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
+
+    def _resolve_live_agent(_team_name: str, agent_name: str):
+        agent = team_obj.get(agent_name)
+        if not agent.is_alive():
+            raise RuntimeError(f"agent '{agent_name}' is not alive")
+        return team_obj, agent
+
+    monkeypatch.setattr("hive.sidecar._resolve_live_agent", _resolve_live_agent)
+
+    def _request_send(
+        workspace: str,
+        *,
+        team: str,
+        sender_agent: str,
+        sender_pane: str,
+        target_agent: str,
+        body: str,
+        artifact: str = "",
+        reply_to: str = "",
+        wait: bool = False,
+    ):
+        from hive.sidecar import _send_payload
+
+        try:
+            return _send_payload(
+                workspace=workspace,
+                team_name=team,
+                pending=pending,
+                sender_agent=sender_agent,
+                sender_pane=sender_pane,
+                target_agent=target_agent,
+                body=body,
+                artifact=artifact,
+                reply_to=reply_to,
+                wait=wait,
+            )
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def _request_answer(
+        workspace: str,
+        *,
+        team: str,
+        sender_agent: str,
+        target_agent: str,
+        text: str,
+    ):
+        from hive.sidecar import _answer_payload
+
+        try:
+            return _answer_payload(
+                workspace=workspace,
+                team_name=team,
+                sender_agent=sender_agent,
+                target_agent=target_agent,
+                text=text,
+            )
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    monkeypatch.setattr("hive.sidecar.request_send", _request_send)
+    monkeypatch.setattr("hive.sidecar.request_answer", _request_answer)
+    return pending
 
 
 
@@ -47,8 +117,10 @@ def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home
             assert name == "gpt"
             return _FakeAgent()
 
-    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
+    team = _FakeTeam()
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
+    _patch_sidecar_requests(monkeypatch, team)
 
     result = runner.invoke(
         cli,
@@ -67,7 +139,7 @@ def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home
     assert payload["to"] == "gpt"
     assert payload["artifact"] == str(artifact)
     assert "summary" not in payload
-    assert payload["state"] == "unavailable"
+    assert payload["state"] == "pending"
     assert "injectStatus" not in payload
     assert "turnObserved" not in payload
     assert "followUp" not in payload
@@ -109,7 +181,9 @@ def test_send_requires_live_registered_agent(runner, configure_hive_home, monkey
         def get(self, _name: str):
             return _DeadAgent()
 
-    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
+    team = _FakeTeam()
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
+    _patch_sidecar_requests(monkeypatch, team)
 
     result = runner.invoke(cli, ["send", "gpt", "hello"])
     assert result.exit_code != 0
@@ -290,9 +364,11 @@ def test_send_ack_confirmed(runner, configure_hive_home, monkeypatch, tmp_path):
         def get(self, name: str):
             return _FakeAgent()
 
-    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
-    monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
+    team = _FakeTeam()
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
+    monkeypatch.setattr("hive.sidecar._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
+    _patch_sidecar_requests(monkeypatch, team)
 
     result = runner.invoke(cli, ["send", "gpt", "test", "--wait"])
 
@@ -330,10 +406,12 @@ def test_send_ack_unconfirmed_on_timeout(runner, configure_hive_home, monkeypatc
         def get(self, name: str):
             return _FakeAgent()
 
-    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
-    monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
+    team = _FakeTeam()
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
+    monkeypatch.setattr("hive.sidecar._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
     monkeypatch.setattr("hive.adapters.base.wait_for_id_in_transcript", lambda path, message_id, baseline, timeout=45.0: False)
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
+    _patch_sidecar_requests(monkeypatch, team)
 
     result = runner.invoke(cli, ["send", "gpt", "test", "--wait"])
 
@@ -369,14 +447,16 @@ def test_send_ack_skipped_when_transcript_unresolvable(runner, configure_hive_ho
         def get(self, name: str):
             return _FakeAgent()
 
-    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
+    team = _FakeTeam()
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
+    _patch_sidecar_requests(monkeypatch, team)
 
     result = runner.invoke(cli, ["send", "gpt", "test"])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["state"] == "unavailable"
+    assert payload["state"] == "pending"
     assert "injectStatus" not in payload
     assert "followUp" not in payload
 
@@ -408,20 +488,16 @@ def test_send_async_pending_enqueues_sidecar(runner, configure_hive_home, monkey
         def get(self, name: str):
             return _FakeAgent()
 
-    enqueued = []
-    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
-    monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
+    pending = {}
+    team = _FakeTeam()
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
+    monkeypatch.setattr("hive.sidecar._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
     monkeypatch.setattr(
         "hive.sidecar.detect_runtime_queue_state",
         lambda **_kw: {"state": "not_queued", "source": "capture", "observedAt": "2026-04-14T00:00:00Z"},
     )
-    def _enqueue_pending(*a, **kw):
-        enqueued.append(a)
-        return True
-
-    monkeypatch.setattr("hive.sidecar.enqueue_pending", _enqueue_pending)
-    monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
+    _patch_sidecar_requests(monkeypatch, team, pending=pending)
 
     result = runner.invoke(cli, ["send", "gpt", "test"])
 
@@ -430,7 +506,10 @@ def test_send_async_pending_enqueues_sidecar(runner, configure_hive_home, monkey
     assert payload["state"] == "pending"
     assert "runtimeQueueState" not in payload
     assert "followUp" not in payload
-    assert len(enqueued) == 1  # sidecar was asked to track this message
+    assert len(pending) == 1
+    record = pending[FIXED_ID]
+    assert record["runtimeQueueState"] == "unknown"
+    assert record["queueSource"] == "capture"
 
 
 def test_send_async_queued_reports_runtime_queue_state(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -460,20 +539,16 @@ def test_send_async_queued_reports_runtime_queue_state(runner, configure_hive_ho
         def get(self, name: str):
             return _FakeAgent()
 
-    enqueued: list[tuple[tuple[object, ...], dict[str, object]]] = []
-    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
-    monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
+    pending = {}
+    team = _FakeTeam()
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
+    monkeypatch.setattr("hive.sidecar._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
     monkeypatch.setattr(
         "hive.sidecar.detect_runtime_queue_state",
         lambda **_kw: {"state": "queued", "source": "capture", "observedAt": "2026-04-14T00:00:00Z"},
     )
-    def _enqueue_pending(*a, **kw):
-        enqueued.append((a, kw))
-        return True
-
-    monkeypatch.setattr("hive.sidecar.enqueue_pending", _enqueue_pending)
-    monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
+    _patch_sidecar_requests(monkeypatch, team, pending=pending)
 
     result = runner.invoke(cli, ["send", "gpt", "test"])
 
@@ -481,15 +556,15 @@ def test_send_async_queued_reports_runtime_queue_state(runner, configure_hive_ho
     payload = json.loads(result.output)
     assert payload["state"] == "queued"
     assert "runtimeQueueState" not in payload
-    assert len(enqueued) == 1
-    assert enqueued[0][1]["runtime_queue_state"] == "queued"
-    assert enqueued[0][1]["queue_source"] == "capture"
-    assert enqueued[0][1]["queue_probe_text"] == "test"
+    assert len(pending) == 1
+    assert pending[FIXED_ID]["runtimeQueueState"] == "queued"
+    assert pending[FIXED_ID]["queueSource"] == "capture"
+    assert pending[FIXED_ID]["queueProbeText"] == "test"
 
     send_events = [event for event in bus.read_all_events(workspace) if event.get("intent") == "send"]
     assert len(send_events) == 1
-    assert send_events[0]["runtimeQueueState"] == "queued"
-    assert send_events[0]["queueSource"] == "capture"
+    assert "runtimeQueueState" not in send_events[0]
+    assert "queueSource" not in send_events[0]
     assert send_events[0]["msgId"] == FIXED_ID
 
 
@@ -537,27 +612,27 @@ def test_send_grace_window_waits_for_queue_before_falling_back(
         ]
     )
 
-    enqueued: list[tuple[tuple[object, ...], dict[str, object]]] = []
-    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
-    monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
+    pending = {}
+    team = _FakeTeam()
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
+    monkeypatch.setattr("hive.sidecar._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
-    monkeypatch.setattr("hive.cli.time.monotonic", _mono)
-    monkeypatch.setattr("hive.cli.time.sleep", _sleep)
+    monkeypatch.setattr("hive.sidecar.time.monotonic", _mono)
+    monkeypatch.setattr("hive.sidecar.time.sleep", _sleep)
     monkeypatch.setattr(
         "hive.adapters.base.transcript_has_id_in_new_user_turn",
         lambda *_args, **_kw: False,
     )
     monkeypatch.setattr("hive.sidecar.detect_runtime_queue_state", lambda **_kw: next(probe_states))
-    monkeypatch.setattr("hive.sidecar.enqueue_pending", lambda *a, **kw: enqueued.append((a, kw)))
-    monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
+    _patch_sidecar_requests(monkeypatch, team, pending=pending)
 
     result = runner.invoke(cli, ["send", "gpt", "test"])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["state"] == "queued"
-    assert len(enqueued) == 1
-    assert enqueued[0][1]["runtime_queue_state"] == "queued"
+    assert len(pending) == 1
+    assert pending[FIXED_ID]["runtimeQueueState"] == "queued"
 
 
 def test_send_inject_failure_no_sidecar(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -587,9 +662,11 @@ def test_send_inject_failure_no_sidecar(runner, configure_hive_home, monkeypatch
         def get(self, name: str):
             return _BrokenAgent()
 
-    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
-    monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
+    team = _FakeTeam()
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
+    monkeypatch.setattr("hive.sidecar._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
+    _patch_sidecar_requests(monkeypatch, team)
 
     result = runner.invoke(cli, ["send", "gpt", "test"])
 
@@ -640,10 +717,12 @@ def _gate_test_setup(monkeypatch, tmp_path, transcript_records=None):
         def get(self, _name: str):
             return _FakeAgent()
 
-    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
-    monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, transcript.stat().st_size), raising=False)
+    team = _FakeTeam()
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
+    monkeypatch.setattr("hive.sidecar._resolve_ack_baseline", lambda _target: (transcript, transcript.stat().st_size), raising=False)
     monkeypatch.setattr("hive.adapters.base.wait_for_id_in_transcript", lambda path, message_id, baseline, timeout=45.0: False)
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
+    _patch_sidecar_requests(monkeypatch, team)
 
     return workspace, transcript, sent
 
@@ -694,14 +773,16 @@ def test_gate_fail_open_no_transcript(runner, configure_hive_home, monkeypatch, 
         def get(self, _name: str):
             return _FakeAgent()
 
-    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
+    team = _FakeTeam()
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
+    _patch_sidecar_requests(monkeypatch, team)
 
     result = runner.invoke(cli, ["send", "gpt", "hello"])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["state"] == "unavailable"
+    assert payload["state"] == "pending"
     assert "injectStatus" not in payload
 
 
@@ -737,9 +818,11 @@ def test_answer_when_not_waiting_fails(runner, configure_hive_home, monkeypatch,
         def get(self, _name: str):
             return _FakeAgent()
 
-    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
-    monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
+    team = _FakeTeam()
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
+    monkeypatch.setattr("hive.sidecar._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "orch")
+    _patch_sidecar_requests(monkeypatch, team)
 
     result = runner.invoke(cli, ["answer", "gpt", "yes"])
 
@@ -794,10 +877,12 @@ def test_answer_when_waiting_injects_text(runner, configure_hive_home, monkeypat
             + json.dumps({"type": "user", "message": {"role": "user", "content": "yes"}}) + "\n"
         )
 
-    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
-    monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
+    team = _FakeTeam()
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
+    monkeypatch.setattr("hive.sidecar._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "orch")
     monkeypatch.setattr("hive.agent._submit_interactive_text", fake_submit)
+    _patch_sidecar_requests(monkeypatch, team)
 
     result = runner.invoke(cli, ["answer", "gpt", "yes"])
 

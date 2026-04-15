@@ -143,7 +143,7 @@ def _discover_tmux_binding() -> dict[str, str]:
     window_target = tmux.get_current_window_target() or ""
     session_name = tmux.get_current_session_name() or ""
     workspace = tmux.get_window_option(window_target, "hive-workspace") if window_target else ""
-    return {
+    payload = {
         "team": team_name,
         "workspace": workspace or "",
         "agent": agent_name,
@@ -152,6 +152,7 @@ def _discover_tmux_binding() -> dict[str, str]:
         "tmuxSession": session_name,
         "tmuxWindow": window_target,
     }
+    return payload
 
 
 def _default_team() -> str | None:
@@ -283,76 +284,68 @@ def _read_state(workspace: str, key: str, required: bool = True) -> str:
     return path.read_text().strip()
 
 
-def _probe_member_input_state(member: dict[str, object]) -> None:
-    """Annotate a member dict with runtime input state by running a gate check.
+def _augment_current_payload_with_runtime(payload: dict[str, object], t: Team) -> dict[str, object]:
+    if not payload.get("agent"):
+        return payload
+    from .sidecar import ensure_sidecar, request_team_runtime
 
-    Adds ``inputState``, ``inputReason``, and optionally ``pendingQuestion``.
-    Only probes ``role=agent`` members that are alive.
-    """
-    role = str(member.get("role", ""))
-    if role != "agent":
-        return
+    ws = _resolve_workspace(t, required=False)
+    if not ws:
+        return payload
+    ensure_sidecar(str(ws), t.name, t.tmux_window)
+    runtime = request_team_runtime(str(ws), team=t.name)
+    if not runtime or runtime.get("ok") is False:
+        return payload
+    members = runtime.get("members")
+    if not isinstance(members, dict):
+        return payload
+    member_runtime = members.get(str(payload["agent"]))
+    if not isinstance(member_runtime, dict):
+        return payload
+    model = member_runtime.get("model")
+    if model:
+        payload["model"] = model
+    return payload
 
-    alive = bool(member.get("alive"))
-    if not alive:
-        member["inputState"] = "offline"
-        member["inputReason"] = "pane_dead"
-        return
 
-    pane_id = str(member.get("pane", ""))
-    if not pane_id:
-        member["inputState"] = "unknown"
-        member["inputReason"] = "no_pane"
-        return
+def _augment_team_payload_with_runtime(t: Team, payload: dict[str, object]) -> dict[str, object]:
+    from .sidecar import ensure_sidecar, request_team_runtime
 
-    try:
-        profile = detect_profile_for_pane(pane_id)
-        if not profile:
-            member["inputState"] = "unknown"
-            member["inputReason"] = "no_session"
-            return
-
-        from . import adapters
-        adapter = adapters.get(profile.name)
-        if not adapter:
-            member["inputState"] = "unknown"
-            member["inputReason"] = "no_session"
-            return
-
-        session_id = adapter.resolve_current_session_id(pane_id)
-        if not session_id:
-            member["inputState"] = "unknown"
-            member["inputReason"] = "no_session"
-            return
-
-        cwd_hint = tmux.display_value(pane_id, "#{pane_current_path}")
-        transcript = adapter.find_session_file(session_id, cwd=cwd_hint)
-        if not transcript:
-            member["inputState"] = "unknown"
-            member["inputReason"] = "transcript_missing"
-            return
-
-        from .adapters.base import check_input_gate, extract_pending_question
-        result = check_input_gate(transcript)
-        if result.status == "waiting":
-            member["inputState"] = "waiting_user"
-            member["inputReason"] = "ask_pending"
-            question = extract_pending_question(transcript)
-            if question:
-                member["pendingQuestion"] = question
-        elif result.status == "clear":
-            member["inputState"] = "ready"
-            member["inputReason"] = ""
-        else:
-            member["inputState"] = "unknown"
-            member["inputReason"] = result.reason or "read_error"
-    except Exception:
-        member["inputState"] = "unknown"
-        member["inputReason"] = "read_error"
+    ws = _resolve_workspace(t, required=False)
+    if not ws:
+        return payload
+    ensure_sidecar(str(ws), t.name, t.tmux_window)
+    runtime = request_team_runtime(str(ws), team=t.name)
+    if not runtime or runtime.get("ok") is False:
+        return payload
+    members_runtime = runtime.get("members")
+    if not isinstance(members_runtime, dict):
+        return payload
+    for member in list(payload.get("members", [])):
+        name = str(member.get("name", ""))
+        runtime_fields = members_runtime.get(name)
+        if not isinstance(runtime_fields, dict):
+            continue
+        for key in (
+            "alive",
+            "model",
+            "sessionId",
+            "inputState",
+            "inputReason",
+            "pendingQuestion",
+        ):
+            value = runtime_fields.get(key)
+            if value in ("", None):
+                continue
+            member[key] = value
+    needs_answer = runtime.get("needsAnswer")
+    if isinstance(needs_answer, list) and needs_answer:
+        payload["needsAnswer"] = needs_answer
+    return payload
 
 
 def _team_status_payload(t: Team) -> dict[str, object]:
-    payload = t.status()
+    payload = _augment_team_payload_with_runtime(t, t.status())
     discovered = _discover_tmux_binding() if tmux.is_inside_tmux() else {}
     if discovered.get("team") == t.name and discovered.get("agent"):
         payload["self"] = str(discovered["agent"])
@@ -360,17 +353,6 @@ def _team_status_payload(t: Team) -> dict[str, object]:
         ctx = hive_context.load_current_context()
         if ctx.get("team") == t.name and ctx.get("agent"):
             payload["self"] = str(ctx["agent"])
-
-    # Probe runtime input state for each agent member.
-    needs_answer: list[str] = []
-    for member in list(payload.get("members", [])):
-        _probe_member_input_state(member)
-        if member.get("inputState") == "waiting_user":
-            name = str(member.get("name", ""))
-            if name:
-                needs_answer.append(name)
-    if needs_answer:
-        payload["needsAnswer"] = needs_answer
 
     return payload
 
@@ -395,115 +377,6 @@ def _resolve_target_pane() -> str:
     _fail("cannot determine target pane (run inside tmux)")
     return ""
 
-def _patch_event(workspace: str | Path, event_seq: int, **fields: object) -> None:
-    bus.patch_event(workspace, event_seq, **fields)
-
-
-def _build_queue_probe_text(body: str, *, limit: int = 48) -> str:
-    """Build a short body-derived needle for runtime queue detection."""
-    text = body.strip()
-    if not text:
-        return ""
-    for line in text.splitlines():
-        collapsed = " ".join(line.split())
-        if collapsed:
-            return collapsed[:limit]
-    return " ".join(text.split())[:limit]
-
-
-def _observe_send_grace(
-    *,
-    pane_id: str,
-    transcript_path: Path,
-    message_id: str,
-    baseline: int,
-    queue_probe_text: str,
-    cli_name: str,
-) -> tuple[str, dict[str, str]]:
-    """Observe a short grace window before handing delivery off to the sidecar."""
-    from .adapters.base import transcript_has_id_in_new_user_turn
-    from .sidecar import detect_runtime_queue_state
-
-    deadline = time.monotonic() + _SEND_GRACE_TIMEOUT
-    last_probe: dict[str, str] = {"state": "unknown", "source": "none", "observedAt": ""}
-
-    while True:
-        if transcript_has_id_in_new_user_turn(transcript_path, message_id, baseline):
-            return "confirmed", last_probe
-
-        last_probe = detect_runtime_queue_state(
-            pane_id=pane_id,
-            message_id=message_id,
-            queue_probe_text=queue_probe_text,
-            transcript_path=str(transcript_path),
-            baseline=baseline,
-            cli_name=cli_name,
-        )
-        if last_probe.get("state") == "queued":
-            return "queued", last_probe
-
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return "pending", last_probe
-        time.sleep(min(_SEND_GRACE_POLL_INTERVAL, remaining))
-
-
-def _present_send_state(*, inject_status: str, turn_observed: str, runtime_queue_state: str) -> str:
-    """Collapse internal delivery details into one default send state."""
-    if inject_status == "failed":
-        return "failed"
-    if turn_observed == "confirmed":
-        return "confirmed"
-    if turn_observed == "unconfirmed":
-        return "unconfirmed"
-    if runtime_queue_state == "queued":
-        return "queued"
-    if turn_observed == "unavailable":
-        return "unavailable"
-    return "pending"
-
-
-def _present_delivery_state(
-    *,
-    inject_status: str,
-    turn_observed: str,
-    runtime_queue_state: str,
-    observation_result: str = "",
-) -> str:
-    """Collapse persisted delivery detail into one primary state."""
-    if inject_status == "failed":
-        return "failed"
-    if observation_result:
-        return observation_result
-    if turn_observed == "confirmed":
-        return "confirmed"
-    if turn_observed == "unconfirmed":
-        return "unconfirmed"
-    if runtime_queue_state == "queued":
-        return "queued"
-    if turn_observed == "unavailable":
-        return "unavailable"
-    return "pending"
-
-
-def _delivery_guidance(state: str) -> dict[str, str] | None:
-    if state == "failed":
-        return {
-            "meaning": "Local submit attempt failed before delivery tracking began.",
-            "recommendedAction": "retry",
-        }
-    if state == "tracking_lost":
-        return {
-            "meaning": "Delivery tracking was lost. Final delivery is unknown.",
-            "recommendedAction": "investigate",
-        }
-    if state == "unconfirmed":
-        return {
-            "meaning": "Delivery was not confirmed before the timeout window elapsed.",
-            "recommendedAction": "cautious_retry",
-        }
-    return None
-
 
 def _resolve_artifact_path(artifact: str, workspace: str | Path = "") -> str:
     if not artifact:
@@ -525,212 +398,12 @@ def _resolve_artifact_path(artifact: str, workspace: str | Path = "") -> str:
     return resolved_artifact
 
 
-def _resolve_ack_baseline(target: Agent) -> tuple[Path, int]:
-    """Locate the target agent's transcript and snapshot its current size.
-
-    Returns (transcript_path, baseline_bytes).
-    Raises RuntimeError if any step fails.
-    """
-    from . import adapters
-    from .adapters.base import get_transcript_baseline
-
-    profile = detect_profile_for_pane(target.pane_id)
-    if not profile:
-        raise RuntimeError("cannot detect CLI profile for target pane")
-
-    adapter = adapters.get(profile.name)
-    if not adapter:
-        raise RuntimeError(f"no adapter for CLI '{profile.name}'")
-
-    session_id = adapter.resolve_current_session_id(target.pane_id)
-    if not session_id:
-        raise RuntimeError("cannot resolve session id for target pane")
-
-    cwd_hint = tmux.display_value(target.pane_id, "#{pane_current_path}")
-    transcript = adapter.find_session_file(session_id, cwd=cwd_hint)
-    if not transcript:
-        raise RuntimeError(f"transcript file not found for session {session_id}")
-
-    return transcript, get_transcript_baseline(transcript)
-
-
-def _check_send_gate(target: Agent, transcript_path: Path | None) -> str:
-    """Check if the target agent can accept input. Returns gate status string.
-
-    Blocks with an error when the target is waiting for a user answer.
-    Use ``hive answer`` to respond to pending questions instead.
-    """
-    if transcript_path is None:
-        return "skipped"
-    from .adapters.base import check_input_gate
-    result = check_input_gate(transcript_path)
-    if result.status == "waiting":
-        _fail(
-            f"agent '{target.name}' is waiting for a user answer — "
-            "there is no prompt input to receive messages. "
-            "Use `hive answer` to respond, or answer in the target pane directly."
-        )
-    return result.status  # "clear" | "unknown"
-
-
-def _send_recorded_message(
-    *,
-    team: Team,
-    sender: str,
-    to_agent: str,
-    body: str,
-    artifact: str = "",
-    reply_to: str = "",
-    wait: bool = False,
-) -> dict[str, object]:
-    ws = _resolve_workspace(team, required=True)
-    target = _resolve_live_agent(team, to_agent)
-    resolved_artifact = _resolve_artifact_path(artifact, workspace=ws)
-    normalized_body = body.strip()
-
-    # ACK preparation — resolve transcript baseline before injection.
-    message_id = ""
-    transcript_path: Path | None = None
-    baseline: int = 0
-    try:
-        transcript_path, baseline = _resolve_ack_baseline(target)
-    except Exception:
-        transcript_path = None
-
-    # Send gate — block if target is waiting for a user answer.
-    gate_status = _check_send_gate(target, transcript_path)
-
-    # Write event BEFORE pane injection so the collaboration log is never
-    # lost, even if tmux send-keys fails.
-    event = bus.write_send_event(
-        ws,
-        from_agent=sender,
-        to_agent=to_agent,
-        body=normalized_body,
-        artifact=resolved_artifact,
-        reply_to=reply_to,
-    )
-    event_seq = event.seq
-    message_id = event.msg_id
-
-    envelope = _format_hive_envelope(
-        from_agent=sender,
-        to_agent=to_agent,
-        body=body,
-        artifact=resolved_artifact,
-        message_id=message_id,
-        reply_to=reply_to,
-    )
-
-    # Inject into target pane.
-    inject_status = "submitted"
-    try:
-        target.send(envelope)
-    except Exception:
-        inject_status = "failed"
-
-    # Observation — async by default, blocking with --wait.
-    turn_observed: str
-    runtime_queue_state = "unknown"
-    probe: dict[str, str] = {"source": "none"}
-
-    if inject_status == "failed":
-        turn_observed = "unavailable"
-    elif transcript_path is None:
-        turn_observed = "unavailable"
-    elif wait:
-        # Blocking mode: poll transcript in-process (full timeout).
-        from .adapters.base import wait_for_id_in_transcript
-        if wait_for_id_in_transcript(transcript_path, message_id, baseline):
-            turn_observed = "confirmed"
-        else:
-            turn_observed = "unconfirmed"
-    else:
-        # Grace window: short in-process wait for confirmed or queued,
-        # then hand off to sidecar if still unresolved.
-        from .sidecar import enqueue_pending, ensure_sidecar
-        sender_pane = tmux.get_current_pane_id() or ""
-        profile = detect_profile_for_pane(target.pane_id)
-        queue_probe_text = _build_queue_probe_text(normalized_body)
-        grace_state, probe = _observe_send_grace(
-            pane_id=target.pane_id,
-            transcript_path=transcript_path,
-            message_id=message_id,
-            baseline=baseline,
-            queue_probe_text=queue_probe_text,
-            cli_name=profile.name if profile else "",
-        )
-        if grace_state == "confirmed":
-            turn_observed = "confirmed"
-        else:
-            if grace_state == "queued":
-                runtime_queue_state = "queued"
-            ensure_sidecar(str(ws), team.name, team.tmux_window)
-            tracked = enqueue_pending(
-                str(ws), message_id, sender, sender_pane, to_agent,
-                str(transcript_path), baseline,
-                target_pane=target.pane_id,
-                target_cli=profile.name if profile else "",
-                runtime_queue_state=runtime_queue_state,
-                queue_source=probe.get("source", "none"),
-                queue_probe_text=queue_probe_text,
-            )
-            turn_observed = "pending" if tracked else "unavailable"
-
-    # Persist delivery metadata back into the send event.
-    _patch_event(
-        ws,
-        event_seq,
-        injectStatus=inject_status,
-        turnObserved=turn_observed,
-        runtimeQueueState=runtime_queue_state if turn_observed == "pending" else None,
-        queueSource=probe.get("source", "none") if turn_observed == "pending" else None,
-    )
-
-    payload: dict[str, object] = {
-        "from": sender,
-        "to": to_agent,
-        "msgId": message_id,
-        "artifact": resolved_artifact,
-        "state": _present_send_state(
-            inject_status=inject_status,
-            turn_observed=turn_observed,
-            runtime_queue_state=runtime_queue_state,
-        ),
-    }
-    return payload
-
-
 def _status_migration_failure(command_name: str) -> None:
     _fail(
         f"`hive {command_name}` was removed; use `hive send` to send messages, "
         "`hive answer` to respond to pending questions, "
         "and `hive team` to inspect runtime input state"
     )
-
-
-def _format_hive_envelope(
-    *,
-    from_agent: str,
-    to_agent: str,
-    body: str,
-    artifact: str = "",
-    message_id: str = "",
-    reply_to: str = "",
-) -> str:
-    attrs: list[tuple[str, str]] = [
-        ("from", from_agent),
-        ("to", to_agent),
-    ]
-    if message_id:
-        attrs.append(("msgId", message_id))
-    if reply_to:
-        attrs.append(("reply-to", reply_to))
-    if artifact:
-        attrs.append(("artifact", artifact))
-    header = "<HIVE " + " ".join(f"{key}={value}" for key, value in attrs) + ">"
-    payload = body.strip() if body.strip() else "(no message)"
-    return f"{header}\n{payload}\n</HIVE>"
 
 
 def _tmux_runtime_required(argv: list[str]) -> bool:
@@ -870,6 +543,9 @@ def current_cmd():
     _gc_dead_teams()
     discovered = _discover_tmux_binding()
     if discovered.get("team"):
+        _, t = _resolve_scoped_team(str(discovered.get("team")), required=False)
+        if t is not None:
+            discovered = _augment_current_payload_with_runtime(discovered, t)
         pane_id = tmux.get_current_pane_id() or ""
         if pane_id:
             hive_context.save_context_for_pane(
@@ -1291,14 +967,13 @@ def delete(name: str, workspace: str, keep_workspace: bool, delete_workspace: bo
 @click.argument("agent_name")
 @click.option("--model", "-m", default="", help="Model ID")
 @click.option("--prompt", "-p", default="", help="Initial prompt (typed into TUI after startup)")
-@click.option("--color", "-c", default="", help="Pane border color")
 @click.option("--cwd", default="", help="Working directory")
 @click.option("--skill", default="hive", help="Base skill to load after startup ('none' to skip)")
 @click.option("--workflow", default="", help="Workflow skill to load after the base skill")
 @click.option("--env", "-e", multiple=True, help="Extra env vars (KEY=VALUE, repeatable)")
 @click.option("--cli", "cli_name", type=click.Choice(["droid", "claude", "codex"]), default=None, help="Agent CLI to spawn (default: same as current pane)")
 def spawn(agent_name: str, model: str, prompt: str,
-          color: str, cwd: str, skill: str, workflow: str, env: tuple[str, ...], cli_name: str | None):
+          cwd: str, skill: str, workflow: str, env: tuple[str, ...], cli_name: str | None):
     """Spawn an agent pane."""
     team_name, t = _resolve_scoped_team(None, required=True)
     assert team_name is not None and t is not None
@@ -1314,7 +989,6 @@ def spawn(agent_name: str, model: str, prompt: str,
             agent_name,
             model=model,
             prompt=prompt,
-            color=color,
             cwd=cwd,
             skill=skill,
             workflow=workflow,
@@ -1456,15 +1130,27 @@ def send(
     team_name, t = _resolve_scoped_team(None, required=True)
     assert team_name is not None and t is not None
     sender = _resolve_sender(None)
-    payload = _send_recorded_message(
-        team=t,
-        sender=sender,
-        to_agent=to_agent,
+    ws = _resolve_workspace(t, required=True)
+    resolved_artifact = _resolve_artifact_path(artifact, workspace=ws)
+    from .sidecar import ensure_sidecar, request_send
+
+    ensure_sidecar(str(ws), t.name, t.tmux_window)
+    payload = request_send(
+        str(ws),
+        team=t.name,
+        sender_agent=sender,
+        sender_pane=tmux.get_current_pane_id() or "",
+        target_agent=to_agent,
         body=body,
-        artifact=artifact,
+        artifact=resolved_artifact,
         reply_to=reply_to,
         wait=wait,
     )
+    if not payload:
+        _fail("sidecar unavailable")
+    if payload.get("ok") is False:
+        _fail(str(payload.get("error", "send failed")))
+    payload.pop("ok", None)
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
@@ -1480,67 +1166,22 @@ def answer(agent_name: str, text: str):
     team_name, t = _resolve_scoped_team(None, required=True)
     assert team_name is not None and t is not None
     sender = _resolve_sender(None)
-    target = _resolve_live_agent(t, agent_name)
     ws = _resolve_workspace(t, required=True)
+    from .sidecar import ensure_sidecar, request_answer
 
-    # Gate check — require waiting state.
-    transcript_path: Path | None = None
-    try:
-        transcript_path, _ = _resolve_ack_baseline(target)
-    except Exception:
-        pass
-
-    if transcript_path is None:
-        _fail(f"cannot detect session transcript for agent '{agent_name}'")
-
-    from .adapters.base import check_input_gate, extract_pending_question
-    gate = check_input_gate(transcript_path)
-    if gate.status != "waiting":
-        _fail(
-            f"agent '{agent_name}' is not waiting for an answer "
-            f"(inputState: {gate.status})"
-        )
-
-    # Show what question we're answering.
-    pending = extract_pending_question(transcript_path)
-
-    # Write event before injection.
-    bus.write_event(
-        ws,
-        from_agent=sender,
-        to_agent=agent_name,
-        intent="answer",
-        body=text.strip(),
+    ensure_sidecar(str(ws), t.name, t.tmux_window)
+    payload = request_answer(
+        str(ws),
+        team=t.name,
+        sender_agent=sender,
+        target_agent=agent_name,
+        text=text,
     )
-
-    # Inject the answer text.
-    from .agent import _submit_interactive_text
-    _submit_interactive_text(target.pane_id, text, target.cli)
-
-    # ACK: wait for gate to clear (question answered → new user turn appears).
-    ack_status = "unconfirmed"
-    import time as _time
-    deadline = _time.monotonic() + 15.0
-    while _time.monotonic() < deadline:
-        _time.sleep(0.5)
-        result = check_input_gate(transcript_path)
-        if result.status == "clear":
-            ack_status = "confirmed"
-            break
-        if result.status == "unknown":
-            # Transient read error or file rotation — don't treat as confirmed.
-            continue
-
-    payload: dict[str, object] = {
-        "from": sender,
-        "to": agent_name,
-        "ack": ack_status,
-    }
-    if pending:
-        payload["question"] = pending
-    if text.strip():
-        payload["answer"] = text.strip()
-
+    if not payload:
+        _fail("sidecar unavailable")
+    if payload.get("ok") is False:
+        _fail(str(payload.get("error", "answer failed")))
+    payload.pop("ok", None)
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
@@ -1551,71 +1192,15 @@ def delivery(message_id: str):
     _, t = _resolve_scoped_team(None, required=True)
     assert t is not None
     ws = _resolve_workspace(t, required=True)
+    from .sidecar import ensure_sidecar, request_delivery
 
-    from .observer import find_observation
-    from .sidecar import check_stale_sidecar
-
-    send_event = bus.find_send_event(ws, message_id)
-
-    if send_event is None:
-        _fail(f"no send event found with msgId '{message_id}'")
-
-    persisted_inject = send_event.get("injectStatus", "unknown")
-    persisted_turn = send_event.get("turnObserved", "unknown")
-    runtime_queue_state = send_event.get("runtimeQueueState", "unknown")
-    queue_source = send_event.get("queueSource", "")
-
-    obs = find_observation(str(ws), message_id)
-    if obs is None and persisted_turn == "pending":
-        stale_result = check_stale_sidecar(str(ws), message_id)
-        if stale_result is not None:
-            obs = find_observation(str(ws), message_id)
-
-    if obs is not None:
-        result = obs["metadata"]["result"]
-        observed_at = obs["metadata"].get("observedAt", "")
-        payload: dict[str, object] = {
-            "msgId": message_id,
-            "to": send_event.get("to", ""),
-            "state": _present_delivery_state(
-                inject_status=persisted_inject,
-                turn_observed=persisted_turn,
-                runtime_queue_state=runtime_queue_state,
-                observation_result=result,
-            ),
-            "injectStatus": persisted_inject,
-            "turnObserved": result,
-        }
-        if runtime_queue_state != "unknown":
-            payload["runtimeQueueState"] = runtime_queue_state
-        if queue_source:
-            payload["queueSource"] = queue_source
-        if observed_at:
-            payload["observedAt"] = observed_at
-        guidance = _delivery_guidance(str(payload["state"]))
-        if guidance is not None:
-            payload.update(guidance)
-        click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
-        return
-
-    payload = {
-        "msgId": message_id,
-        "to": send_event.get("to", ""),
-        "state": _present_delivery_state(
-            inject_status=persisted_inject,
-            turn_observed=persisted_turn,
-            runtime_queue_state=runtime_queue_state,
-        ),
-        "injectStatus": persisted_inject,
-        "turnObserved": persisted_turn,
-    }
-    if runtime_queue_state != "unknown":
-        payload["runtimeQueueState"] = runtime_queue_state
-    if queue_source:
-        payload["queueSource"] = queue_source
-    guidance = _delivery_guidance(str(payload["state"]))
-    if guidance is not None:
-        payload.update(guidance)
+    ensure_sidecar(str(ws), t.name, t.tmux_window)
+    payload = request_delivery(str(ws), message_id)
+    if not payload:
+        _fail("sidecar unavailable")
+    if payload.get("ok") is False:
+        _fail(str(payload.get("error", "delivery lookup failed")))
+    payload.pop("ok", None)
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
@@ -1627,68 +1212,15 @@ def inbox(ack: bool):
     assert t is not None
     ws = _resolve_workspace(t, required=True)
     self_name = _resolve_sender(None)
+    from .sidecar import ensure_sidecar, request_inbox
 
-    cursor = bus.read_cursor(ws, self_name)
-    events = bus.read_events_with_ns(ws)
-
-    # Collect message IDs sent by self (for observation matching)
-    my_sent_ids: set[str] = set()
-    for _ns, ev in events:
-        if ev.get("from") == self_name and ev.get("intent") == "send" and ev.get("msgId"):
-            my_sent_ids.add(ev["msgId"])
-
-    # Filter unread events relevant to self
-    unread: list[dict[str, object]] = []
-    latest_ns = cursor
-    for ns, ev in events:
-        if ns <= cursor:
-            continue
-        latest_ns = max(latest_ns, ns)
-        # Messages sent TO self
-        if ev.get("to") == self_name:
-            unread.append(ev)
-            continue
-        # Observation events for messages self sent
-        if (
-            ev.get("intent") == "observation"
-            and isinstance(ev.get("metadata"), dict)
-            and ev["metadata"].get("msgId") in my_sent_ids
-        ):
-            result = ev["metadata"].get("result", "")
-            if result in ("confirmed", "unconfirmed", "tracking_lost"):
-                unread.append(ev)
-            continue
-
-    # Detect stale sidecar for pending sent messages with no observation yet.
-    from .observer import find_observation
-    from .sidecar import check_stale_sidecar
-    for _ns, ev in events:
-        if ev.get("from") != self_name or ev.get("intent") != "send":
-            continue
-        if _ns <= cursor:
-            continue
-        msg_id = ev.get("msgId", "")
-        if not msg_id or ev.get("turnObserved") != "pending":
-            continue
-        obs = find_observation(str(ws), msg_id)
-        if obs is None:
-            stale_result = check_stale_sidecar(str(ws), msg_id)
-            if stale_result is not None:
-                obs = find_observation(str(ws), msg_id)
-                if obs is not None:
-                    unread.append(obs)
-
-    # Acknowledge to the actual latest event (including any newly written observations).
-    actual_latest = bus.get_latest_event_ns(ws)
-    final_ns = max(latest_ns, actual_latest)
-    if ack and final_ns > cursor:
-        bus.write_cursor(ws, self_name, final_ns)
-
-    payload = {
-        "agent": self_name,
-        "unread": len(unread),
-        "messages": unread,
-    }
+    ensure_sidecar(str(ws), t.name, t.tmux_window)
+    payload = request_inbox(str(ws), agent_name=self_name, ack=ack)
+    if not payload:
+        _fail("sidecar unavailable")
+    if payload.get("ok") is False:
+        _fail(str(payload.get("error", "inbox failed")))
+    payload.pop("ok", None)
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
@@ -1702,62 +1234,16 @@ def doctor(agent_name: str):
     self_name = _resolve_sender(None)
 
     target_name = agent_name or self_name
+    from .sidecar import ensure_sidecar, request_doctor
 
-    # Find target agent
-    try:
-        target = t.get(target_name)
-    except KeyError:
-        _fail(f"agent '{target_name}' not registered in team '{t.name}'")
-
-    alive = target.is_alive()
-
-    diag: dict[str, object] = {
-        "agent": target_name,
-        "team": t.name,
-        "pane": target.pane_id,
-        "alive": alive,
-    }
-
-    # Team summary
-    members = list(t.agents.values())
-    diag["teamMembers"] = len(members)
-
-    if alive:
-        # Session detection
-        profile = detect_profile_for_pane(target.pane_id)
-        diag["cli"] = profile.name if profile else "unknown"
-
-        if profile:
-            from . import adapters
-            adapter = adapters.get(profile.name)
-            if adapter:
-                session_id = adapter.resolve_current_session_id(target.pane_id)
-                diag["sessionId"] = session_id or "unresolved"
-
-                if session_id:
-                    cwd_hint = tmux.display_value(target.pane_id, "#{pane_current_path}")
-                    transcript = adapter.find_session_file(session_id, cwd=cwd_hint)
-                    if transcript:
-                        diag["transcript"] = str(transcript)
-                        diag["transcriptExists"] = transcript.exists()
-                        if transcript.exists():
-                            diag["transcriptSize"] = transcript.stat().st_size
-                            from .adapters.base import check_input_gate
-                            gate = check_input_gate(transcript)
-                            diag["gate"] = gate.status
-                            diag["gateReason"] = gate.reason
-                    else:
-                        diag["transcript"] = None
-            else:
-                diag["adapter"] = "not found"
-
-    # Workspace info
-    diag["workspace"] = str(ws)
-    diag["eventCount"] = bus.count_events(ws)
-    cursor = bus.read_cursor(ws, target_name)
-    diag["cursor"] = cursor
-
-    click.echo(json.dumps(diag, indent=2, ensure_ascii=False))
+    ensure_sidecar(str(ws), t.name, t.tmux_window)
+    payload = request_doctor(str(ws), team=t.name, target_agent=target_name)
+    if not payload:
+        _fail("sidecar unavailable")
+    if payload.get("ok") is False:
+        _fail(str(payload.get("error", "doctor failed")))
+    payload.pop("ok", None)
+    click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
 @cli.command()

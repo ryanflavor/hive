@@ -47,6 +47,7 @@ def test_droid_read_meta_parses_session_start(tmp_path):
                 "title": "demo",
                 "sessionTitle": "demo title",
                 "cwd": "/work",
+                "model": "gpt-5.2",
             }
         )
         + "\n"
@@ -61,6 +62,7 @@ def test_droid_read_meta_parses_session_start(tmp_path):
     assert meta.cwd == "/work"
     assert meta.title == "demo title"
     assert meta.jsonl_path == path
+    assert meta.model == "gpt-5.2"
 
 
 def test_droid_read_meta_returns_none_for_bad_file(tmp_path):
@@ -138,6 +140,18 @@ def test_claude_read_meta_scans_first_records(tmp_path):
             }
         )
         + "\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "sessionId": "sess-c",
+                "cwd": "/work",
+                "parentUuid": "u1",
+                "uuid": "u2",
+                "timestamp": "2026-04-02T05:27:53.000Z",
+                "message": {"role": "assistant", "model": "claude-opus-4-6", "content": [{"type": "text", "text": "ok"}]},
+            }
+        )
+        + "\n"
     )
     adapter = adapters.get("claude")
     meta = adapter.read_meta(path)
@@ -145,6 +159,7 @@ def test_claude_read_meta_scans_first_records(tmp_path):
     assert meta.session_id == "sess-c"
     assert meta.cwd == "/work"
     assert meta.started_at is not None
+    assert meta.model == "claude-opus-4-6"
 
 
 def test_claude_read_meta_missing_session_id_returns_none(tmp_path):
@@ -190,6 +205,14 @@ def test_codex_read_meta_parses_session_meta(tmp_path):
             }
         )
         + "\n"
+        + json.dumps(
+            {
+                "timestamp": "2026-04-02T00:00:01.000Z",
+                "type": "turn_context",
+                "payload": {"model": "gpt-5.4"},
+            }
+        )
+        + "\n"
     )
     adapter = adapters.get("codex")
     meta = adapter.read_meta(path)
@@ -197,6 +220,7 @@ def test_codex_read_meta_parses_session_meta(tmp_path):
     assert meta.session_id == "deadbeef-dead-beef-dead-beefdeadbeef"
     assert meta.cwd == "/work"
     assert meta.started_at is not None
+    assert meta.model == "gpt-5.4"
 
 
 def test_codex_read_meta_rejects_non_meta(tmp_path):

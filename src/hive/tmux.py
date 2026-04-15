@@ -419,9 +419,7 @@ class PaneInfo:
     role: str = ""
     agent: str = ""
     team: str = ""
-    model: str = ""
     cli: str = ""
-    color: str = ""
 
 
 def list_panes_with_titles(target: str) -> list[PaneInfo]:
@@ -466,9 +464,7 @@ def list_panes_full(target: str) -> list[PaneInfo]:
             role=get_pane_option(pane_id, "hive-role") or "",
             agent=get_pane_option(pane_id, "hive-agent") or "",
             team=get_pane_option(pane_id, "hive-team") or "",
-            model=get_pane_option(pane_id, "hive-model") or "",
             cli=get_pane_option(pane_id, "hive-cli") or "",
-            color=get_pane_option(pane_id, "hive-color") or "",
         ))
     return result
 
@@ -491,21 +487,16 @@ def clear_pane_option(pane_id: str, key: str) -> None:
     _run(["set-option", "-p", "-t", pane_id, "-u", f"@{key}"], check=False)
 
 
-_PANE_TAG_KEYS = ("hive-role", "hive-agent", "hive-team", "hive-model", "hive-cli", "hive-color")
+_PANE_TAG_KEYS = ("hive-role", "hive-agent", "hive-team", "hive-cli")
 
 
-def tag_pane(pane_id: str, role: str, agent: str, team: str,
-             *, model: str = "", cli: str = "", color: str = "") -> None:
+def tag_pane(pane_id: str, role: str, agent: str, team: str, *, cli: str = "") -> None:
     """Set all hive identity options on a pane."""
     set_pane_option(pane_id, "hive-role", role)
     set_pane_option(pane_id, "hive-agent", agent)
     set_pane_option(pane_id, "hive-team", team)
-    if model:
-        set_pane_option(pane_id, "hive-model", model)
     if cli:
         set_pane_option(pane_id, "hive-cli", cli)
-    if color:
-        set_pane_option(pane_id, "hive-color", color)
 
 
 def clear_pane_tags(pane_id: str) -> None:

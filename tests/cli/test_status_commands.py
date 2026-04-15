@@ -1,16 +1,36 @@
 import json
 
-from hive import bus
-from hive.cli import cli, _probe_member_input_state
+from hive.cli import cli
 
 
-def test_status_exposes_lead_session_id(runner, configure_hive_home, monkeypatch, tmp_path):
+def _patch_runtime(monkeypatch, runtime_payload):
+    monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
+    monkeypatch.setattr(
+        "hive.sidecar.request_team_runtime",
+        lambda _ws, *, team: {"ok": True, "team": team, **runtime_payload},
+    )
+
+
+def test_status_exposes_lead_session_id_via_daemon(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     monkeypatch.setattr("hive.agent.detect_current_session_id", lambda _cwd, model="", pane_id="": "orch-session-456")
-    monkeypatch.setattr("hive.team.resolve_session_id_for_pane", lambda _pane: "orch-session-456")
     workspace = tmp_path / "ws"
 
     assert runner.invoke(cli, ["create", "team-status", "--workspace", str(workspace)]).exit_code == 0
+    _patch_runtime(
+        monkeypatch,
+        {
+            "members": {
+                "orch": {
+                    "alive": True,
+                    "sessionId": "orch-session-456",
+                    "model": "gpt-5.4",
+                    "inputState": "ready",
+                    "inputReason": "",
+                }
+            }
+        },
+    )
     result = runner.invoke(cli, ["team"])
 
     assert result.exit_code == 0
@@ -20,6 +40,34 @@ def test_status_exposes_lead_session_id(runner, configure_hive_home, monkeypatch
     orch = next(member for member in payload["members"] if member["name"] == "orch")
     assert orch["role"] == "agent"
     assert orch["sessionId"] == "orch-session-456"
+    assert orch["model"] == "gpt-5.4"
+    assert orch["inputState"] == "ready"
+
+
+def test_current_uses_daemon_for_model(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    monkeypatch.setattr("hive.agent.detect_current_session_id", lambda _cwd, model="", pane_id="": "orch-session-456")
+    workspace = tmp_path / "ws"
+
+    assert runner.invoke(cli, ["create", "team-current", "--workspace", str(workspace)]).exit_code == 0
+    _patch_runtime(
+        monkeypatch,
+        {
+            "members": {
+                "orch": {
+                    "alive": True,
+                    "model": "gpt-5.4",
+                }
+            }
+        },
+    )
+
+    result = runner.invoke(cli, ["current"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["team"] == "team-current"
+    assert payload["agent"] == "orch"
+    assert payload["model"] == "gpt-5.4"
 
 
 def test_legacy_status_commands_show_migration_error(runner, configure_hive_home, tmp_path):
@@ -50,126 +98,44 @@ def test_legacy_status_commands_show_migration_error(runner, configure_hive_home
     assert "`hive status-show` was removed" in status_show_result.output
 
 
-# --- _probe_member_input_state tests ---
-
-
-def test_probe_skips_non_agent_roles():
-    member = {"name": "term-1", "role": "terminal", "alive": True, "pane": "%9"}
-    _probe_member_input_state(member)
-    assert "inputState" not in member
-
-
-def test_probe_dead_agent_returns_offline():
-    member = {"name": "claude", "role": "agent", "alive": False, "pane": "%9"}
-    _probe_member_input_state(member)
-    assert member["inputState"] == "offline"
-    assert member["inputReason"] == "pane_dead"
-
-
-def test_probe_no_profile_returns_unknown(monkeypatch):
-    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane: None)
-    member = {"name": "claude", "role": "agent", "alive": True, "pane": "%9"}
-    _probe_member_input_state(member)
-    assert member["inputState"] == "unknown"
-    assert member["inputReason"] == "no_session"
-
-
-def test_probe_waiting_user_sets_pending_question(monkeypatch, tmp_path):
-    from hive.adapters.base import GateResult
-    from hive.agent_cli import CLIProfile
-
-    transcript = tmp_path / "session.jsonl"
-    transcript.write_text(
-        json.dumps({
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [
-                    {"type": "tool_use", "name": "AskUserQuestion", "input": {"question": "proceed?"}},
-                ],
-            },
-        }) + "\n"
-    )
-
-    profile = CLIProfile(name="claude", ready_text="Claude Code", resume_cmd="", skill_cmd="/{name}")
-    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane: profile)
-
-    class _FakeAdapter:
-        name = "claude"
-        def resolve_current_session_id(self, _pane):
-            return "sess-123"
-        def find_session_file(self, _sid, *, cwd=None):
-            return transcript
-
-    import hive.adapters
-    monkeypatch.setattr(hive.adapters, "get", lambda _name: _FakeAdapter())
-    monkeypatch.setattr("hive.cli.tmux.display_value", lambda _pane, _fmt: "/tmp")
-
-    member = {"name": "claude", "role": "agent", "alive": True, "pane": "%9"}
-    _probe_member_input_state(member)
-    assert member["inputState"] == "waiting_user"
-    assert member["inputReason"] == "ask_pending"
-    assert member["pendingQuestion"] == "proceed?"
-
-
-def test_probe_clear_returns_ready(monkeypatch, tmp_path):
-    from hive.adapters.base import GateResult
-    from hive.agent_cli import CLIProfile
-
-    transcript = tmp_path / "session.jsonl"
-    transcript.write_text(
-        json.dumps({"type": "user", "message": {"role": "user", "content": "hello"}}) + "\n"
-    )
-
-    profile = CLIProfile(name="claude", ready_text="Claude Code", resume_cmd="", skill_cmd="/{name}")
-    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane: profile)
-
-    class _FakeAdapter:
-        name = "claude"
-        def resolve_current_session_id(self, _pane):
-            return "sess-123"
-        def find_session_file(self, _sid, *, cwd=None):
-            return transcript
-
-    import hive.adapters
-    monkeypatch.setattr(hive.adapters, "get", lambda _name: _FakeAdapter())
-    monkeypatch.setattr("hive.cli.tmux.display_value", lambda _pane, _fmt: "/tmp")
-
-    member = {"name": "claude", "role": "agent", "alive": True, "pane": "%9"}
-    _probe_member_input_state(member)
-    assert member["inputState"] == "ready"
-    assert member["inputReason"] == ""
-
-
-def test_team_includes_needs_answer(runner, configure_hive_home, monkeypatch, tmp_path):
-    """hive team should include needsAnswer when agents are waiting."""
+def test_team_includes_needs_answer_from_daemon(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"
     assert runner.invoke(cli, ["create", "team-na", "--workspace", str(workspace)]).exit_code == 0
 
-    # Mock _probe_member_input_state to simulate a waiting agent.
-    def fake_probe(member):
-        if member.get("name") == "orch":
-            member["inputState"] = "waiting_user"
-            member["inputReason"] = "ask_pending"
-            member["pendingQuestion"] = "proceed?"
-
-    monkeypatch.setattr("hive.cli._probe_member_input_state", fake_probe)
+    _patch_runtime(
+        monkeypatch,
+        {
+            "members": {
+                "orch": {
+                    "alive": True,
+                    "inputState": "waiting_user",
+                    "inputReason": "ask_pending",
+                    "pendingQuestion": "proceed?",
+                }
+            },
+            "needsAnswer": ["orch"],
+        },
+    )
 
     result = runner.invoke(cli, ["team"])
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["needsAnswer"] == ["orch"]
+    orch = next(member for member in payload["members"] if member["name"] == "orch")
+    assert orch["pendingQuestion"] == "proceed?"
 
 
-def test_who_includes_terminals(runner, configure_hive_home, tmp_path):
+def test_who_includes_terminals(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"
     assert runner.invoke(cli, ["create", "team-w", "--workspace", str(workspace)]).exit_code == 0
     assert runner.invoke(cli, ["terminal", "add", "term-1", "--pane", "%77"]).exit_code == 0
+    _patch_runtime(monkeypatch, {"members": {"orch": {"alive": True}, "term-1": {"alive": False}}})
 
     result = runner.invoke(cli, ["team"])
     assert result.exit_code == 0
     payload = json.loads(result.output)
     terminal = next(member for member in payload["members"] if member["name"] == "term-1")
     assert terminal["role"] == "terminal"
+    assert terminal["alive"] is False

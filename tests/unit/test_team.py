@@ -55,7 +55,7 @@ def test_team_save_and_load_round_trip(configure_hive_home, monkeypatch):
         tmux_session="dev",
         tmux_window="dev:0",
     )
-    team.agents["claude"] = Agent(name="claude", team_name="team-a", pane_id="%1", model="m1", color="cyan", cwd="/tmp")
+    team.agents["claude"] = Agent(name="claude", team_name="team-a", pane_id="%1", model="m1", cwd="/tmp")
     team.terminals["shell"] = Terminal(name="shell", pane_id="%2")
 
     team.save()
@@ -63,7 +63,7 @@ def test_team_save_and_load_round_trip(configure_hive_home, monkeypatch):
 
     # Set up pane tags for load to find (in real usage, set during create/spawn)
     _tmux.tag_pane("%0", "lead", "orch", "team-a")
-    _tmux.tag_pane("%1", "agent", "claude", "team-a", model="m1", color="cyan")
+    _tmux.tag_pane("%1", "agent", "claude", "team-a", cli="claude")
     _tmux.tag_pane("%2", "terminal", "shell", "team-a")
 
     loaded = Team.load("team-a")
@@ -116,7 +116,7 @@ def test_team_spawn_tags_agent_and_passes_workflow_as_initial_skill(configure_hi
     layouts = []
     sent = []
 
-    agent = Agent(name="claude", team_name="team-a", pane_id="%9", color="green")
+    agent = Agent(name="claude", team_name="team-a", pane_id="%9")
     monkeypatch.setattr(
         "hive.team.Agent.spawn",
         lambda **kwargs: spawned.append(kwargs) or agent,
@@ -133,7 +133,6 @@ def test_team_spawn_tags_agent_and_passes_workflow_as_initial_skill(configure_hi
 
     assert result is agent
     assert spawned[0]["target_pane"] == "%0"
-    assert spawned[0]["color"] == "green"
     assert spawned[0]["skill"] == "code-review"
     assert spawned[0]["prompt"] == "start now"
     assert spawned[0]["send_bootstrap_prompt"] is False
@@ -147,18 +146,17 @@ def test_team_spawn_second_agent_splits_from_last_agent(configure_hive_home, mon
     calls = []
     monkeypatch.setattr(
         "hive.team.Agent.spawn",
-        lambda **kwargs: calls.append(kwargs) or Agent(name=kwargs["name"], team_name="team-a", pane_id=f"%{len(calls)+8}", color=kwargs["color"]),
+        lambda **kwargs: calls.append(kwargs) or Agent(name=kwargs["name"], team_name="team-a", pane_id=f"%{len(calls)+8}"),
     )
     monkeypatch.setattr("hive.team.tmux.tag_pane", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("hive.team.tmux.get_current_window_target", lambda: None)
 
     team = Team(name="team-a", lead_pane_id="%0")
-    team.agents["claude"] = Agent(name="claude", team_name="team-a", pane_id="%9", color="green")
+    team.agents["claude"] = Agent(name="claude", team_name="team-a", pane_id="%9")
     team.spawn("gpt")
 
     assert calls[0]["target_pane"] == "%9"
     assert calls[0]["split_horizontal"] is False
-    assert calls[0]["color"] == "blue"
     assert calls[0]["skill"] == "hive"
     assert calls[0]["send_bootstrap_prompt"] is True
 
@@ -185,8 +183,6 @@ def test_team_get_and_broadcast(configure_hive_home, monkeypatch):
 
 def test_team_status_and_is_tmux_alive(configure_hive_home, monkeypatch):
     configure_hive_home()
-    monkeypatch.setattr("hive.team.tmux.get_pane_tty", lambda _pane: None)
-    monkeypatch.setattr("hive.team.resolve_session_id_for_pane", lambda _pane: None)
     monkeypatch.setattr("hive.team.tmux.has_session", lambda name: name == "dev")
     monkeypatch.setattr("hive.team.tmux.is_pane_alive", lambda pane: pane != "%dead")
     monkeypatch.setattr(
@@ -194,7 +190,7 @@ def test_team_status_and_is_tmux_alive(configure_hive_home, monkeypatch):
         lambda pane: {"%0": "python3.12", "%1": "droid", "%2": "zsh"}.get(pane, ""),
     )
     team = Team(name="team-a", workspace="/tmp/ws", lead_pane_id="%0", lead_session_id="sess-1", tmux_session="dev")
-    team.agents["claude"] = Agent(name="claude", team_name="team-a", pane_id="%1", model="m1", color="cyan")
+    team.agents["claude"] = Agent(name="claude", team_name="team-a", pane_id="%1", model="m1")
     team.terminals["shell"] = Terminal(name="shell", pane_id="%2")
 
     payload = team.status()
@@ -204,9 +200,7 @@ def test_team_status_and_is_tmux_alive(configure_hive_home, monkeypatch):
     orch = next(member for member in payload["members"] if member["name"] == "orch")
     claude = next(member for member in payload["members"] if member["name"] == "claude")
     shell = next(member for member in payload["members"] if member["name"] == "shell")
-    assert orch["sessionId"] == "sess-1"
     assert orch["role"] == "terminal"
-    assert claude["model"] == "m1"
     assert claude["role"] == "agent"
     assert shell["pane"] == "%2"
     assert shell["role"] == "terminal"
@@ -215,14 +209,9 @@ def test_team_status_and_is_tmux_alive(configure_hive_home, monkeypatch):
     assert team.is_tmux_alive() is False
 
 
-def test_team_status_backfills_missing_session_ids_from_map(configure_hive_home, monkeypatch):
+def test_team_status_stays_local_only(configure_hive_home, monkeypatch):
     configure_hive_home()
-    monkeypatch.setattr("hive.team.tmux.is_pane_alive", lambda _pane: True)
     monkeypatch.setattr("hive.team.tmux.get_pane_current_command", lambda pane: "droid" if pane == "%1" else "zsh")
-    monkeypatch.setattr(
-        "hive.team.resolve_session_id_for_pane",
-        lambda pane_id: {"%0": "lead-sess", "%1": "agent-sess"}.get(pane_id),
-    )
 
     team = Team(name="team-a", lead_pane_id="%0")
     team.agents["claude"] = Agent(name="claude", team_name="team-a", pane_id="%1")
@@ -231,10 +220,12 @@ def test_team_status_backfills_missing_session_ids_from_map(configure_hive_home,
 
     orch = next(member for member in payload["members"] if member["name"] == "orch")
     claude = next(member for member in payload["members"] if member["name"] == "claude")
-    assert orch["sessionId"] == "lead-sess"
-    assert claude["sessionId"] == "agent-sess"
-    assert team.lead_session_id == "lead-sess"
-    assert team.agents["claude"].session_id == "agent-sess"
+    assert "sessionId" not in orch
+    assert "model" not in orch
+    assert "alive" not in orch
+    assert "sessionId" not in claude
+    assert "model" not in claude
+    assert "alive" not in claude
 
 
 def test_team_shutdown_and_cleanup(configure_hive_home, monkeypatch):
