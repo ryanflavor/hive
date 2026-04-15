@@ -87,6 +87,15 @@ def send_key(pane_id: str, key: str) -> None:
     _run(["send-keys", "-t", pane_id, key])
 
 
+def is_pane_in_mode(pane_id: str) -> bool:
+    value = display_value(pane_id, "#{pane_in_mode}")
+    return value == "1"
+
+
+def cancel_pane_mode(pane_id: str) -> None:
+    _run(["copy-mode", "-q", "-t", pane_id], check=False)
+
+
 def capture_pane(pane_id: str, lines: int = 50) -> str:
     """Capture pane content."""
     return _run_output([

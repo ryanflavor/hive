@@ -53,6 +53,25 @@ def test_send_keys_and_send_key_issue_expected_tmux_commands(monkeypatch):
     ]
 
 
+def test_pane_mode_helpers_use_tmux_display_and_copy_mode(monkeypatch):
+    calls = []
+
+    def _fake_run(args, check=True, timeout=5):
+        calls.append((tuple(args), check))
+        stdout = "1\n" if args[:3] == ["display-message", "-t", "%1"] else ""
+        return subprocess.CompletedProcess(["tmux", *args], 0, stdout, "")
+
+    monkeypatch.setattr("hive.tmux._run", _fake_run)
+
+    assert tmux.is_pane_in_mode("%1") is True
+    tmux.cancel_pane_mode("%1")
+
+    assert calls == [
+        (("display-message", "-t", "%1", "-p", "#{pane_in_mode}"), False),
+        (("copy-mode", "-q", "-t", "%1"), False),
+    ]
+
+
 def test_capture_and_list_parsers(monkeypatch):
     monkeypatch.setattr(
         "hive.tmux._run",

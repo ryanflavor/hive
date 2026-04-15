@@ -91,6 +91,9 @@ def _build_droid_model_settings(model: str) -> tuple[str, str]:
 
 def _submit_interactive_text(pane_id: str, text: str, cli: str) -> None:
     """Submit text to an interactive agent TUI."""
+    if tmux.is_pane_in_mode(pane_id):
+        tmux.cancel_pane_mode(pane_id)
+        time.sleep(0.05)
     tmux.send_keys(pane_id, text, enter=False)
     time.sleep(0.05)
     tmux.send_key(pane_id, "Enter")

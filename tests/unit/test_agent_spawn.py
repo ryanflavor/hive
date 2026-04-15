@@ -19,6 +19,8 @@ def _setup_tmux_mocks(monkeypatch):
     monkeypatch.setattr("hive.agent.tmux.tag_pane", lambda *args, **_kwargs: tags.append(args))
     monkeypatch.setattr("hive.agent.tmux.wait_for_text", lambda *_args, **_kw: True)
     monkeypatch.setattr("hive.agent.tmux.wait_for_texts", lambda *_args, **_kw: True)
+    monkeypatch.setattr("hive.agent.tmux.is_pane_in_mode", lambda _pane: False)
+    monkeypatch.setattr("hive.agent.tmux.cancel_pane_mode", lambda _pane: None)
     monkeypatch.setattr("hive.agent.tmux.send_keys", lambda _pane, text, enter=True: calls.append(text))
     monkeypatch.setattr("hive.agent.tmux.send_key", lambda _pane, key: calls.append(f"<{key}>"))
     monkeypatch.setattr("hive.agent.resolve_session_id_for_pane", lambda _pane: None)
@@ -171,6 +173,19 @@ def test_send_same_for_droid(monkeypatch):
 
     agent.send("hello world")
 
+    assert calls == ["hello world", "<Enter>"]
+
+
+def test_send_exits_tmux_copy_mode_before_submitting(monkeypatch):
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    canceled: list[str] = []
+    monkeypatch.setattr("hive.agent.tmux.is_pane_in_mode", lambda _pane: True)
+    monkeypatch.setattr("hive.agent.tmux.cancel_pane_mode", lambda pane: canceled.append(pane))
+    agent = Agent(name="w1", team_name="t", pane_id="%0", cli="claude")
+
+    agent.send("hello world")
+
+    assert canceled == ["%0"]
     assert calls == ["hello world", "<Enter>"]
 
 
