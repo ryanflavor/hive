@@ -10,6 +10,9 @@ Hive CLI 是必须的外部依赖。安装方式：
 
 ```bash
 pipx install git+https://github.com/notdp/hive.git
+npx skills add https://github.com/notdp/hive -g --skill hive --agent '*' -y
+# 本地开发时改为当前 checkout：
+npx skills add "$PWD" -g --skill hive --agent '*' -y
 ```
 
 运行 `hive --help` 确认安装成功。
