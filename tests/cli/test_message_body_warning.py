@@ -7,10 +7,16 @@ FIXED_ID = bus.format_msg_id(1)
 
 
 def _patch_ack(monkeypatch):
-    """Disable ACK resolution so tests don't need a real transcript."""
+    """Disable ACK resolution and the 3s send-grace loop; see the twin helper in
+    test_message_commands.py for the rationale."""
     monkeypatch.setattr(
         "hive.sidecar._resolve_ack_baseline",
         lambda _target: (_ for _ in ()).throw(RuntimeError("no transcript")),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "hive.sidecar._observe_send_grace",
+        lambda **_kwargs: ("pending", {"state": "unknown", "source": "none", "observedAt": ""}),
         raising=False,
     )
 

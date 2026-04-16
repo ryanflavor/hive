@@ -8,10 +8,22 @@ FIXED_ID = bus.format_msg_id(1)
 
 
 def _patch_ack(monkeypatch):
-    """Disable ACK resolution so tests don't need a real transcript."""
+    """Disable ACK resolution so tests don't need a real transcript.
+
+    Also short-circuits the 3s send-grace loop, since any test that uses
+    this helper has already decided the fake agent is transcript-less and
+    therefore cannot produce a real confirmation or queue probe. Tests
+    that genuinely exercise grace timing set up their own ack/probe and
+    don't call this helper.
+    """
     monkeypatch.setattr(
         "hive.sidecar._resolve_ack_baseline",
         lambda _target: (_ for _ in ()).throw(RuntimeError("no transcript")),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "hive.sidecar._observe_send_grace",
+        lambda **_kwargs: ("pending", {"state": "unknown", "source": "none", "observedAt": ""}),
         raising=False,
     )
 
@@ -602,6 +614,9 @@ def test_send_ack_unconfirmed_on_timeout(runner, configure_hive_home, monkeypatc
     monkeypatch.setattr("hive.sidecar._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
     monkeypatch.setattr("hive.adapters.base.wait_for_id_in_transcript", lambda path, message_id, baseline, timeout=45.0: False)
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
+    # The test drives the unconfirmed branch via wait_for_id_in_transcript; we
+    # don't need the grace loop to wall-clock through its 3s before that runs.
+    monkeypatch.setattr("hive.sidecar.SEND_GRACE_TIMEOUT", 0.0)
     _patch_sidecar_requests(monkeypatch, team)
 
     result = runner.invoke(cli, ["send", "gpt", "test", "--wait"])
@@ -745,6 +760,8 @@ def test_send_async_pending_enqueues_sidecar(runner, configure_hive_home, monkey
         lambda **_kw: {"state": "not_queued", "source": "capture", "observedAt": "2026-04-14T00:00:00Z"},
     )
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
+    # The probe above already returns not_queued; we don't need to poll it for 3s.
+    monkeypatch.setattr("hive.sidecar.SEND_GRACE_TIMEOUT", 0.0)
     _patch_sidecar_requests(monkeypatch, team, pending=pending)
 
     result = runner.invoke(cli, ["send", "gpt", "test"])
@@ -988,6 +1005,8 @@ def _gate_test_setup(monkeypatch, tmp_path, transcript_records=None):
     monkeypatch.setattr("hive.sidecar._resolve_ack_baseline", lambda _target: (transcript, transcript.stat().st_size), raising=False)
     monkeypatch.setattr("hive.adapters.base.wait_for_id_in_transcript", lambda path, message_id, baseline, timeout=45.0: False)
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
+    # Gate tests only care about the gate projection; collapse the 3s grace loop.
+    monkeypatch.setattr("hive.sidecar.SEND_GRACE_TIMEOUT", 0.0)
     _patch_sidecar_requests(monkeypatch, team)
 
     return workspace, transcript, sent
