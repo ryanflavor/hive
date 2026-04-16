@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 
 from hive.activity import classify_activity, probe_transcript_activity
 from hive.adapters.base import Message, MessagePart
@@ -99,3 +100,38 @@ def test_probe_transcript_activity_returns_unknown_for_unknown_cli(tmp_path):
 
     assert payload["activityState"] == "unknown"
     assert payload["activityReason"] == "no_adapter_unknown-cli"
+
+
+def test_probe_transcript_activity_reads_tail_sample_without_full_iteration(tmp_path, monkeypatch):
+    class FakeAdapter:
+        def iter_messages(self, _path):
+            raise AssertionError("probe_transcript_activity should use tail sampling")
+
+        def message_from_record(self, payload):
+            if payload.get("kind") != "msg":
+                return None
+            return Message(
+                message_id=str(payload.get("id")),
+                parent_id=None,
+                role=str(payload.get("role")),
+                parts=tuple(MessagePart(kind=str(kind)) for kind in payload.get("partKinds", [])),
+                timestamp=_ts(str(payload.get("timestamp"))),
+                raw=payload,
+            )
+
+    monkeypatch.setattr("hive.activity.adapters.get", lambda cli_name: FakeAdapter() if cli_name == "fake" else None)
+
+    path = tmp_path / "session.jsonl"
+    chunks = [
+        json.dumps({"kind": "msg", "id": "m1", "role": "assistant", "partKinds": ["text"], "timestamp": "2026-04-16T05:00:00Z"}),
+    ]
+    for index in range(40):
+        chunks.append(json.dumps({"kind": "noise", "payload": "x" * 256, "index": index}))
+    chunks.append(json.dumps({"kind": "msg", "id": "m2", "role": "user", "partKinds": ["text"], "timestamp": "2026-04-16T05:01:00Z"}))
+    path.write_text("\n".join(chunks) + "\n")
+
+    payload = probe_transcript_activity("fake", path, sample_limit=2)
+
+    assert payload["activityState"] == "active"
+    assert payload["activityReason"] == "last_role_user"
+    assert [entry["role"] for entry in payload["evidence"]["tail"]] == ["assistant", "user"]

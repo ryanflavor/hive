@@ -5,7 +5,7 @@ import json
 import shlex
 import sys
 import time
-from importlib import resources
+from importlib import metadata, resources
 from pathlib import Path
 from typing import Any, Callable
 
@@ -147,11 +147,27 @@ def _warning_state_path(cli: str) -> Path:
     return core_hooks.hive_home() / "state" / "skill-sync" / f"{normalize_command(cli)}.json"
 
 
+def _version_state_path() -> Path:
+    return core_hooks.hive_home() / "state" / "last_seen_version"
+
+
 def _load_warning_state(path: Path) -> dict[str, Any]:
     try:
         return json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):
         return {}
+
+
+def _load_seen_version(path: Path) -> str:
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return ""
+
+
+def _write_seen_version(path: Path, version_text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(version_text + "\n")
 
 
 def _warning_key(payload: dict[str, Any]) -> dict[str, str]:
@@ -200,6 +216,64 @@ def render_hive_skill_warning(payload: dict[str, Any]) -> str:
         "  hive doctor --skills",
     ])
     return "\n".join(lines)
+
+
+def render_version_upgrade_warning(payload: dict[str, Any]) -> str:
+    previous = payload.get("previousVersion") or "(unknown)"
+    current = payload.get("currentVersion") or "(unknown)"
+    return "\n".join([
+        f"Notice: hive upgraded from {previous} to {current}.",
+        "If this workspace uses the hive skill, refresh the installed skill with:",
+        f"  {payload.get('refreshCommand', _refresh_command())}",
+        "Inspect details with:",
+        "  hive doctor --skills",
+    ])
+
+
+def check_version_upgrade(
+    *,
+    emit: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "package": "hive",
+        "refreshCommand": _refresh_command(),
+    }
+    try:
+        current_version = metadata.version("hive")
+    except metadata.PackageNotFoundError:
+        payload.update({
+            "state": "unknown",
+            "reason": "package_not_found",
+        })
+        return payload
+
+    payload["currentVersion"] = current_version
+    state_path = _version_state_path()
+    previous_version = _load_seen_version(state_path)
+    if previous_version:
+        payload["previousVersion"] = previous_version
+
+    if not previous_version:
+        try:
+            _write_seen_version(state_path, current_version)
+        except OSError:
+            pass
+        payload["state"] = "initialized"
+        return payload
+
+    if previous_version == current_version:
+        payload["state"] = "current"
+        return payload
+
+    if emit is None:
+        emit = lambda message: sys.stderr.write(message + "\n")
+    emit(render_version_upgrade_warning(payload))
+    try:
+        _write_seen_version(state_path, current_version)
+    except OSError:
+        pass
+    payload["state"] = "upgraded"
+    return payload
 
 
 def maybe_warn_hive_skill_drift(

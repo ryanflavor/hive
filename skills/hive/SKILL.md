@@ -94,21 +94,12 @@ hive teams                            # 列出已知 team
 5. 发任务、回传结果、同步进度时，默认写成 `hive send <name> "<short summary>" --artifact <path>`；不要把长报告、长 checklist、详细设计讨论、长 diff 说明直接塞进消息正文
 6. 详细内容、多行结构化内容、需要后续引用的上下文一律先写 artifact。首选 stdin artifact：`... | hive send <name> "<message>" --artifact -`；只有已有现成文件时才传 `--artifact <path>`。不要把 `$(cat <<EOF ...)` 这类多行 command substitution 直接塞进 `hive send`
 7. `hive team` 显示每个 agent 的默认 `peer`、runtime `inputState` 和 `activityState`；如果某个 agent 的 `inputState` 是 `waiting_user`，说明它在等答案，用 `hive answer` 回答；`activityState=idle` 说明从 transcript 已落盘状态看，它更像空闲可协作对象
-8. 当你准备做以下任一动作时，先暂停，不要直接找用户：向用户提问、请求用户确认技术方案、用 `hive notify` 打断用户、让用户决定下一步该找谁/是否该先找别人讨论。
-9. 遇到评审、设计分歧、风险判断、实现卡住、上下文不足、能力不匹配、需要接手、需要 review、或不确定该由谁继续时，默认这是团队内问题，不是用户问题；升级给用户前，必须先跑 `hive team`，若问题适合协作，再跑 `hive suggest`，并优先联系 **非同源模型 / 非同 CLI** 的 agent。
-10. 当任务本身是设计判断、方案评审、权重/策略选择、或需要给出推荐意见时，即使你已经形成了自己的结论，也必须先找 peer 或通过 `hive suggest` 找到合适的 agent 做交叉验证，等对方回复后再综合双方意见交付给用户。若当前没有可用 peer 且 `hive suggest` 无候选，回到规则 12 的升级路径。跳过这一步直接给用户最终答案，等于放弃了团队的 second opinion 价值。
-11. 在未完成上面的协作检查前，禁止直接问用户 `要不要我先找别人讨论`、`要不要我先问 orch/xxx`、`下一步该找谁 review/接手`；也禁止因为自己暂时不确定，就直接把技术判断升级给用户。不要把用户当传话筒。
-12. 只有满足以下任一条件时，才允许升级给用户：(a) 你已经完成 `hive team` / `hive suggest` 检查，仍然没有合适 agent 可问；(b) 决策涉及不可逆外部副作用，如 `git push`、发 PR comment、删除数据、跑迁移、通知外部系统；(c) 需要用户提供团队内任何 agent 都不掌握的信息、授权或偏好；(d) 用户明确要求参与这类决策。
-13. 升级给用户时，必须直接说明为什么这一步不能在团队内消化，优先使用这种句式：`已先检查 hive team / hive suggest；这一步仍需你决定，因为 ...`；不要只把原问题原样抛给用户。
-14. `hive notify` 只面向当前 pane 的用户，不用于 agent 之间互相通知
-15. 只有当”不马上看这条通知，agent 就无法继续，或者用户会错过关键时机”时，才允许 `hive notify`
-16. 允许触发 `hive notify` 的典型场景：任务完成且用户明确在等结果；需要用户做决策；遇到阻塞且必须用户介入；执行 `git push`、覆盖文件、跑迁移、删除数据等高风险动作前需要确认
-17. 禁止用 `hive notify` 做这些事：普通进度汇报、阶段性小完成、可选建议、agent 仍可自行继续推进的情况；凡是能通过 `hive team` 或 artifact 表达的，就不要打断用户
-18. `hive notify` 的文案应站在 agent 对 user 说话的角度，直接说清楚”发生了什么 / 为什么现在需要你 / 按 `Space` 回来后要做什么”；浮层里按 `Space` 会跳回当前 pane，按任意键只关闭浮层
-19. 收到新的独立任务而你手头工作不该中断时，优先 `hive fork --join-as <name> --prompt "<task summary>"` 或 `hive spawn` 分出处理者；只有在你明确只想分一个未注册的旁路 pane 时，才用 bare `hive fork`。
-20. `--prompt` 里要直接写清 initial prompt：先跑 `hive thread <msgId>` 拿原始上下文、要处理什么、相关 artifact 在哪、以及处理完成后应该 reply-to 谁。只有在你没用 `--prompt` 时，才退回手动 `hive send <fork-name> "<task summary>" [--artifact <path>]` 给分身下任务。
-21. 新的处理者收到 initial prompt 后，第一件事是用 `hive send <sender> "<short takeover with reason>" --reply-to <msgId>` 通知原 sender "这个任务现在由我接管"，并顺手说明为什么换人，例如"从 orch 手中接管了 X 任务，因为 orch 正在处理 Y"；不要让原 pane 先做中继。
-22. 新的处理者完成处理后，继续自己用 `hive send <sender> "<done summary>" --reply-to <msgId> [--artifact <path>]` 沿同一条 thread 回结果；后续 question / update 也都继续沿这条 thread 回复。
+8. 协作升级原则：当你想向用户提问、请求用户确认技术方案、打断用户、或让用户决定该找谁讨论/接手时，先把它当成团队内问题处理，不要直接升级。默认动作是先跑 `hive team`，问题适合协作再跑 `hive suggest`，并优先联系 **非同源模型 / 非同 CLI** 的 agent；凡属设计判断、方案评审、策略推荐、风险判断、实现卡住、上下文不足、能力不匹配、需要接手或需要 review，也都先走这条路径。只有在以下情况下才允许升级给用户：(a) 已完成 `hive team` / `hive suggest` 检查仍无合适 agent；(b) 决策涉及不可逆外部副作用，如 `git push`、发 PR comment、删除数据、跑迁移、通知外部系统；(c) 需要用户提供团队内 agent 都不掌握的信息、授权或偏好；(d) 用户明确要求参与这类决策。升级时必须直接说明为什么团队内无法消化，优先使用这种句式：`已先检查 hive team / hive suggest；这一步仍需你决定，因为 ...`；不要问用户 `要不要我先找别人讨论`、`要不要我先问 orch/xxx`、`下一步该找谁 review/接手`，也不要把用户当传话筒。
+9. `hive notify` 原则：只在“不马上看这条通知，agent 就无法继续，或者用户会错过关键时机”时使用，且对象始终是当前 pane 的用户，不是其他 agent。允许：任务完成且用户明确在等结果；需要用户做决策；遇到阻塞且必须用户介入；执行 `git push`、覆盖文件、跑迁移、删除数据等高风险动作前需要确认。禁止：普通进度汇报、阶段性小完成、可选建议、agent 仍可自行继续推进的情况；凡是能通过 `hive team` 或 artifact 表达的，就不要打断用户。文案应站在 agent 对 user 说话的角度，直接说清楚“发生了什么 / 为什么现在需要你 / 按 `Space` 回来后要做什么”；浮层里按 `Space` 会跳回当前 pane，按任意键只关闭浮层。
+10. 收到新的独立任务而你手头工作不该中断时，优先 `hive fork --join-as <name> --prompt "<task summary>"` 或 `hive spawn` 分出处理者；只有在你明确只想分一个未注册的旁路 pane 时，才用 bare `hive fork`。
+11. `--prompt` 里要直接写清 initial prompt：先跑 `hive thread <msgId>` 拿原始上下文、要处理什么、相关 artifact 在哪、以及处理完成后应该 reply-to 谁。只有在你没用 `--prompt` 时，才退回手动 `hive send <fork-name> "<task summary>" [--artifact <path>]` 给分身下任务。
+12. 新的处理者收到 initial prompt 后，第一件事是用 `hive send <sender> "<short takeover with reason>" --reply-to <msgId>` 通知原 sender "这个任务现在由我接管"，并顺手说明为什么换人，例如"从 orch 手中接管了 X 任务，因为 orch 正在处理 Y"；不要让原 pane 先做中继。
+13. 新的处理者完成处理后，继续自己用 `hive send <sender> "<done summary>" --reply-to <msgId> [--artifact <path>]` 沿同一条 thread 回结果；后续 question / update 也都继续沿这条 thread 回复。
 
 ## 协议边界
 

@@ -65,3 +65,33 @@ def test_warn_hive_skill_drift_is_rate_limited(monkeypatch, tmp_path: Path):
     assert len(messages) == 2
     state_file = tmp_path / ".hive" / "state" / "skill-sync" / "codex.json"
     assert state_file.is_file()
+
+
+def test_check_version_upgrade_records_initial_version_without_warning(monkeypatch, tmp_path: Path):
+    _configure_skill_homes(monkeypatch, tmp_path)
+    monkeypatch.setattr("hive.skill_sync.metadata.version", lambda _name: "0.4.1")
+    messages: list[str] = []
+
+    payload = skill_sync.check_version_upgrade(emit=messages.append)
+
+    assert payload["state"] == "initialized"
+    assert messages == []
+    assert (tmp_path / ".hive" / "state" / "last_seen_version").read_text().strip() == "0.4.1"
+
+
+def test_check_version_upgrade_warns_once_when_version_changes(monkeypatch, tmp_path: Path):
+    _configure_skill_homes(monkeypatch, tmp_path)
+    state_path = tmp_path / ".hive" / "state" / "last_seen_version"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text("0.4.0\n")
+    monkeypatch.setattr("hive.skill_sync.metadata.version", lambda _name: "0.4.1")
+    messages: list[str] = []
+
+    payload = skill_sync.check_version_upgrade(emit=messages.append)
+
+    assert payload["state"] == "upgraded"
+    assert payload["previousVersion"] == "0.4.0"
+    assert payload["currentVersion"] == "0.4.1"
+    assert len(messages) == 1
+    assert "hive upgraded from 0.4.0 to 0.4.1" in messages[0]
+    assert state_path.read_text().strip() == "0.4.1"

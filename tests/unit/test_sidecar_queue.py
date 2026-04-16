@@ -191,7 +191,34 @@ def test_sidecar_identity_requires_matching_team_and_window_id():
         tmux_window_id="@7",
     ) is False
     assert sidecar._sidecar_identity_matches(
-        {"ok": True, "apiVersion": sidecar.SIDECAR_API_VERSION, "team": "team-a", "tmuxWindowId": "@7"},
+        {
+            "ok": True,
+            "apiVersion": sidecar.SIDECAR_API_VERSION,
+            "team": "team-a",
+            "tmuxWindowId": "@7",
+        },
+        team="team-a",
+        tmux_window_id="@7",
+    ) is False
+    assert sidecar._sidecar_identity_matches(
+        {
+            "ok": True,
+            "apiVersion": sidecar.SIDECAR_API_VERSION,
+            "buildHash": "stale",
+            "team": "team-a",
+            "tmuxWindowId": "@7",
+        },
+        team="team-a",
+        tmux_window_id="@7",
+    ) is False
+    assert sidecar._sidecar_identity_matches(
+        {
+            "ok": True,
+            "apiVersion": sidecar.SIDECAR_API_VERSION,
+            "buildHash": sidecar.SIDECAR_BUILD_HASH,
+            "team": "team-a",
+            "tmuxWindowId": "@7",
+        },
         team="team-a",
         tmux_window_id="@7",
     ) is True
@@ -211,6 +238,7 @@ def test_handle_request_ping_returns_sidecar_identity():
     assert response == {
         "ok": True,
         "apiVersion": sidecar.SIDECAR_API_VERSION,
+        "buildHash": sidecar.SIDECAR_BUILD_HASH,
         "team": "team-a",
         "tmuxWindow": "dev:3",
         "tmuxWindowId": "@99",

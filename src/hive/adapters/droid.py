@@ -126,6 +126,21 @@ class DroidAdapter:
             return iter(())
         return _droid_message_iter(handle)
 
+    def message_from_record(self, payload: dict[str, Any]) -> Message | None:
+        if payload.get("type") != "message":
+            return None
+        msg = payload.get("message")
+        if not isinstance(msg, dict):
+            return None
+        return Message(
+            message_id=str_or_none(payload.get("id")),
+            parent_id=str_or_none(payload.get("parentId")),
+            role=str(msg.get("role") or "unknown"),
+            parts=tuple(_iter_droid_parts(msg.get("content"))),
+            timestamp=parse_iso_timestamp(payload.get("timestamp")),
+            raw=payload,
+        )
+
 
 def _droid_message_iter(handle) -> Iterator[Message]:
     with handle:

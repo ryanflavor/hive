@@ -7,6 +7,7 @@ land in the workspace database as observation events.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import signal
@@ -39,6 +40,16 @@ SOCKET_RETRY_INTERVAL = 0.1
 SEND_GRACE_TIMEOUT = 3.0
 SEND_REQUEST_TIMEOUT = SEND_GRACE_TIMEOUT + 2.0
 SIDECAR_API_VERSION = 5
+
+
+def _compute_build_hash() -> str:
+    try:
+        return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    except OSError:
+        return "unknown"
+
+
+SIDECAR_BUILD_HASH = _compute_build_hash()
 
 
 def _now_iso() -> str:
@@ -270,6 +281,7 @@ def _sidecar_identity_matches(
         response
         and response.get("ok") is True
         and response.get("apiVersion") == SIDECAR_API_VERSION
+        and response.get("buildHash") == SIDECAR_BUILD_HASH
         and response.get("team") == team
         and response.get("tmuxWindowId") == tmux_window_id
     )
@@ -1457,6 +1469,7 @@ def _handle_request(
         return {
             "ok": True,
             "apiVersion": SIDECAR_API_VERSION,
+            "buildHash": SIDECAR_BUILD_HASH,
             "team": team,
             "tmuxWindow": tmux_window,
             "tmuxWindowId": tmux_window_id,

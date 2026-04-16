@@ -696,6 +696,7 @@ def test_root_help_groups_commands_by_area(runner):
     assert result.exit_code == 0
     assert "Hive - tmux-first multi-agent collaboration runtime." in result.output
     assert "Context:" in result.output
+    assert "Agent Workflow:" in result.output
     assert "Team Setup:" in result.output
     assert "Communication:" in result.output
     assert "Pane Control:" in result.output
@@ -712,7 +713,11 @@ def test_root_help_groups_commands_by_area(runner):
     assert "statuses     " not in result.output
     assert "status-show" not in result.output
     assert "  type " not in result.output
-    assert "current  " not in result.output
+    assert "current   Show current Hive context." in result.output
+    assert "delivery  Check delivery status of a sent message by ID." in result.output
+    assert "suggest   Suggest likely collaboration candidates." in result.output
+    assert "thread    Show a reply thread rooted at a msgId." in result.output
+    assert "activity  Classify transcript activity as active/idle/unknown." in result.output
 
 
 def test_layout_applies_preset(runner, configure_hive_home, monkeypatch, tmp_path):

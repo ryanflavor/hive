@@ -73,6 +73,9 @@ class SessionAdapter(Protocol):
     def iter_messages(self, path: Path) -> Iterator[Message]:
         """Yield normalized :class:`Message` records from a JSONL session file."""
 
+    def message_from_record(self, payload: dict[str, Any]) -> Message | None:
+        """Normalize one raw JSONL record into a :class:`Message` when possible."""
+
 
 def parse_iso_timestamp(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value:

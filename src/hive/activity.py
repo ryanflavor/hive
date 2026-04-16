@@ -5,10 +5,13 @@ from __future__ import annotations
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from . import adapters
-from .adapters.base import Message
+from .adapters.base import Message, safe_json_loads
+
+_INITIAL_TAIL_BYTES = 8 * 1024
+_MAX_TAIL_BYTES = 128 * 1024
 
 
 def _format_timestamp(value: datetime | None) -> str:
@@ -73,6 +76,51 @@ def classify_activity(messages: list[Message]) -> dict[str, Any]:
     return payload
 
 
+def _read_tail_messages(adapter: Any, path: Path, *, sample_limit: int) -> list[Message]:
+    limit = max(sample_limit, 1)
+    try:
+        file_size = path.stat().st_size
+    except OSError:
+        return []
+    if file_size == 0:
+        return []
+
+    chunk = _INITIAL_TAIL_BYTES
+    recent: list[Message] = []
+    while chunk <= _MAX_TAIL_BYTES:
+        offset = max(0, file_size - chunk)
+        try:
+            with path.open("rb") as handle:
+                handle.seek(offset)
+                raw = handle.read()
+        except OSError:
+            return recent
+
+        data = raw.decode("utf-8", errors="replace")
+        lines = data.split("\n")
+        if offset > 0:
+            lines = lines[1:]
+
+        sampled: deque[Message] = deque(maxlen=limit)
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            payload = safe_json_loads(line)
+            if payload is None:
+                continue
+            message = adapter.message_from_record(payload)
+            if message is not None:
+                sampled.append(message)
+
+        recent = list(sampled)
+        if len(recent) >= limit or offset == 0:
+            return recent
+        chunk *= 2
+
+    return recent
+
+
 def probe_transcript_activity(
     cli_name: str,
     transcript: str | Path,
@@ -95,8 +143,4 @@ def probe_transcript_activity(
             "evidence": {"tail": []},
         }
 
-    recent: deque[Message] = deque(maxlen=max(sample_limit, 1))
-    for message in adapter.iter_messages(path):
-        recent.append(message)
-
-    return classify_activity(list(recent))
+    return classify_activity(_read_tail_messages(adapter, path, sample_limit=sample_limit))

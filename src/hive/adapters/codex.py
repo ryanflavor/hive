@@ -146,6 +146,80 @@ class CodexAdapter:
             return iter(())
         return _codex_message_iter(handle)
 
+    def message_from_record(self, payload: dict[str, Any]) -> Message | None:
+        if payload.get("type") != "response_item":
+            return None
+        body = payload.get("payload")
+        if not isinstance(body, dict):
+            return None
+
+        item_type = body.get("type")
+        timestamp = parse_iso_timestamp(payload.get("timestamp"))
+        if item_type == "message":
+            return Message(
+                message_id=None,
+                parent_id=None,
+                role=str(body.get("role") or "unknown"),
+                parts=tuple(_iter_codex_message_parts(body.get("content"))),
+                timestamp=timestamp,
+                raw=payload,
+            )
+        if item_type == "reasoning":
+            return Message(
+                message_id=None,
+                parent_id=None,
+                role="assistant",
+                parts=(MessagePart(kind="thinking", text=_extract_reasoning_text(body), raw=body),),
+                timestamp=timestamp,
+                raw=payload,
+            )
+        if item_type in {"function_call", "custom_tool_call"}:
+            args = body.get("arguments")
+            tool_input: dict[str, Any] | None = None
+            if isinstance(args, dict):
+                tool_input = args
+            elif isinstance(args, str):
+                parsed = safe_json_loads(args)
+                if parsed is not None:
+                    tool_input = parsed
+            return Message(
+                message_id=str_or_none(body.get("call_id")),
+                parent_id=None,
+                role="assistant",
+                parts=(
+                    MessagePart(
+                        kind="tool_use",
+                        tool_name=str_or_none(body.get("name")),
+                        tool_input=tool_input,
+                        raw=body,
+                    ),
+                ),
+                timestamp=timestamp,
+                raw=payload,
+            )
+        if item_type in {"function_call_output", "custom_tool_call_output"}:
+            output = body.get("output")
+            if isinstance(output, dict):
+                output_text = str_or_none(output.get("content") or output.get("text"))
+            else:
+                output_text = str_or_none(output)
+            return Message(
+                message_id=str_or_none(body.get("call_id")),
+                parent_id=None,
+                role="tool",
+                parts=(MessagePart(kind="tool_result", tool_output=output_text, raw=body),),
+                timestamp=timestamp,
+                raw=payload,
+            )
+        return Message(
+            message_id=None,
+            parent_id=None,
+            role="unknown",
+            parts=(MessagePart(kind="unknown", raw=body),),
+            timestamp=timestamp,
+            raw=payload,
+        )
+
 
 def _codex_message_iter(handle) -> Iterator[Message]:
     current_turn_id: str | None = None
@@ -297,4 +371,3 @@ def _is_codex_process(command: str, argv: str) -> bool:
     if normalize_command_token(command) == "codex":
         return True
     return any(normalize_command_token(token) == "codex" for token in (argv or "").split())
-

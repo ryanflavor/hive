@@ -29,6 +29,11 @@ _COMMAND_HELP_SECTIONS = {
     "teams": "Context",
     "team": "Context",
     "use": "Context",
+    "current": "Agent Workflow",
+    "suggest": "Agent Workflow",
+    "thread": "Agent Workflow",
+    "delivery": "Agent Workflow",
+    "activity": "Agent Workflow",
     "init": "Team Setup",
     "create": "Team Setup",
     "delete": "Team Setup",
@@ -55,6 +60,7 @@ _COMMAND_HELP_SECTIONS = {
 }
 _COMMAND_HELP_SECTION_ORDER = [
     "Context",
+    "Agent Workflow",
     "Team Setup",
     "Communication",
     "Pane Control",
@@ -65,6 +71,7 @@ _COMMAND_HELP_SECTION_ORDER = [
 ]
 _COMMAND_HELP_SECTION_DESCRIPTIONS = {
     "Context": "Inspect or bind the current tmux window to a Hive team.",
+    "Agent Workflow": "Inspect your bound agent context and the common collaboration views used during agent work.",
     "Team Setup": "Create teams and register panes for the current window.",
     "Communication": "Exchange Hive messages and inspect durable delivery or thread state.",
     "Pane Control": "Drive agent or terminal panes directly when needed.",
@@ -463,6 +470,7 @@ def cli(ctx: click.Context):
         return
     if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
         return
+    skill_sync.check_version_upgrade()
     if ctx.invoked_subcommand not in _TMUX_OPTIONAL_ROOT_COMMANDS and ctx.invoked_subcommand is not None and not tmux.is_inside_tmux():
         _fail(_TMUX_REQUIRED_MESSAGE)
 
@@ -614,7 +622,7 @@ def teams_cmd():
     click.echo(json.dumps(rows, indent=2, ensure_ascii=False))
 
 
-@cli.command("current", hidden=True)
+@cli.command("current")
 def current_cmd():
     """Show current Hive context."""
     _gc_dead_teams()
@@ -1312,10 +1320,10 @@ def answer(agent_name: str, text: str):
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
-@cli.command(hidden=True)
+@cli.command()
 @click.argument("message_id")
 def delivery(message_id: str):
-    """Debug: check delivery status of a sent message by ID."""
+    """Check delivery status of a sent message by ID."""
     _, t = _resolve_scoped_team(None, required=True)
     assert t is not None
     ws = _resolve_workspace(t, required=True)
@@ -1331,10 +1339,10 @@ def delivery(message_id: str):
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
-@cli.command("suggest", hidden=True)
+@cli.command("suggest")
 @click.argument("source_agent", required=False, default="")
 def suggest(source_agent: str):
-    """Debug/agent helper: suggest likely collaboration candidates."""
+    """Suggest likely collaboration candidates."""
     _, t = _resolve_scoped_team(None, required=True)
     assert t is not None
     ws = _resolve_workspace(t, required=True)
@@ -1351,10 +1359,10 @@ def suggest(source_agent: str):
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
-@cli.command(hidden=True)
+@cli.command()
 @click.argument("message_id")
 def thread(message_id: str):
-    """Debug/agent helper: show a reply thread rooted at a msgId."""
+    """Show a reply thread rooted at a msgId."""
     _, t = _resolve_scoped_team(None, required=True)
     assert t is not None
     ws = _resolve_workspace(t, required=True)
@@ -1395,10 +1403,10 @@ def doctor(agent_name: str, include_skills: bool):
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
-@cli.command(hidden=True)
+@cli.command()
 @click.argument("agent_name", required=False, default="")
 def activity(agent_name: str):
-    """Debug/agent helper: classify transcript activity as active/idle/unknown."""
+    """Classify transcript activity as active/idle/unknown."""
     _, t = _resolve_scoped_team(None, required=True)
     assert t is not None
     ws = _resolve_workspace(t, required=True)
