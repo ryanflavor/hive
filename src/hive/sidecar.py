@@ -35,11 +35,13 @@ IDLE_SLEEP = 5.0
 ACTIVE_SLEEP = 0.5
 OBSERVATION_TIMEOUT = 60.0
 POST_QUEUE_TIMEOUT = 10.0
+POST_EXCEPTION_FOLLOWUP_TIMEOUT = 10.0
 SOCKET_READY_TIMEOUT = 2.0
 SOCKET_RETRY_INTERVAL = 0.1
 SEND_GRACE_TIMEOUT = 3.0
 SEND_REQUEST_TIMEOUT = SEND_GRACE_TIMEOUT + 2.0
 SIDECAR_API_VERSION = 5
+_FINALIZE_PENDING = "__finalize__"
 
 
 def _compute_build_hash() -> str:
@@ -231,6 +233,71 @@ def _effective_deadline(record: dict[str, Any]) -> float:
         return last_queued_at + POST_QUEUE_TIMEOUT
     deadline = record.get("deadlineAt", 0)
     return float(deadline) if isinstance(deadline, (int, float)) else 0.0
+
+
+def _pending_terminal_result(record: dict[str, Any]) -> str:
+    result = str(record.get("terminalNotifiedResult", "") or "")
+    if result in {"unconfirmed", "tracking_lost"}:
+        return result
+    return ""
+
+
+def _exception_followup_active(record: dict[str, Any], *, now: float) -> bool:
+    followup_until = record.get("terminalFollowupUntil", 0)
+    if not isinstance(followup_until, (int, float)):
+        return False
+    return now <= float(followup_until)
+
+
+def _pending_delivery_state(record: dict[str, Any], observation: dict[str, Any] | None = None) -> dict[str, Any]:
+    runtime_queue_state = str(record.get("runtimeQueueState", "unknown"))
+    queue_source = str(record.get("queueSource", "none"))
+    inject_status = "submitted"
+    turn_observed = "pending"
+    observation_result = _pending_terminal_result(record)
+    observed_at = ""
+
+    if observation is not None:
+        metadata = observation.get("metadata", {})
+        if isinstance(metadata, dict):
+            observation_result = str(metadata.get("result") or observation_result)
+            observed_at = str(metadata.get("observedAt") or "")
+            inject_status = (
+                str(metadata.get("injectStatus", ""))
+                or ("failed" if observation_result == "failed" else "submitted")
+            )
+            turn_observed = str(metadata.get("turnObserved", "")) or turn_observed
+            runtime_queue_state = str(metadata.get("runtimeQueueState", runtime_queue_state))
+            queue_source = str(metadata.get("queueSource", queue_source))
+
+    if not turn_observed:
+        if observation_result in {"confirmed", "unconfirmed"}:
+            turn_observed = observation_result
+        elif observation_result == "failed":
+            turn_observed = "unavailable"
+        else:
+            turn_observed = "pending"
+
+    payload: dict[str, Any] = {
+        "state": present_delivery_state(
+            inject_status=inject_status,
+            turn_observed=turn_observed,
+            runtime_queue_state=runtime_queue_state,
+            observation_result=observation_result,
+        ),
+        "injectStatus": inject_status,
+        "turnObserved": turn_observed,
+    }
+    if runtime_queue_state != "unknown":
+        payload["runtimeQueueState"] = runtime_queue_state
+    if queue_source and queue_source != "none":
+        payload["queueSource"] = queue_source
+    if observed_at:
+        payload["observedAt"] = observed_at
+    guidance = delivery_guidance(str(payload["state"]))
+    if guidance is not None:
+        payload.update(guidance)
+    return payload
 
 
 def _apply_queue_probe(record: dict[str, Any], probe: dict[str, str]) -> None:
@@ -821,27 +888,13 @@ def _delivery_payload(workspace: str, pending: dict[str, dict[str, Any]], messag
 
     if message_id in pending:
         record = pending[message_id]
-        runtime_queue_state = str(record.get("runtimeQueueState", "unknown"))
-        queue_source = str(record.get("queueSource", "none"))
+        delivery = _pending_delivery_state(record, obs)
         payload: dict[str, Any] = {
             "ok": True,
             "msgId": message_id,
             "to": send_event.get("to", ""),
-            "state": present_delivery_state(
-                inject_status=inject_status,
-                turn_observed="pending",
-                runtime_queue_state=runtime_queue_state,
-            ),
-            "injectStatus": inject_status,
-            "turnObserved": "pending",
         }
-        if runtime_queue_state != "unknown":
-            payload["runtimeQueueState"] = runtime_queue_state
-        if queue_source:
-            payload["queueSource"] = queue_source
-        guidance = delivery_guidance(str(payload["state"]))
-        if guidance is not None:
-            payload.update(guidance)
+        payload.update(delivery)
         return payload
 
     if obs is not None:
@@ -1340,16 +1393,8 @@ def _thread_payload(workspace: str, pending: dict[str, dict[str, Any]], message_
 
         if thread_msg_id in pending:
             record = pending[thread_msg_id]
-            delivery: dict[str, Any] = {
-                "state": present_delivery_state(
-                    inject_status="submitted",
-                    turn_observed="pending",
-                    runtime_queue_state=str(record.get("runtimeQueueState", "unknown")),
-                )
-            }
-            if record.get("queueSource"):
-                delivery["queueSource"] = record["queueSource"]
-            item["delivery"] = delivery
+            observation = latest_observations.get(thread_msg_id, (None, None))[1]
+            item["delivery"] = _pending_delivery_state(record, observation)
         elif thread_msg_id in latest_observations:
             _, observation = latest_observations[thread_msg_id]
             metadata = observation.get("metadata", {})
@@ -1452,6 +1497,9 @@ def _open_server_socket(workspace: str) -> socket.socket:
 
 
 def _live_state(record: dict[str, Any]) -> str:
+    terminal_result = _pending_terminal_result(record)
+    if terminal_result:
+        return terminal_result
     return "queued" if record.get("runtimeQueueState") == "queued" else "pending"
 
 
@@ -1652,6 +1700,9 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                 result = _check_pending(record)
                 if result is None:
                     continue
+                if result == _FINALIZE_PENDING:
+                    pending.pop(message_id, None)
+                    continue
                 _write_observation(
                     workspace,
                     message_id,
@@ -1661,8 +1712,11 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                 if result in ("unconfirmed", "tracking_lost"):
                     sender_pane = record.get("senderPane", "")
                     target_agent = record.get("targetAgent", "")
+                    record["terminalNotifiedResult"] = result
+                    record["terminalFollowupUntil"] = time.time() + POST_EXCEPTION_FOLLOWUP_TIMEOUT
                     if sender_pane:
                         _inject_exception(sender_pane, message_id, target_agent, result)
+                    continue
                 pending.pop(message_id, None)
     finally:
         try:
@@ -1694,6 +1748,10 @@ def _check_pending(record: dict[str, Any]) -> str | None:
         _apply_queue_probe(record, probe)
         if probe.get("state") == "queued":
             return None
+        if _pending_terminal_result(record):
+            if _exception_followup_active(record, now=now):
+                return None
+            return _FINALIZE_PENDING
         if now > deadline:
             return "tracking_lost"
         return None
@@ -1712,6 +1770,11 @@ def _check_pending(record: dict[str, Any]) -> str | None:
     _apply_queue_probe(record, probe)
     if probe.get("state") == "queued":
         return None
+
+    if _pending_terminal_result(record):
+        if _exception_followup_active(record, now=now):
+            return None
+        return _FINALIZE_PENDING
 
     if now > _effective_deadline(record):
         return "unconfirmed"

@@ -118,6 +118,60 @@ def test_check_pending_uses_post_queue_timeout_after_queue_disappears(monkeypatc
     assert sidecar._check_pending(record) == "unconfirmed"
 
 
+def test_check_pending_keeps_followup_window_open_after_unconfirmed(monkeypatch, tmp_path):
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("")
+
+    now = 300.0
+    monkeypatch.setattr(sidecar.time, "time", lambda: now)
+    monkeypatch.setattr(
+        sidecar,
+        "detect_runtime_queue_state",
+        lambda **_kw: {"state": "not_queued", "source": "capture", "observedAt": "2026-04-14T00:00:00Z"},
+    )
+
+    record = {
+        "msgId": "ab12",
+        "targetTranscript": str(transcript),
+        "targetPane": "%1",
+        "targetCli": "codex",
+        "baseline": 0,
+        "deadlineAt": now - 30,
+        "terminalNotifiedResult": "unconfirmed",
+        "terminalFollowupUntil": now + 5,
+        "queueProbeText": "hello from queue preview",
+    }
+
+    assert sidecar._check_pending(record) is None
+
+
+def test_check_pending_finalizes_after_followup_window_expires(monkeypatch, tmp_path):
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("")
+
+    now = 400.0
+    monkeypatch.setattr(sidecar.time, "time", lambda: now)
+    monkeypatch.setattr(
+        sidecar,
+        "detect_runtime_queue_state",
+        lambda **_kw: {"state": "not_queued", "source": "capture", "observedAt": "2026-04-14T00:00:00Z"},
+    )
+
+    record = {
+        "msgId": "ab12",
+        "targetTranscript": str(transcript),
+        "targetPane": "%1",
+        "targetCli": "codex",
+        "baseline": 0,
+        "deadlineAt": now - 30,
+        "terminalNotifiedResult": "unconfirmed",
+        "terminalFollowupUntil": now - 1,
+        "queueProbeText": "hello from queue preview",
+    }
+
+    assert sidecar._check_pending(record) == sidecar._FINALIZE_PENDING
+
+
 def test_inject_exception_uses_honest_unconfirmed_wording(monkeypatch):
     sent: list[tuple[str, str, str]] = []
     monkeypatch.setattr(

@@ -221,6 +221,46 @@ def test_delivery_unconfirmed_reports_cautious_retry_guidance(runner, configure_
     assert "not confirmed" in payload["meaning"]
 
 
+def test_delivery_pending_record_retains_unconfirmed_state_during_followup(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    _setup_team(monkeypatch, workspace)
+    _patch_sidecar_status_requests(monkeypatch)
+
+    bus.write_event(
+        workspace,
+        from_agent="claude",
+        to_agent="gpt",
+        intent="send",
+        body="slow msg",
+        message_id="u2",
+    )
+
+    pending = {
+        "u2": {
+            "runtimeQueueState": "not_queued",
+            "queueSource": "capture",
+            "terminalNotifiedResult": "unconfirmed",
+            "terminalFollowupUntil": 9999999999.0,
+        }
+    }
+    monkeypatch.setattr(
+        "hive.sidecar.request_delivery",
+        lambda ws, message_id: sidecar._delivery_payload(
+            ws,
+            pending,
+            message_id,
+        ),
+    )
+
+    result = runner.invoke(cli, ["delivery", "u2"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["state"] == "unconfirmed"
+    assert payload["recommendedAction"] == "cautious_retry"
+
+
 # --- doctor ---
 
 
