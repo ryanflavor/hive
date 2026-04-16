@@ -44,6 +44,20 @@ When touching `/cvim` popup sendback behavior, keep `tests/unit/test_cvim_comman
 
 Follow the existing history style: short conventional messages such as `fix: ...`, `refactor: ...`, or `docs: ...`. Keep commits scoped to one logical change. Before opening a PR, run the relevant pytest targets, summarize the behavioral change, and call out tmux/droid assumptions or manual verification steps.
 
+## Version Bump
+
+Only bump when the user explicitly says `bump`（或 `commit push bump`）. Normal `commit push` does **not** bump.
+
+When bumping, scan all commits since the last version bump commit and determine the level automatically:
+
+1. Find the last commit that touched `pyproject.toml` version (or the last `chore: bump version` commit).
+2. Collect all commit headers between that point and HEAD.
+3. Determine bump level from the **highest prefix** in that range:
+   - Any `feat:` → bump **minor** (e.g. 0.4.0 → 0.5.0)
+   - Only `fix:` / `refactor:` / `perf:` / `docs:` / `test:` / `chore:` → bump **patch** (e.g. 0.4.0 → 0.4.1)
+4. **Never auto-bump major.** If any commit has breaking changes (`!` suffix or `BREAKING CHANGE`), ask the user.
+5. Edit `pyproject.toml` version, commit as `chore: bump version to X.Y.Z`, then push.
+
 ## Security & Runtime Notes
 
 Do not hardcode secrets, session IDs, or local machine paths. Hive depends on `tmux` and Factory `droid`; e2e tests assume tmux is available and use a fake droid binary for isolation.
