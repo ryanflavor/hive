@@ -282,6 +282,63 @@ def test_reply_honors_explicit_reply_to_override(runner, configure_hive_home, mo
     assert latest_outbound.get("inReplyTo") == first.msg_id
 
 
+def test_send_rejects_legacy_to_option_with_positional_hint(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+
+    called = []
+    monkeypatch.setattr(
+        "hive.cli._resolve_scoped_team",
+        lambda _team, required=True: called.append("resolved") or ("team-x", object()),
+    )
+
+    result = runner.invoke(cli, ["send", "--to", "gpt", "--msg", "hello"])
+
+    assert result.exit_code != 0
+    assert "hive send takes positional args" in result.output
+    assert "Drop --to/--msg" in result.output
+    assert called == []  # Guard must short-circuit before touching the team.
+
+
+def test_send_without_agent_surfaces_usage_hint(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+
+    called = []
+    monkeypatch.setattr(
+        "hive.cli._resolve_scoped_team",
+        lambda _team, required=True: called.append("resolved") or ("team-x", object()),
+    )
+
+    result = runner.invoke(cli, ["send"])
+
+    assert result.exit_code != 0
+    assert "hive send requires <agent>" in result.output
+    assert "Drop --to/--msg" not in result.output
+    assert called == []
+
+
+def test_reply_rejects_legacy_msg_option_with_positional_hint(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+
+    called = []
+    monkeypatch.setattr(
+        "hive.cli._resolve_scoped_team",
+        lambda _team, required=True: called.append("resolved") or ("team-x", object()),
+    )
+
+    result = runner.invoke(cli, ["reply", "dodo", "--msg", "hello"])
+
+    assert result.exit_code != 0
+    assert "hive reply takes positional args" in result.output
+    assert "Drop --to/--msg" in result.output
+    assert called == []
+
+
 def test_send_requires_tmux(runner, monkeypatch):
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: False)
 

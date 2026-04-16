@@ -241,6 +241,33 @@ def _ensure_pane_in_scope(t: Team, pane_id: str) -> None:
         _fail(f"pane '{pane_id}' already belongs to team '{pane_team}'")
 
 
+def _reject_legacy_recipient_options(
+    to_option: str | None,
+    msg_option: str | None,
+    *,
+    command: str,
+    to_agent: str,
+) -> None:
+    """Reject --to/--msg misuse and require a positional target agent."""
+    if to_option is None and msg_option is None:
+        if to_agent:
+            return
+        _fail(f"hive {command} requires <agent>. Usage: hive {command} <agent> \"<body>\".")
+    _fail(
+        f"hive {command} takes positional args: hive {command} <agent> \"<body>\". "
+        "Drop --to/--msg."
+    )
+
+
+def _maybe_warn_long_body(body: str, *, command: str) -> None:
+    from .runtime_state import body_warning_hint, format_body_warning
+
+    hint = body_warning_hint(body)
+    if hint is None:
+        return
+    click.echo(format_body_warning(command=command, hint=hint), err=True)
+
+
 def _fail(msg: str) -> None:
     click.echo(f"Error: {msg}", err=True)
     sys.exit(1)
@@ -1265,7 +1292,7 @@ def status_show(legacy_args: tuple[str, ...]):
 
 
 @cli.command()
-@click.argument("to_agent")
+@click.argument("to_agent", required=False, default="")
 @click.argument("body", required=False, default="")
 @click.option("--artifact", default="", help="Artifact path for large payloads")
 @click.option("--reply-to", default="", help="Message ID this is replying to")
@@ -1274,12 +1301,16 @@ def status_show(legacy_args: tuple[str, ...]):
     is_flag=True,
     help="Block until transcript confirms delivery; if the runtime queue is visible first, state=queued and background tracking continues",
 )
+@click.option("--to", "to_option", hidden=True, default=None)
+@click.option("--msg", "msg_option", hidden=True, default=None)
 def send(
     to_agent: str,
     body: str,
     artifact: str,
     reply_to: str,
     wait: bool,
+    to_option: str | None,
+    msg_option: str | None,
 ):
     """Send a Hive message to another agent.
 
@@ -1287,6 +1318,7 @@ def send(
     `confirmed` means delivery was confirmed in the initial send window.
     `failed` means local submit failed and should be retried.
     """
+    _reject_legacy_recipient_options(to_option, msg_option, command="send", to_agent=to_agent)
     team_name, t = _resolve_scoped_team(None, required=True)
     assert team_name is not None and t is not None
     sender = _resolve_sender(None)
@@ -1294,6 +1326,7 @@ def send(
     resolved_artifact = _resolve_artifact_path(artifact, workspace=ws)
     from .sidecar import request_send
 
+    _maybe_warn_long_body(body, command="send")
     _ensure_team_sidecar(t, ws)
     payload = request_send(
         str(ws),
@@ -1315,7 +1348,7 @@ def send(
 
 
 @cli.command()
-@click.argument("to_agent")
+@click.argument("to_agent", required=False, default="")
 @click.argument("body", required=False, default="")
 @click.option("--artifact", default="", help="Artifact path for large payloads")
 @click.option(
@@ -1329,12 +1362,16 @@ def send(
     is_flag=True,
     help="Block until transcript confirms delivery; if the runtime queue is visible first, state=queued and background tracking continues",
 )
+@click.option("--to", "to_option", hidden=True, default=None)
+@click.option("--msg", "msg_option", hidden=True, default=None)
 def reply(
     to_agent: str,
     body: str,
     artifact: str,
     reply_to_override: str,
     wait: bool,
+    to_option: str | None,
+    msg_option: str | None,
 ):
     """Reply to the latest unanswered inbound message from another agent.
 
@@ -1344,6 +1381,7 @@ def reply(
     ``--reply-to`` explicitly; ``hive reply`` never guesses across
     competing threads.
     """
+    _reject_legacy_recipient_options(to_option, msg_option, command="reply", to_agent=to_agent)
     team_name, t = _resolve_scoped_team(None, required=True)
     assert team_name is not None and t is not None
     sender = _resolve_sender(None)
@@ -1369,6 +1407,7 @@ def reply(
     resolved_artifact = _resolve_artifact_path(artifact, workspace=ws)
     from .sidecar import request_send
 
+    _maybe_warn_long_body(body, command="reply")
     _ensure_team_sidecar(t, ws)
     payload = request_send(
         str(ws),
