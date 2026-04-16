@@ -19,6 +19,9 @@ _DEFAULT_REMOTE_SKILL_SOURCE = "https://github.com/notdp/hive"
 
 
 def _canonical_hive_skill_bytes() -> bytes:
+    repo_root = _local_repo_root()
+    if repo_root is not None:
+        return (repo_root / "skills" / _HIVE_SKILL_NAME / "SKILL.md").read_bytes()
     resource = resources.files("hive.core_assets")
     for part in _HIVE_SKILL_RESOURCE:
         resource = resource.joinpath(part)
