@@ -52,9 +52,10 @@ When bumping, scan all commits since the last version bump commit and determine 
 
 1. Find the last commit that touched `pyproject.toml` version (or the last `chore: bump version` commit).
 2. Collect all commit headers between that point and HEAD.
-3. Determine bump level from the **highest prefix** in that range:
-   - Any `feat:` → bump **minor** (e.g. 0.4.0 → 0.5.0)
-   - Only `fix:` / `refactor:` / `perf:` / `docs:` / `test:` / `chore:` → bump **patch** (e.g. 0.4.0 → 0.4.1)
+3. Determine bump level from the **highest impact** in that range:
+   - Bump **minor** only when there is a large user-facing feat: a genuinely new capability, workflow, or command surface, or a significant change in default behavior or external integration (e.g. 0.4.0 → 0.5.0)
+   - Everything else is **patch**, including internal `feat:` improvements, reliability/performance, diagnostics, help/docs/skill text, refactors, and polish or surfacing of existing behavior (e.g. 0.4.0 → 0.4.1)
+   - When in doubt, default to **patch**
 4. **Never auto-bump major.** If any commit has breaking changes (`!` suffix or `BREAKING CHANGE`), ask the user.
 5. Edit `pyproject.toml` version, commit as `chore: bump version to X.Y.Z`, then push.
 
