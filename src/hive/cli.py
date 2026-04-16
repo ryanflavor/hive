@@ -253,15 +253,20 @@ def _resolve_workspace(team: Team | None = None, required: bool = False) -> str:
     return ""
 
 
-def _default_auto_workspace_path(session_name: str, window_index: str) -> Path:
-    return Path(f"/tmp/hive-{session_name}-{window_index}")
+def _default_auto_workspace_path(session_name: str, window_id: str) -> Path:
+    slug = window_id.lstrip("@") if window_id else "0"
+    return Path(f"/tmp/hive-{session_name}-{slug}")
 
 
 def _team_default_auto_workspace_path(team: Team) -> Path | None:
-    if not team.tmux_session or not team.tmux_window or ":" not in team.tmux_window:
+    if not team.tmux_session:
         return None
-    window_index = team.tmux_window.rsplit(":", 1)[-1]
-    return _default_auto_workspace_path(team.tmux_session, window_index)
+    window_id = getattr(team, "tmux_window_id", "") or ""
+    if not window_id and team.tmux_window and ":" in team.tmux_window:
+        window_id = team.tmux_window.rsplit(":", 1)[-1]
+    if not window_id:
+        return None
+    return _default_auto_workspace_path(team.tmux_session, window_id)
 
 
 def _team_uses_default_auto_workspace(team: Team) -> bool:
@@ -794,6 +799,7 @@ def init_cmd(name: str, workspace: str, notify: bool):
 
     session_name = tmux.get_current_session_name() or "hive"
     window_index = tmux.get_current_window_index() or "0"
+    window_id = tmux.get_current_window_id() or ""
     window_target = tmux.get_current_window_target()
     current_pane = tmux.get_current_pane_id()
     existing = _discover_tmux_binding()
@@ -856,7 +862,7 @@ def init_cmd(name: str, workspace: str, notify: bool):
         # Stale tag on another window — clean it up so we can claim the name.
         _gc_stale_team_windows(team_name, keep=window_target or "", all_windows=[existing_wt])
 
-    default_ws_path = _default_auto_workspace_path(session_name, window_index)
+    default_ws_path = _default_auto_workspace_path(session_name, window_id or window_index)
     using_auto_workspace = not workspace
     ws_path = Path(workspace).expanduser() if workspace else default_ws_path
     ws = str(ws_path)
