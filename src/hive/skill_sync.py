@@ -45,6 +45,10 @@ def _refresh_command() -> str:
     return f"npx skills add {source} -g --skill {_HIVE_SKILL_NAME} --agent '*' -y"
 
 
+def _update_command() -> str:
+    return f"npx skills update {_HIVE_SKILL_NAME} -g"
+
+
 def _shared_hive_skill_path() -> Path:
     return Path.home() / ".agents" / "skills" / _HIVE_SKILL_NAME / "SKILL.md"
 
@@ -69,6 +73,7 @@ def diagnose_hive_skill(cli: str) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "skill": _HIVE_SKILL_NAME,
         "cli": normalized,
+        "updateCommand": _update_command(),
         "refreshCommand": _refresh_command(),
         "canonicalSource": "package:hive.core_assets/skills/hive/SKILL.md",
     }
@@ -210,7 +215,9 @@ def render_hive_skill_warning(payload: dict[str, Any]) -> str:
     if payload.get("sharedExists"):
         lines.append(f"  shared:    {payload.get('sharedPath', '')}")
     lines.extend([
-        "Refresh with:",
+        "Update with:",
+        f"  {payload.get('updateCommand', _update_command())}",
+        "For local development or a forced refresh, run:",
         f"  {payload.get('refreshCommand', _refresh_command())}",
         "Inspect details with:",
         "  hive doctor --skills",
@@ -223,7 +230,9 @@ def render_version_upgrade_warning(payload: dict[str, Any]) -> str:
     current = payload.get("currentVersion") or "(unknown)"
     return "\n".join([
         f"Notice: hive upgraded from {previous} to {current}.",
-        "If this workspace uses the hive skill, refresh the installed skill with:",
+        "If this workspace uses the hive skill, update the installed skill with:",
+        f"  {payload.get('updateCommand', _update_command())}",
+        "For local development or a forced refresh, run:",
         f"  {payload.get('refreshCommand', _refresh_command())}",
         "Inspect details with:",
         "  hive doctor --skills",
@@ -236,6 +245,7 @@ def check_version_upgrade(
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "package": "hive",
+        "updateCommand": _update_command(),
         "refreshCommand": _refresh_command(),
     }
     try:

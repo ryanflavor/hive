@@ -462,6 +462,33 @@ def _tmux_runtime_required(argv: list[str]) -> bool:
     return positional[0] not in _TMUX_OPTIONAL_ROOT_COMMANDS
 
 
+def _current_pane_agent_cli() -> str:
+    if not tmux.is_inside_tmux():
+        return ""
+    pane_id = tmux.get_current_pane_id() or ""
+    if not pane_id:
+        return ""
+    option_cli = normalize_command(tmux.get_pane_option(pane_id, "hive-cli") or "")
+    if option_cli in AGENT_CLI_NAMES:
+        return option_cli
+    profile = detect_profile_for_pane(pane_id)
+    if profile:
+        return profile.name
+    return ""
+
+
+def _stderr_is_interactive() -> bool:
+    return sys.stderr.isatty()
+
+
+def _warn_if_current_pane_hive_skill_is_stale() -> None:
+    if not _stderr_is_interactive():
+        return
+    cli_name = _current_pane_agent_cli()
+    if cli_name:
+        skill_sync.maybe_warn_hive_skill_drift(cli_name)
+
+
 @click.group(cls=SectionedHelpGroup)
 @click.pass_context
 def cli(ctx: click.Context):
@@ -471,6 +498,7 @@ def cli(ctx: click.Context):
     if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
         return
     skill_sync.check_version_upgrade()
+    _warn_if_current_pane_hive_skill_is_stale()
     if ctx.invoked_subcommand not in _TMUX_OPTIONAL_ROOT_COMMANDS and ctx.invoked_subcommand is not None and not tmux.is_inside_tmux():
         _fail(_TMUX_REQUIRED_MESSAGE)
 

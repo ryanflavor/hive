@@ -6,6 +6,8 @@ def test_hive_skill_guides_multiline_send_via_artifact():
 
     assert 'npx skills add https://github.com/notdp/hive -g --skill hive --agent \'*\' -y' in skill_text
     assert 'npx skills add "$PWD" -g --skill hive --agent \'*\' -y' in skill_text
+    assert "pipx upgrade hive" in skill_text
+    assert "npx skills update hive -g" in skill_text
     assert "--artifact -" in skill_text
     assert "stdin artifact" in skill_text
     assert "不要把 `$(cat <<EOF ...)` 这类多行 command substitution 直接塞进 `hive send`" in skill_text
@@ -28,6 +30,8 @@ def test_hive_install_docs_use_npx_skills_add_as_canonical_path():
     readme_text = (repo_root / "README.md").read_text()
     agents_text = (repo_root / "AGENTS.md").read_text()
 
+    assert "pipx upgrade hive" in readme_text
+    assert "npx skills update hive -g" in readme_text
     assert 'npx skills add https://github.com/notdp/hive -g --skill hive --agent \'*\' -y' in readme_text
     assert 'npx skills add "$PWD" -g --skill hive --agent \'*\' -y' in readme_text
     assert 'Plugin enable does not install or refresh the base `hive` skill' in readme_text

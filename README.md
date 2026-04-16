@@ -25,11 +25,13 @@ Requires: Python 3.11+, tmux, at least one agent CLI (`claude`, `codex`, or `dro
 
 ```bash
 pipx install git+https://github.com/notdp/hive.git
-pipx upgrade hive   # update to latest
+pipx upgrade hive   # update the Hive CLI
 npx skills add https://github.com/notdp/hive -g --skill hive --agent '*' -y
+npx skills update hive -g   # update the globally installed hive skill
 ```
 
 Use `npx skills add` as the canonical installation path for the base `hive` skill. `hive plugin enable ...` installs plugin commands and plugin-owned skills such as `code-review`; it does not update the repo-root `skills/hive/SKILL.md`.
+Upgrading the CLI does not refresh the installed `hive` skill automatically. When the skill is stale, `hive` commands run from an agent pane warn on stderr, and `hive doctor --skills` shows the exact mismatch.
 
 For local development against your current checkout, install the skill from the repo path instead of GitHub:
 
