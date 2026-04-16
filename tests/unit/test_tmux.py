@@ -190,23 +190,13 @@ def test_current_window_helpers_return_none_without_tmux_pane(monkeypatch):
 def test_list_panes_with_titles_and_full_parse_rows(monkeypatch):
     outputs = {
         "#{pane_id}\t#{pane_title}": "%1\tmain\n%2\tworker\n",
-        tmux._PANE_BASE_FMT: "%1\tmain\tdroid\n%2\tshell\tzsh\n",
-    }
-    pane_options = {
-        ("%1", "@hive-role"): "agent\n",
-        ("%1", "@hive-agent"): "claude\n",
-        ("%1", "@hive-team"): "team-a\n",
-        ("%2", "@hive-role"): "terminal\n",
-        ("%2", "@hive-agent"): "term-1\n",
-        ("%2", "@hive-team"): "team-a\n",
+        tmux._PANE_BASE_FMT: (
+            "%1\tmain\tdroid\tagent\tclaude\tteam-a\t\n"
+            "%2\tshell\tzsh\tterminal\tterm-1\tteam-a\t\n"
+        ),
     }
 
     def _fake_run(args, check=False, timeout=5):
-        if args[0] == "show-options":
-            key = (args[4], args[5])
-            if key not in pane_options:
-                return subprocess.CompletedProcess(["tmux", *args], 1, "", "")
-            return subprocess.CompletedProcess(["tmux", *args], 0, pane_options[key], "")
         fmt = args[-1]
         return subprocess.CompletedProcess(["tmux", *args], 0, outputs[fmt], "")
 

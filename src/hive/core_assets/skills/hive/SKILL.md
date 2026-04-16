@@ -90,17 +90,20 @@ hive teams                            # 列出已知 team
 5. 发任务、回传结果、同步进度时，默认写成 `hive send <name> "<short summary>" --artifact <path>`；不要把长报告、长 checklist、详细设计讨论、长 diff 说明直接塞进消息正文
 6. 详细内容、多行结构化内容、需要后续引用的上下文一律先写 artifact。首选 stdin artifact：`... | hive send <name> "<message>" --artifact -`；只有已有现成文件时才传 `--artifact <path>`。不要把 `$(cat <<EOF ...)` 这类多行 command substitution 直接塞进 `hive send`
 7. `hive team` 显示每个 agent 的 runtime `inputState`（ready / waiting_user / unknown / offline）；如果某个 agent 的 `inputState` 是 `waiting_user`，说明它在等答案，用 `hive answer` 回答
-8. `hive notify` 只面向当前 pane 的用户，不用于 agent 之间互相通知
-9. 只有当"不马上看这条通知，agent 就无法继续，或者用户会错过关键时机"时，才允许 `hive notify`
-10. 允许触发 `hive notify` 的典型场景：任务完成且用户明确在等结果；需要用户做决策；遇到阻塞且必须用户介入；执行 `git push`、覆盖文件、跑迁移、删除数据等高风险动作前需要确认
-11. 禁止用 `hive notify` 做这些事：普通进度汇报、阶段性小完成、可选建议、agent 仍可自行继续推进的情况；凡是能通过 `hive team` 或 artifact 表达的，就不要打断用户
-12. `hive notify` 的文案应站在 agent 对 user 说话的角度，直接说清楚"发生了什么 / 为什么现在需要你 / 按 `Space` 回来后要做什么"；浮层里按 `Space` 会跳回当前 pane，按任意键只关闭浮层
-13. 升级顺序不是“先问用户再找人”，而是默认先在团队内讨论。需要评审、设计分歧、风险判断、卡住、能力不匹配时，先用 `hive suggest` 找候选，再优先找 **非同源模型 / 非同 CLI** 的 agent 讨论或接手。只有满足以下任一条件时才升级给用户：(a) 团队内没有合适 agent 可问；(b) 决策涉及不可逆外部副作用（`git push`、发 PR comment、删除数据、通知外部系统）；(c) 用户明确要求参与该类决策。
-14. 不要等用户每次手动提醒你“先去和 xxx 讨论”。这是默认协作路径，不是用户临时指令。
-15. 收到新的独立任务而你手头工作不该中断时，优先 `hive fork --join-as <name> --prompt "<task summary>"` 或 `hive spawn` 分出处理者；只有在你明确只想分一个未注册的旁路 pane 时，才用 bare `hive fork`。
-16. `--prompt` 里要直接写清 initial prompt：先跑 `hive thread <msgId>` 拿原始上下文、要处理什么、相关 artifact 在哪、以及处理完成后应该 reply-to 谁。只有在你没用 `--prompt` 时，才退回手动 `hive send <fork-name> "<task summary>" [--artifact <path>]` 给分身下任务。
-17. 新的处理者收到 initial prompt 后，第一件事是用 `hive send <sender> "<short takeover with reason>" --reply-to <msgId>` 通知原 sender “这个任务现在由我接管”，并顺手说明为什么换人，例如“从 orch 手中接管了 X 任务，因为 orch 正在处理 Y”；不要让原 pane 先做中继。
-18. 新的处理者完成处理后，继续自己用 `hive send <sender> "<done summary>" --reply-to <msgId> [--artifact <path>]` 沿同一条 thread 回结果；后续 question / update 也都继续沿这条 thread 回复。
+8. 当你准备做以下任一动作时，先暂停，不要直接找用户：向用户提问、请求用户确认技术方案、用 `hive notify` 打断用户、让用户决定下一步该找谁/是否该先找别人讨论。
+9. 遇到评审、设计分歧、风险判断、实现卡住、上下文不足、能力不匹配、需要接手、需要 review、或不确定该由谁继续时，默认这是团队内问题，不是用户问题；升级给用户前，必须先跑 `hive team`，若问题适合协作，再跑 `hive suggest`，并优先联系 **非同源模型 / 非同 CLI** 的 agent。
+10. 在未完成上面的协作检查前，禁止直接问用户 `要不要我先找别人讨论`、`要不要我先问 orch/xxx`、`下一步该找谁 review/接手`；也禁止因为自己暂时不确定，就直接把技术判断升级给用户。不要把用户当传话筒。
+11. 只有满足以下任一条件时，才允许升级给用户：(a) 你已经完成 `hive team` / `hive suggest` 检查，仍然没有合适 agent 可问；(b) 决策涉及不可逆外部副作用，如 `git push`、发 PR comment、删除数据、跑迁移、通知外部系统；(c) 需要用户提供团队内任何 agent 都不掌握的信息、授权或偏好；(d) 用户明确要求参与这类决策。
+12. 升级给用户时，必须直接说明为什么这一步不能在团队内消化，优先使用这种句式：`已先检查 hive team / hive suggest；这一步仍需你决定，因为 ...`；不要只把原问题原样抛给用户。
+13. `hive notify` 只面向当前 pane 的用户，不用于 agent 之间互相通知
+14. 只有当”不马上看这条通知，agent 就无法继续，或者用户会错过关键时机”时，才允许 `hive notify`
+15. 允许触发 `hive notify` 的典型场景：任务完成且用户明确在等结果；需要用户做决策；遇到阻塞且必须用户介入；执行 `git push`、覆盖文件、跑迁移、删除数据等高风险动作前需要确认
+16. 禁止用 `hive notify` 做这些事：普通进度汇报、阶段性小完成、可选建议、agent 仍可自行继续推进的情况；凡是能通过 `hive team` 或 artifact 表达的，就不要打断用户
+17. `hive notify` 的文案应站在 agent 对 user 说话的角度，直接说清楚”发生了什么 / 为什么现在需要你 / 按 `Space` 回来后要做什么”；浮层里按 `Space` 会跳回当前 pane，按任意键只关闭浮层
+18. 收到新的独立任务而你手头工作不该中断时，优先 `hive fork --join-as <name> --prompt "<task summary>"` 或 `hive spawn` 分出处理者；只有在你明确只想分一个未注册的旁路 pane 时，才用 bare `hive fork`。
+19. `--prompt` 里要直接写清 initial prompt：先跑 `hive thread <msgId>` 拿原始上下文、要处理什么、相关 artifact 在哪、以及处理完成后应该 reply-to 谁。只有在你没用 `--prompt` 时，才退回手动 `hive send <fork-name> "<task summary>" [--artifact <path>]` 给分身下任务。
+20. 新的处理者收到 initial prompt 后，第一件事是用 `hive send <sender> "<short takeover with reason>" --reply-to <msgId>` 通知原 sender "这个任务现在由我接管"，并顺手说明为什么换人，例如"从 orch 手中接管了 X 任务，因为 orch 正在处理 Y"；不要让原 pane 先做中继。
+21. 新的处理者完成处理后，继续自己用 `hive send <sender> "<done summary>" --reply-to <msgId> [--artifact <path>]` 沿同一条 thread 回结果；后续 question / update 也都继续沿这条 thread 回复。
 
 ## 协议边界
 

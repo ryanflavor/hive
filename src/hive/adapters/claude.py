@@ -22,8 +22,11 @@ from .base import (
     Message,
     MessagePart,
     SessionMeta,
+    normalize_command_token,
     parse_iso_timestamp,
     safe_json_loads,
+    safe_mtime,
+    str_or_none,
 )
 
 
@@ -46,7 +49,7 @@ class ClaudeAdapter:
             payload = _read_json_file(sessions_dir / f"{process.pid}.json")
             if not payload:
                 continue
-            session_id = _str_or_none(payload.get("sessionId"))
+            session_id = str_or_none(payload.get("sessionId"))
             if session_id:
                 newer_session_id = self._resolve_newer_project_session_id(
                     session_id,
@@ -86,7 +89,7 @@ class ClaudeAdapter:
         root = self._projects_root()
         if not root.is_dir():
             return []
-        files = sorted(root.rglob("*.jsonl"), key=_safe_mtime, reverse=True)
+        files = sorted(root.rglob("*.jsonl"), key=safe_mtime, reverse=True)
         out: list[SessionMeta] = []
         for path in files:
             meta = self.read_meta(path)
@@ -115,13 +118,13 @@ class ClaudeAdapter:
                     payload = safe_json_loads(raw.strip())
                     if not payload:
                         continue
-                    session_id = session_id or _str_or_none(payload.get("sessionId"))
-                    cwd = cwd or _str_or_none(payload.get("cwd"))
+                    session_id = session_id or str_or_none(payload.get("sessionId"))
+                    cwd = cwd or str_or_none(payload.get("cwd"))
                     timestamp = timestamp or parse_iso_timestamp(payload.get("timestamp"))
                     if not model:
                         msg = payload.get("message")
                         if isinstance(msg, dict):
-                            model = _str_or_none(msg.get("model"))
+                            model = str_or_none(msg.get("model"))
                     if session_id and cwd and model:
                         break
         except OSError:
@@ -156,20 +159,20 @@ class ClaudeAdapter:
         if current_path is None:
             return None
 
-        current_mtime_ns = _safe_mtime_ns(current_path)
+        current_mtime_ns = safe_mtime_ns(current_path)
         if current_mtime_ns < 0:
             return None
 
         project_dir = current_path.parent
         try:
-            candidates = sorted(project_dir.glob("*.jsonl"), key=_safe_mtime_ns, reverse=True)
+            candidates = sorted(project_dir.glob("*.jsonl"), key=safe_mtime_ns, reverse=True)
         except OSError:
             return None
 
         for candidate in candidates:
             if candidate == current_path:
                 continue
-            if _safe_mtime_ns(candidate) <= current_mtime_ns:
+            if safe_mtime_ns(candidate) <= current_mtime_ns:
                 break
             meta = self.read_meta(candidate)
             if meta and meta.session_id:
@@ -202,7 +205,7 @@ class ClaudeAdapter:
             payload = _read_json_file(sessions_dir / f"{process.pid}.json")
             if not payload:
                 continue
-            session_id = _str_or_none(payload.get("sessionId"))
+            session_id = str_or_none(payload.get("sessionId"))
             if session_id:
                 return session_id
         return None
@@ -228,8 +231,8 @@ def _claude_message_iter(handle) -> Iterator[Message]:
                 continue
             parts = tuple(_iter_claude_parts(msg.get("content")))
             yield Message(
-                message_id=_str_or_none(payload.get("uuid")),
-                parent_id=_str_or_none(payload.get("parentUuid")),
+                message_id=str_or_none(payload.get("uuid")),
+                parent_id=str_or_none(payload.get("parentUuid")),
                 role=str(msg.get("role") or record_type),
                 parts=parts,
                 timestamp=parse_iso_timestamp(payload.get("timestamp")),
@@ -254,7 +257,7 @@ def _iter_claude_parts(content: Any) -> Iterator[MessagePart]:
         elif kind == "tool_use":
             yield MessagePart(
                 kind="tool_use",
-                tool_name=_str_or_none(block.get("name")),
+                tool_name=str_or_none(block.get("name")),
                 tool_input=block.get("input") if isinstance(block.get("input"), dict) else None,
                 raw=block,
             )
@@ -280,16 +283,11 @@ def _read_json_file(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def _normalize(value: str) -> str:
-    value = (value or "").strip().lower().rsplit("/", 1)[-1]
-    return value.lstrip("-")
-
-
 def _is_claude_process(command: str, argv: str) -> bool:
-    if _normalize(command) == "claude":
+    if normalize_command_token(command) == "claude":
         return True
     for token in (argv or "").split():
-        if _normalize(token) == "claude":
+        if normalize_command_token(token) == "claude":
             return True
     return False
 
@@ -298,22 +296,10 @@ def _cwd_slug(cwd: str) -> str:
     return cwd.replace("/", "-")
 
 
-def _safe_mtime(path: Path) -> float:
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return -1
-
-
-def _safe_mtime_ns(path: Path) -> int:
+def safe_mtime_ns(path: Path) -> int:
     try:
         return path.stat().st_mtime_ns
     except OSError:
         return -1
 
 
-def _str_or_none(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value)
-    return text or None

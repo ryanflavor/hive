@@ -739,6 +739,7 @@ def _register_existing_pane(
 ) -> tuple[str, str, Agent | Terminal]:
     role, pane_cli = _classify_pane(pane)
     tmux.clear_pane_tags(pane.pane_id)
+    pane_cwd = tmux.display_value(pane.pane_id, "#{pane_current_path}") or os.getcwd()
     if role == "agent":
         agent_name = _derive_agent_name(seen_names)
         agent = _register_agent_member(
@@ -747,7 +748,7 @@ def _register_existing_pane(
             team_name=team_name,
             agent_name=agent_name,
             pane_cli=pane_cli,
-            cwd=os.getcwd(),
+            cwd=pane_cwd,
             notify=False,
         )
         return role, agent_name, agent

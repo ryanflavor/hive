@@ -452,6 +452,10 @@ _PANE_BASE_FMT = "\t".join([
     "#{pane_id}",
     "#{pane_title}",
     "#{pane_current_command}",
+    "#{@hive-role}",
+    "#{@hive-agent}",
+    "#{@hive-team}",
+    "#{@hive-cli}",
 ])
 
 
@@ -463,17 +467,16 @@ def list_panes_full(target: str) -> list[PaneInfo]:
         if not line:
             continue
         parts = line.split("\t")
-        while len(parts) < 3:
+        while len(parts) < 7:
             parts.append("")
-        pane_id = parts[0]
         result.append(PaneInfo(
-            pane_id=pane_id,
+            pane_id=parts[0],
             title=parts[1],
             command=parts[2],
-            role=get_pane_option(pane_id, "hive-role") or "",
-            agent=get_pane_option(pane_id, "hive-agent") or "",
-            team=get_pane_option(pane_id, "hive-team") or "",
-            cli=get_pane_option(pane_id, "hive-cli") or "",
+            role=parts[3] or "",
+            agent=parts[4] or "",
+            team=parts[5] or "",
+            cli=parts[6] or "",
         ))
     return result
 

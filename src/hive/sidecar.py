@@ -23,6 +23,7 @@ from .runtime_state import (
     delivery_exception_body,
     delivery_guidance,
     format_hive_envelope,
+    gate_guidance,
     present_delivery_state,
     present_send_state,
     project_thread_event,
@@ -536,7 +537,7 @@ def _send_payload(
     except Exception:
         transcript_path = None
 
-    _check_send_gate(transcript_path)
+    gate_status = _check_send_gate(transcript_path)
 
     event = bus.write_send_event(
         workspace,
@@ -698,6 +699,7 @@ def _send_payload(
         "to": target_agent,
         "msgId": message_id,
         "artifact": artifact,
+        "gate": gate_status,
         "state": present_send_state(
             inject_status=inject_status,
             turn_observed=turn_observed,
@@ -707,6 +709,9 @@ def _send_payload(
     guidance = send_guidance(str(payload["state"]))
     if guidance is not None:
         payload.update(guidance)
+    gate_info = gate_guidance(gate_status)
+    if gate_info is not None:
+        payload.update(gate_info)
     return payload
 
 

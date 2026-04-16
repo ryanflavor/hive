@@ -862,7 +862,24 @@ def test_gate_fail_open_no_transcript(runner, configure_hive_home, monkeypatch, 
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["state"] == "pending"
+    assert payload["gate"] == "skipped"
+    assert "gateNote" in payload
     assert "injectStatus" not in payload
+
+
+def test_gate_clear_appears_in_send_output(runner, configure_hive_home, monkeypatch, tmp_path):
+    """When transcript resolves successfully and gate is clear, output contains gate=clear."""
+    configure_hive_home()
+    workspace, transcript, sent = _gate_test_setup(monkeypatch, tmp_path, transcript_records=[
+        {"type": "user", "message": {"role": "user", "content": "hello"}},
+    ])
+
+    result = runner.invoke(cli, ["send", "gpt", "hello"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["gate"] == "clear"
+    assert "gateNote" not in payload
 
 
 # --- Answer command tests ---

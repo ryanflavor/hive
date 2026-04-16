@@ -94,6 +94,28 @@ def safe_json_loads(line: str) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def normalize_command_token(value: str) -> str:
+    """Normalize a process command/argv token for CLI matching."""
+    value = (value or "").strip().lower().rsplit("/", 1)[-1]
+    return value.lstrip("-")
+
+
+def str_or_none(value: Any) -> str | None:
+    """Coerce a value to str, returning None for empty/None."""
+    if value is None:
+        return None
+    text = str(value)
+    return text or None
+
+
+def safe_mtime(path: Path) -> float:
+    """Return file mtime, or -1 on error."""
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return -1
+
+
 # --- Send gate helpers ---
 # Detect whether the target agent is waiting for a user answer
 # (AskUserQuestion) before allowing message injection.

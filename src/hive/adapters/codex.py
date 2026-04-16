@@ -27,8 +27,11 @@ from .base import (
     Message,
     MessagePart,
     SessionMeta,
+    normalize_command_token,
     parse_iso_timestamp,
     safe_json_loads,
+    safe_mtime,
+    str_or_none,
 )
 
 
@@ -82,7 +85,7 @@ class CodexAdapter:
         root = self._sessions_root()
         if not root.is_dir():
             return []
-        files = sorted(root.rglob("rollout-*.jsonl"), key=_safe_mtime, reverse=True)
+        files = sorted(root.rglob("rollout-*.jsonl"), key=safe_mtime, reverse=True)
         out: list[SessionMeta] = []
         for path in files:
             meta = self.read_meta(path)
@@ -112,7 +115,7 @@ class CodexAdapter:
                     if extra.get("type") == "turn_context":
                         payload = extra.get("payload")
                         if isinstance(payload, dict):
-                            model = _str_or_none(payload.get("model"))
+                            model = str_or_none(payload.get("model"))
                             if model:
                                 break
         except OSError:
@@ -129,11 +132,11 @@ class CodexAdapter:
         return SessionMeta(
             session_id=str(session_id),
             cli_name=self.name,
-            cwd=_str_or_none(body.get("cwd")),
+            cwd=str_or_none(body.get("cwd")),
             title=None,
             started_at=parse_iso_timestamp(payload.get("timestamp") or body.get("timestamp")),
             jsonl_path=path,
-            model=model or _str_or_none(body.get("model")),
+            model=model or str_or_none(body.get("model")),
         )
 
     def iter_messages(self, path: Path) -> Iterator[Message]:
@@ -207,13 +210,13 @@ def _codex_message_iter(handle) -> Iterator[Message]:
                     if parsed is not None:
                         tool_input = parsed
                 yield Message(
-                    message_id=_str_or_none(body.get("call_id")),
+                    message_id=str_or_none(body.get("call_id")),
                     parent_id=None,
                     role="assistant",
                     parts=(
                         MessagePart(
                             kind="tool_use",
-                            tool_name=_str_or_none(body.get("name")),
+                            tool_name=str_or_none(body.get("name")),
                             tool_input=tool_input,
                             raw=body,
                         ),
@@ -224,11 +227,11 @@ def _codex_message_iter(handle) -> Iterator[Message]:
             elif item_type == "function_call_output":
                 output = body.get("output")
                 if isinstance(output, dict):
-                    output_text = _str_or_none(output.get("content") or output.get("text"))
+                    output_text = str_or_none(output.get("content") or output.get("text"))
                 else:
-                    output_text = _str_or_none(output)
+                    output_text = str_or_none(output)
                 yield Message(
-                    message_id=_str_or_none(body.get("call_id")),
+                    message_id=str_or_none(body.get("call_id")),
                     parent_id=None,
                     role="tool",
                     parts=(MessagePart(kind="tool_result", tool_output=output_text, raw=body),),
@@ -263,14 +266,14 @@ def _iter_codex_message_parts(content: Any) -> Iterator[MessagePart]:
         elif kind == "tool_use":
             yield MessagePart(
                 kind="tool_use",
-                tool_name=_str_or_none(block.get("name")),
+                tool_name=str_or_none(block.get("name")),
                 tool_input=block.get("input") if isinstance(block.get("input"), dict) else None,
                 raw=block,
             )
         elif kind == "tool_result":
             yield MessagePart(
                 kind="tool_result",
-                tool_output=_str_or_none(block.get("content") or block.get("text")),
+                tool_output=str_or_none(block.get("content") or block.get("text")),
                 raw=block,
             )
         else:
@@ -290,26 +293,9 @@ def _extract_reasoning_text(body: dict[str, Any]) -> str | None:
     return None
 
 
-def _normalize(value: str) -> str:
-    value = (value or "").strip().lower().rsplit("/", 1)[-1]
-    return value.lstrip("-")
-
-
 def _is_codex_process(command: str, argv: str) -> bool:
-    if _normalize(command) == "codex":
+    if normalize_command_token(command) == "codex":
         return True
-    return any(_normalize(token) == "codex" for token in (argv or "").split())
+    return any(normalize_command_token(token) == "codex" for token in (argv or "").split())
 
 
-def _safe_mtime(path: Path) -> float:
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return -1
-
-
-def _str_or_none(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value)
-    return text or None

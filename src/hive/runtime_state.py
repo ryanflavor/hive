@@ -53,6 +53,15 @@ def present_delivery_state(
     return "pending"
 
 
+def gate_guidance(gate_status: str) -> dict[str, str] | None:
+    if gate_status == "skipped":
+        return {
+            "gateNote": "Send gate was bypassed (transcript/session resolution failed). "
+                        "Submit was attempted but input-gate safety was not checked.",
+        }
+    return None
+
+
 def send_guidance(state: str) -> dict[str, str] | None:
     if state == "confirmed":
         return {

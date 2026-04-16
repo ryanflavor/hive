@@ -19,8 +19,11 @@ from .base import (
     Message,
     MessagePart,
     SessionMeta,
+    normalize_command_token,
     parse_iso_timestamp,
     safe_json_loads,
+    safe_mtime,
+    str_or_none,
 )
 
 
@@ -44,7 +47,7 @@ class DroidAdapter:
         session_dir = self._sessions_root() / _cwd_slug(cwd)
         if not session_dir.is_dir():
             return None
-        for path in sorted(session_dir.glob("*.jsonl"), key=_safe_mtime, reverse=True):
+        for path in sorted(session_dir.glob("*.jsonl"), key=safe_mtime, reverse=True):
             meta = self.read_meta(path)
             if meta and meta.session_id:
                 return meta.session_id
@@ -79,7 +82,7 @@ class DroidAdapter:
         root = self._sessions_root()
         if not root.is_dir():
             return []
-        files = sorted(root.rglob("*.jsonl"), key=_safe_mtime, reverse=True)
+        files = sorted(root.rglob("*.jsonl"), key=safe_mtime, reverse=True)
         out: list[SessionMeta] = []
         for path in files:
             meta = self.read_meta(path)
@@ -109,11 +112,11 @@ class DroidAdapter:
         return SessionMeta(
             session_id=str(session_id),
             cli_name=self.name,
-            cwd=_str_or_none(payload.get("cwd")),
-            title=_str_or_none(payload.get("sessionTitle") or payload.get("title")),
+            cwd=str_or_none(payload.get("cwd")),
+            title=str_or_none(payload.get("sessionTitle") or payload.get("title")),
             started_at=None,
             jsonl_path=path,
-            model=_str_or_none(payload.get("model")),
+            model=str_or_none(payload.get("model")),
         )
 
     def iter_messages(self, path: Path) -> Iterator[Message]:
@@ -138,8 +141,8 @@ def _droid_message_iter(handle) -> Iterator[Message]:
                 continue
             parts = tuple(_iter_droid_parts(msg.get("content")))
             yield Message(
-                message_id=_str_or_none(payload.get("id")),
-                parent_id=_str_or_none(payload.get("parentId")),
+                message_id=str_or_none(payload.get("id")),
+                parent_id=str_or_none(payload.get("parentId")),
                 role=str(msg.get("role") or "unknown"),
                 parts=parts,
                 timestamp=parse_iso_timestamp(payload.get("timestamp")),
@@ -164,7 +167,7 @@ def _iter_droid_parts(content: Any) -> Iterator[MessagePart]:
         elif kind == "tool_use":
             yield MessagePart(
                 kind="tool_use",
-                tool_name=_str_or_none(block.get("name")),
+                tool_name=str_or_none(block.get("name")),
                 tool_input=block.get("input") if isinstance(block.get("input"), dict) else None,
                 raw=block,
             )
@@ -186,13 +189,6 @@ def _iter_droid_parts(content: Any) -> Iterator[MessagePart]:
             yield MessagePart(kind="unknown", raw=block)
 
 
-def _safe_mtime(path: Path) -> float:
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return -1
-
-
 def _extract_session_id_from_args(argv: str) -> str | None:
     try:
         tokens = shlex.split(argv or "")
@@ -208,29 +204,17 @@ def _extract_session_id_from_args(argv: str) -> str | None:
 
 
 def _is_droid_process(command: str, argv: str) -> bool:
-    if _normalize(command) == "droid":
+    if normalize_command_token(command) == "droid":
         return True
     try:
         tokens = shlex.split(argv or "")
     except ValueError:
         tokens = (argv or "").split()
     for token in tokens:
-        if _normalize(token) == "droid":
+        if normalize_command_token(token) == "droid":
             return True
     return False
 
 
-def _normalize(value: str) -> str:
-    value = (value or "").strip().lower().rsplit("/", 1)[-1]
-    return value.lstrip("-")
-
-
 def _cwd_slug(cwd: str) -> str:
     return cwd.replace("/", "-")
-
-
-def _str_or_none(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value)
-    return text or None

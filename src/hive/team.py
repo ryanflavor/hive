@@ -161,7 +161,7 @@ class Team:
             team_name=self.name,
             pane_id=self.lead_pane_id,
             cli=tmux.get_pane_option(self.lead_pane_id, "hive-cli") or "",
-            cwd=os.getcwd(),
+            cwd=tmux.display_value(self.lead_pane_id, "#{pane_current_path}") or os.getcwd(),
             session_id=self.lead_session_id,
         )
 
