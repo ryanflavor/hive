@@ -10,22 +10,20 @@ FIXED_ID = bus.format_msg_id(1)
 def _patch_ack(monkeypatch):
     """Disable ACK resolution so tests don't need a real transcript.
 
-    Also short-circuits the 3s send-grace loop, since any test that uses
-    this helper has already decided the fake agent is transcript-less and
-    therefore cannot produce a real confirmation or queue probe. Tests
-    that genuinely exercise grace timing set up their own ack/probe and
-    don't call this helper.
+    Also collapses the send-grace window to 0 so the loop runs exactly
+    once instead of polling for 3s. The real `_observe_send_grace`
+    still executes — it hits the transcript check, runs the probe, and
+    captures its result — which keeps the regression surface intact
+    for tests that happen to route through a transcript-less fake
+    agent. Tests that genuinely exercise grace timing set up their own
+    ack/probe and don't call this helper.
     """
     monkeypatch.setattr(
         "hive.sidecar._resolve_ack_baseline",
         lambda _target: (_ for _ in ()).throw(RuntimeError("no transcript")),
         raising=False,
     )
-    monkeypatch.setattr(
-        "hive.sidecar._observe_send_grace",
-        lambda **_kwargs: ("pending", {"state": "unknown", "source": "none", "observedAt": ""}),
-        raising=False,
-    )
+    monkeypatch.setattr("hive.sidecar.SEND_GRACE_TIMEOUT", 0.0)
 
 
 def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
