@@ -37,6 +37,7 @@ _COMMAND_HELP_SECTIONS = {
     "suggest": "Daily",
     "notify": "Daily",
     # Handoff — spawn/fork a pane, load a workflow, or bring a pane into the team.
+    "handoff": "Handoff",
     "fork": "Handoff",
     "spawn": "Handoff",
     "workflow": "Handoff",
@@ -88,6 +89,9 @@ hive team
 
 # Send a short message to a peer
 hive send dodo "review this diff"
+
+# Hand a thread off to another teammate
+hive handoff dodo --artifact /tmp/task.md
 
 # Answer a pending AskUserQuestion from another agent
 hive answer dodo "yes"
@@ -538,6 +542,55 @@ def _current_pane_agent_cli() -> str:
     return ""
 
 
+def _resolve_spawn_cli_name(cli_name: str | None) -> str:
+    if cli_name in AGENT_CLI_NAMES:
+        return cli_name
+    current_pane = tmux.get_current_pane_id()
+    option_cli = normalize_command(tmux.get_pane_option(current_pane, "hive-cli") or "") if current_pane else ""
+    if option_cli in AGENT_CLI_NAMES:
+        return option_cli
+    profile = detect_profile_for_pane(current_pane) if current_pane else None
+    return profile.name if profile else "droid"
+
+
+def _request_send_payload(
+    *,
+    workspace: str,
+    team: Team,
+    sender_agent: str,
+    target_agent: str,
+    body: str,
+    artifact: str = "",
+    reply_to: str = "",
+    wait: bool = False,
+    command_name: str = "send",
+    warn_on_long_body: bool = True,
+) -> dict[str, object]:
+    from .sidecar import request_send
+
+    if warn_on_long_body:
+        _maybe_warn_long_body(body, command=command_name)
+    _ensure_team_sidecar(team, workspace)
+    payload = request_send(
+        str(workspace),
+        team=team.name,
+        sender_agent=sender_agent,
+        sender_pane=tmux.get_current_pane_id() or "",
+        target_agent=target_agent,
+        body=body,
+        artifact=artifact,
+        reply_to=reply_to,
+        wait=wait,
+    )
+    if not payload:
+        raise RuntimeError("sidecar unavailable")
+    if payload.get("ok") is False:
+        raise RuntimeError(str(payload.get("error", f"{command_name} failed")))
+    normalized = dict(payload)
+    normalized.pop("ok", None)
+    return normalized
+
+
 def _stderr_is_interactive() -> bool:
     return sys.stderr.isatty()
 
@@ -630,64 +683,31 @@ def _choose_fork_split(width: int, height: int) -> bool:
 @click.option("--prompt", default="", help="Prompt to send to the forked agent after it is ready")
 def fork_cmd(pane_id: str, split: str, join_as: str, prompt: str):
     """Fork the current agent session into a new split pane."""
-    if not tmux.is_inside_tmux():
-        _fail("hive fork requires tmux")
     if prompt and not join_as:
         _fail("--prompt requires --join-as")
 
-    current_pane = pane_id or tmux.get_current_pane_id()
-    if not current_pane:
-        _fail("cannot determine current pane (pass --pane explicitly)")
-
-    profile = detect_profile_for_pane(current_pane)
-    if not profile:
-        _fail(f"unsupported agent pane '{current_pane}'")
-
-    target_team: Team | None = None
     if join_as:
         _, target_team = _resolve_scoped_team(None, required=True)
         assert target_team is not None
-        _ensure_pane_in_scope(target_team, current_pane)
-        window_target = target_team.tmux_window or tmux.get_current_window_target() or ""
-        panes = tmux.list_panes_full(window_target) if window_target else []
-        seen_names = _window_seen_names(target_team, panes)
-        _claim_member_name(join_as, seen_names)
-
-    if split == "auto":
-        width = int(tmux.display_value(current_pane, "#{pane_width}") or "80")
-        height = int(tmux.display_value(current_pane, "#{pane_height}") or "24")
-        horizontal = _choose_fork_split(width, height)
-    else:
-        horizontal = split == "h"
-
-    session_id = resolve_session_id_for_pane(current_pane, profile=profile)
-    if not session_id:
-        _fail(f"cannot determine session id for pane '{current_pane}'")
-
-    source_cwd = tmux.display_value(current_pane, "#{pane_current_path}") or ""
-    new_pane = tmux.split_window(current_pane, horizontal=horizontal, cwd=source_cwd or None, detach=False)
-    tmux.send_keys(new_pane, profile.resume_cmd.format(session_id=session_id))
-    if join_as:
-        assert target_team is not None
-        registered_agent = _register_agent_member(
-            target_team,
-            pane_id=new_pane,
-            team_name=target_team.name,
-            agent_name=join_as,
-            pane_cli=profile.name,
-            cwd=source_cwd or os.getcwd(),
-            notify=False,
+        registered_agent, new_pane = _fork_registered_agent(
+            t=target_team,
+            pane_id=pane_id,
+            split=split,
+            join_as=join_as,
+            wait_for_ready=bool(prompt),
+            prompt=prompt,
         )
-        if prompt:
-            if not tmux.wait_for_text(new_pane, profile.ready_text, timeout=AGENT_STARTUP_TIMEOUT):
-                _fail(f"forked pane '{new_pane}' did not become ready before sending prompt")
-            time.sleep(1)
-            registered_agent.send(prompt)
+        del registered_agent
         click.echo(json.dumps({
             "pane": new_pane,
             "registered": join_as,
             "team": target_team.name,
         }, indent=2, ensure_ascii=False))
+        return
+
+    current_pane, profile, session_id, horizontal, source_cwd = _fork_source_details(pane_id, split)
+    new_pane = tmux.split_window(current_pane, horizontal=horizontal, cwd=source_cwd or None, detach=False)
+    tmux.send_keys(new_pane, profile.resume_cmd.format(session_id=session_id))
 
 
 @cli.command("teams")
@@ -854,6 +874,163 @@ def _register_agent_member(
         agent.load_skill("hive")
         agent.send(_hive_join_message(agent_name, team_name))
     return agent
+
+
+def _spawn_team_agent(
+    t: Team,
+    *,
+    team_name: str,
+    agent_name: str,
+    model: str = "",
+    prompt: str = "",
+    cwd: str = "",
+    skill: str = "hive",
+    workflow: str = "",
+    env_entries: tuple[str, ...] = (),
+    cli_name: str | None = None,
+) -> Agent:
+    resolved_cli_name = _resolve_spawn_cli_name(cli_name)
+    extra_env = _parse_entries(env_entries) if env_entries else {}
+    agent = t.spawn(
+        agent_name,
+        model=model,
+        prompt=prompt,
+        cwd=cwd,
+        skill=skill,
+        workflow=workflow,
+        extra_env=extra_env or None,
+        cli=resolved_cli_name,
+    )
+    hive_context.save_context_for_pane(
+        agent.pane_id,
+        team=team_name,
+        workspace=_resolve_workspace(t, required=False),
+        agent=agent_name,
+    )
+    _remember_context(team=team_name, workspace=_resolve_workspace(t, required=False), agent=LEAD_AGENT_NAME)
+    return agent
+
+
+def _fork_source_details(pane_id: str, split: str) -> tuple[str, object, str, bool, str]:
+    if not tmux.is_inside_tmux():
+        _fail("hive fork requires tmux")
+
+    current_pane = pane_id or tmux.get_current_pane_id()
+    if not current_pane:
+        _fail("cannot determine current pane (pass --pane explicitly)")
+
+    profile = detect_profile_for_pane(current_pane)
+    if not profile:
+        _fail(f"unsupported agent pane '{current_pane}'")
+
+    if split == "auto":
+        width = int(tmux.display_value(current_pane, "#{pane_width}") or "80")
+        height = int(tmux.display_value(current_pane, "#{pane_height}") or "24")
+        horizontal = _choose_fork_split(width, height)
+    else:
+        horizontal = split == "h"
+
+    session_id = resolve_session_id_for_pane(current_pane, profile=profile)
+    if not session_id:
+        _fail(f"cannot determine session id for pane '{current_pane}'")
+
+    source_cwd = tmux.display_value(current_pane, "#{pane_current_path}") or ""
+    return current_pane, profile, session_id, horizontal, source_cwd
+
+
+def _fork_registered_agent(
+    *,
+    t: Team,
+    pane_id: str,
+    split: str,
+    join_as: str,
+    wait_for_ready: bool = False,
+    prompt: str = "",
+) -> tuple[Agent, str]:
+    _ensure_pane_in_scope(t, pane_id)
+    window_target = t.tmux_window or tmux.get_current_window_target() or ""
+    panes = tmux.list_panes_full(window_target) if window_target else []
+    seen_names = _window_seen_names(t, panes)
+    _claim_member_name(join_as, seen_names)
+
+    current_pane, profile, session_id, horizontal, source_cwd = _fork_source_details(pane_id, split)
+
+    new_pane = tmux.split_window(current_pane, horizontal=horizontal, cwd=source_cwd or None, detach=False)
+    tmux.send_keys(new_pane, profile.resume_cmd.format(session_id=session_id))
+    registered_agent = _register_agent_member(
+        t,
+        pane_id=new_pane,
+        team_name=t.name,
+        agent_name=join_as,
+        pane_cli=profile.name,
+        cwd=source_cwd or os.getcwd(),
+        notify=False,
+    )
+    if wait_for_ready or prompt:
+        if not tmux.wait_for_text(new_pane, profile.ready_text, timeout=AGENT_STARTUP_TIMEOUT):
+            _fail(f"forked pane '{new_pane}' did not become ready before sending prompt")
+        time.sleep(1)
+    if prompt:
+        registered_agent.send(prompt)
+    return registered_agent, new_pane
+
+
+def _resolve_handoff_anchor_event(
+    workspace: str,
+    *,
+    current_agent: str,
+    reply_to_override: str,
+) -> dict[str, object]:
+    if reply_to_override:
+        event = bus.find_send_event(workspace, reply_to_override)
+        if event is None or str(event.get("to") or "") != current_agent:
+            _fail(
+                f"msgId '{reply_to_override}' is not an inbound send event for '{current_agent}'"
+            )
+        return event
+
+    latest = bus.latest_unanswered_inbound_send_event(workspace, recipient=current_agent)
+    if latest is None:
+        _fail(
+            f"no unanswered inbound message for '{current_agent}'; "
+            "pass --reply-to explicitly to hand off a different thread"
+        )
+    return latest
+
+
+def _existing_team_agent(t: Team, agent_name: str) -> Agent | None:
+    try:
+        return t.get(agent_name)
+    except KeyError:
+        return None
+
+
+def _handoff_delegate_body(
+    *,
+    sender_agent: str,
+    original_sender: str,
+    anchor_msg_id: str,
+    note: str,
+) -> str:
+    lines = [
+        f"Handoff from {sender_agent}.",
+        f"Original sender: {original_sender}",
+        f"Anchor msgId: {anchor_msg_id}",
+        f"First step: hive thread {anchor_msg_id}",
+        f"Reply path: hive send {original_sender} \"<takeover>\" --reply-to {anchor_msg_id}",
+        "Continue updates on that same --reply-to.",
+        "Do not use hive reply for this handoff.",
+    ]
+    if note.strip():
+        lines.append(f"Note: {note.strip()}")
+    return "\n".join(lines)
+
+
+def _handoff_announce_body(*, target_agent: str) -> str:
+    return (
+        f"Delegating this thread to {target_agent}. "
+        "Their handoff message is in flight."
+    )
 
 
 def _register_existing_pane(
@@ -1192,35 +1369,159 @@ def spawn(agent_name: str, model: str, prompt: str,
     """Spawn an agent pane."""
     team_name, t = _resolve_scoped_team(None, required=True)
     assert team_name is not None and t is not None
-    if cli_name is None:
-        current_pane = tmux.get_current_pane_id()
-        cli_name = tmux.get_pane_option(current_pane, "hive-cli") if current_pane else ""
-        if cli_name not in AGENT_CLI_NAMES:
-            profile = detect_profile_for_pane(current_pane) if current_pane else None
-            cli_name = profile.name if profile else "droid"
-    extra_env = _parse_entries(env) if env else {}
     try:
-        agent = t.spawn(
-            agent_name,
+        agent = _spawn_team_agent(
+            t,
+            team_name=team_name,
+            agent_name=agent_name,
             model=model,
             prompt=prompt,
             cwd=cwd,
             skill=skill,
             workflow=workflow,
-            extra_env=extra_env or None,
-            cli=cli_name,
+            env_entries=env,
+            cli_name=cli_name,
         )
-        hive_context.save_context_for_pane(
-            agent.pane_id,
-            team=team_name,
-            workspace=_resolve_workspace(t, required=False),
-            agent=agent_name,
-        )
-        _remember_context(team=team_name, workspace=_resolve_workspace(t, required=False), agent=LEAD_AGENT_NAME)
         click.echo(f"Agent '{agent_name}' spawned in pane {agent.pane_id}")
     except ValueError as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
+
+
+@cli.command()
+@click.argument("target_agent")
+@click.option("--artifact", default="", help="Artifact path for handoff context")
+@click.option("--note", default="", help="Short note appended to the standard handoff message")
+@click.option("--reply-to", "reply_to_override", default="", help="Anchor msgId to delegate (default: latest unanswered inbound)")
+@click.option("--spawn", "spawn_target", is_flag=True, help="Create a fresh worker before sending the handoff")
+@click.option("--fork", "fork_target", is_flag=True, help="Fork the current session into a new worker before sending the handoff")
+def handoff(
+    target_agent: str,
+    artifact: str,
+    note: str,
+    reply_to_override: str,
+    spawn_target: bool,
+    fork_target: bool,
+):
+    """Delegate a thread via send/spawn/fork wrapper."""
+    if spawn_target and fork_target:
+        _fail("choose at most one of --spawn or --fork")
+
+    team_name, t = _resolve_scoped_team(None, required=True)
+    assert team_name is not None and t is not None
+    sender = _resolve_sender(None)
+    ws = _resolve_workspace(t, required=True)
+    resolved_artifact = _resolve_artifact_path(artifact, workspace=ws)
+    anchor_event = _resolve_handoff_anchor_event(
+        ws,
+        current_agent=sender,
+        reply_to_override=reply_to_override,
+    )
+    anchor_msg_id = str(anchor_event.get("msgId") or "")
+    original_sender = str(anchor_event.get("from") or "")
+    if not anchor_msg_id or not original_sender:
+        _fail("invalid anchor event for handoff")
+
+    existing_target = _existing_team_agent(t, target_agent)
+    if existing_target is not None:
+        if spawn_target or fork_target:
+            _fail(f"agent '{target_agent}' already exists; direct handoff does not accept --spawn/--fork")
+        if target_agent == sender:
+            _fail("cannot hand off to yourself; use --spawn or --fork with a new agent name")
+        mode = "direct"
+        target_member = existing_target
+    else:
+        if not spawn_target and not fork_target:
+            _fail(f"agent '{target_agent}' does not exist; pass --spawn or --fork explicitly")
+        if spawn_target:
+            mode = "spawn"
+            target_member = _spawn_team_agent(
+                t,
+                team_name=team_name,
+                agent_name=target_agent,
+                cwd=os.getcwd(),
+            )
+        else:
+            mode = "fork"
+            target_member, _ = _fork_registered_agent(
+                t=t,
+                pane_id="",
+                split="auto",
+                join_as=target_agent,
+                wait_for_ready=True,
+            )
+
+    delegate_body = _handoff_delegate_body(
+        sender_agent=sender,
+        original_sender=original_sender,
+        anchor_msg_id=anchor_msg_id,
+        note=note,
+    )
+    try:
+        delegate_payload = _request_send_payload(
+            workspace=ws,
+            team=t,
+            sender_agent=sender,
+            target_agent=target_agent,
+            body=delegate_body,
+            artifact=resolved_artifact,
+            command_name="handoff",
+            warn_on_long_body=False,
+        )
+    except RuntimeError as exc:
+        _fail(str(exc))
+        return
+
+    announce_msg_id = ""
+    if original_sender == target_agent:
+        announce_payload: dict[str, object] = {
+            "state": "skipped",
+            "reason": "target_is_original_sender",
+        }
+    else:
+        try:
+            announce_payload = _request_send_payload(
+                workspace=ws,
+                team=t,
+                sender_agent=sender,
+                target_agent=original_sender,
+                body=_handoff_announce_body(target_agent=target_agent),
+                reply_to=anchor_msg_id,
+                command_name="handoff",
+                warn_on_long_body=False,
+            )
+            announce_msg_id = str(announce_payload.get("msgId") or "")
+        except RuntimeError as exc:
+            announce_payload = {
+                "state": "failed",
+                "error": str(exc),
+            }
+
+    handoff_id = f"hf_{secrets.token_hex(4)}"
+    bus.write_event(
+        ws,
+        from_agent=sender,
+        to_agent=target_agent,
+        intent="handoff",
+        message_id=handoff_id,
+        metadata={
+            "anchorMsgId": anchor_msg_id,
+            "mode": mode,
+            "delegateMsgId": str(delegate_payload.get("msgId") or ""),
+            "announceMsgId": announce_msg_id,
+        },
+    )
+    payload = {
+        "handoffId": handoff_id,
+        "mode": mode,
+        "target": target_agent,
+        "targetPane": target_member.pane_id,
+        "originalSender": original_sender,
+        "anchorMsgId": anchor_msg_id,
+        "delegate": delegate_payload,
+        "announce": announce_payload,
+    }
+    click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
 @cli.group()
@@ -1361,26 +1662,21 @@ def send(
     sender = _resolve_sender(None)
     ws = _resolve_workspace(t, required=True)
     resolved_artifact = _resolve_artifact_path(artifact, workspace=ws)
-    from .sidecar import request_send
-
-    _maybe_warn_long_body(body, command="send")
-    _ensure_team_sidecar(t, ws)
-    payload = request_send(
-        str(ws),
-        team=t.name,
-        sender_agent=sender,
-        sender_pane=tmux.get_current_pane_id() or "",
-        target_agent=to_agent,
-        body=body,
-        artifact=resolved_artifact,
-        reply_to=reply_to,
-        wait=wait,
-    )
-    if not payload:
-        _fail("sidecar unavailable")
-    if payload.get("ok") is False:
-        _fail(str(payload.get("error", "send failed")))
-    payload.pop("ok", None)
+    try:
+        payload = _request_send_payload(
+            workspace=ws,
+            team=t,
+            sender_agent=sender,
+            target_agent=to_agent,
+            body=body,
+            artifact=resolved_artifact,
+            reply_to=reply_to,
+            wait=wait,
+            command_name="send",
+        )
+    except RuntimeError as exc:
+        _fail(str(exc))
+        return
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
@@ -1442,26 +1738,21 @@ def reply(
         resolved_reply_to = candidate
 
     resolved_artifact = _resolve_artifact_path(artifact, workspace=ws)
-    from .sidecar import request_send
-
-    _maybe_warn_long_body(body, command="reply")
-    _ensure_team_sidecar(t, ws)
-    payload = request_send(
-        str(ws),
-        team=t.name,
-        sender_agent=sender,
-        sender_pane=tmux.get_current_pane_id() or "",
-        target_agent=to_agent,
-        body=body,
-        artifact=resolved_artifact,
-        reply_to=resolved_reply_to,
-        wait=wait,
-    )
-    if not payload:
-        _fail("sidecar unavailable")
-    if payload.get("ok") is False:
-        _fail(str(payload.get("error", "reply failed")))
-    payload.pop("ok", None)
+    try:
+        payload = _request_send_payload(
+            workspace=ws,
+            team=t,
+            sender_agent=sender,
+            target_agent=to_agent,
+            body=body,
+            artifact=resolved_artifact,
+            reply_to=resolved_reply_to,
+            wait=wait,
+            command_name="reply",
+        )
+    except RuntimeError as exc:
+        _fail(str(exc))
+        return
     if not reply_to_override:
         payload["autoReplyTo"] = resolved_reply_to
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))

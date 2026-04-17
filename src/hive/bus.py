@@ -362,6 +362,36 @@ def latest_inbound_send_event(
     return _row_to_event(row) if row is not None else None
 
 
+def latest_unanswered_inbound_send_event(
+    workspace: str | Path,
+    *,
+    recipient: str,
+) -> dict[str, object] | None:
+    """Return the latest inbound send event the recipient has not yet replied to."""
+    with _connect(workspace) as conn:
+        row = conn.execute(
+            """
+            SELECT inbound.*
+            FROM messages AS inbound
+            WHERE inbound.intent = 'send'
+              AND inbound.to_agent = ?
+              AND inbound.msg_id != ''
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM messages AS reply
+                  WHERE reply.intent = 'send'
+                    AND reply.from_agent = ?
+                    AND reply.to_agent = inbound.from_agent
+                    AND reply.in_reply_to = inbound.msg_id
+              )
+            ORDER BY inbound.seq DESC
+            LIMIT 1
+            """,
+            (recipient, recipient),
+        ).fetchone()
+    return _row_to_event(row) if row is not None else None
+
+
 def has_send_reply_to(
     workspace: str | Path,
     *,

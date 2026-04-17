@@ -19,8 +19,11 @@ def test_hive_skill_guides_team_first_spawn_handoff_and_model_routing():
     skill_text = (Path(__file__).resolve().parents[2] / "skills" / "hive" / "SKILL.md").read_text()
 
     assert "不要先把用户当传话筒" in skill_text
-    assert 'hive spawn orch-2 --prompt "先跑 hive thread Veh9 看原始内容' in skill_text
-    assert '要直接写清 initial prompt：先跑 `hive thread <msgId>` 拿原始上下文' in skill_text
+    assert "优先用 `hive handoff`" in skill_text
+    assert "hive handoff dodo --artifact /tmp/task.md" in skill_text
+    assert "hive handoff dodo-2 --spawn --artifact /tmp/task.md" in skill_text
+    assert "hive handoff orch-2 --fork --artifact /tmp/task.md" in skill_text
+    assert "默认 anchor = 你最近一条**未回复**的入站消息" in skill_text
     assert '第一件事是用 `hive send <sender> "<short takeover with reason>" --reply-to <msgId>` 通知原 sender' in skill_text
     assert "从 orch 手中接管了 X 任务，因为 orch 正在处理 Y" in skill_text
     assert '自己用 `hive send <sender> "<done summary>" --reply-to <msgId> [--artifact <path>]` 沿同一条 thread 回结果' in skill_text
@@ -36,6 +39,7 @@ def test_hive_install_docs_use_npx_skills_add_as_canonical_path():
     assert "npx skills update hive -g" in readme_text
     assert 'npx skills add https://github.com/notdp/hive -g --skill hive --agent \'*\' -y' in readme_text
     assert 'npx skills add "$PWD" -g --skill hive --agent \'*\' -y' in readme_text
+    assert "hive handoff dodo --artifact /tmp/task.md" in readme_text
     assert 'Plugin enable does not install or refresh the base `hive` skill' in readme_text
     assert 'npx skills add "$PWD" -g --skill hive --agent \'*\' -y' in agents_text
     assert 'repo changes to `skills/hive/SKILL.md` do not reach agents unless you refresh it via `npx skills add`' in agents_text

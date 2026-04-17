@@ -52,6 +52,9 @@ hive send dodo "review the staged diff"
 # Send with artifact
 hive send orch "done" --artifact /tmp/review.md
 
+# Hand off the latest unanswered inbound thread to another agent
+hive handoff dodo --artifact /tmp/task.md
+
 # Pipe stdin as artifact (preferred for large content)
 cat <<'EOF' | hive send orch "see report" --artifact -
 # Findings
@@ -85,6 +88,7 @@ hive notify "done, press Space to come back"
 | `hive team` / `hive teams` | Show team with runtime inputState/activity and peer info, or list teams |
 | `hive peer set\|clear` | Persist or clear default peer pairs |
 | `hive send <agent> "text"` | Send message (fire-and-forget with delivery tracking) |
+| `hive handoff <agent>` | Delegate a thread via direct send, spawn, or fork wrapper |
 | `hive answer <agent> "text"` | Answer a pending AskUserQuestion |
 | `hive doctor [agent] [--skills]` | Diagnose agent connectivity and optional local hive skill drift |
 | `hive spawn <agent>` | Spawn a new agent pane |

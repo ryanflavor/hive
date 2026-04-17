@@ -112,19 +112,30 @@ Claude 偏前端体验、文案收敛和发散式讨论；GPT 偏后端 correctn
 
 ## Handoff / 接手
 
-收到新的独立任务而手头工作不该中断时，用 `hive spawn <name> --prompt "<task summary>"` 分出处理者。
-
-### spawn --prompt 要包含什么
-
-要直接写清 initial prompt：先跑 `hive thread <msgId>` 拿原始上下文、要处理什么、相关 artifact 在哪、开始后要先 reply-to 谁说明接管、以及处理完成后应该继续 reply-to 谁回结果。只有不给 `--prompt` 时才退回手动 `hive send <fork-name> "<task summary>" [--artifact <path>]`。
+收到新的独立任务而手头工作不该中断时，优先用 `hive handoff`，不要再自己手写 spawn/fork prompt 纪律。
 
 ```bash
-hive spawn orch-2 --prompt "先跑 hive thread Veh9 看原始内容，开始后先 reply-to lulu 说明接管，处理完再 reply-to lulu"
+hive handoff dodo --artifact /tmp/task.md
+hive handoff dodo-2 --spawn --artifact /tmp/task.md
+hive handoff orch-2 --fork --artifact /tmp/task.md
 ```
+
+### `hive handoff` 怎么分流
+
+- target 已存在且 alive：直接 handoff 给它
+- target 不存在时，必须显式选 `--spawn` 或 `--fork`
+- `--spawn` = fresh worker，只带任务说明和 artifact
+- `--fork` = 复制当前 session。主场是"我正忙，但这条新线程需要继承我当前 session 现场"
+
+### `hive handoff` 默认替你做什么
+
+- 默认 anchor = 你最近一条**未回复**的入站消息；需要指定旧 thread 时再传 `--reply-to <msgId>`
+- 给 assignee 发标准 handoff 消息，明确先 `hive thread <msgId>`
+- 给 original sender 发一条 announce，让对方知道转交发生了
 
 ### 新处理者的动作
 
-1. 第一件事是用 `hive send <sender> "<short takeover with reason>" --reply-to <msgId>` 通知原 sender，并说明为什么换人，例如"从 orch 手中接管了 X 任务，因为 orch 正在处理 Y"；不要让原 pane 先做中继
+1. 第一件事是用 `hive send <sender> "<short takeover with reason>" --reply-to <msgId>` 通知原 sender，例如"从 orch 手中接管了 X 任务，因为 orch 正在处理 Y"；不要让原 pane 先做中继
 2. 处理完成后，继续自己用 `hive send <sender> "<done summary>" --reply-to <msgId> [--artifact <path>]` 沿同一条 thread 回结果；后续 question / update 也都继续沿这条 thread 回复
 
 ### Workflow
