@@ -284,6 +284,7 @@ def test_handle_request_ping_returns_sidecar_identity():
         team="team-a",
         tmux_window="dev:3",
         tmux_window_id="@99",
+        sidecar_started_at="2026-04-17T00:00:00Z",
         pending={},
         request={"action": "ping"},
     )
@@ -296,4 +297,9 @@ def test_handle_request_ping_returns_sidecar_identity():
         "team": "team-a",
         "tmuxWindow": "dev:3",
         "tmuxWindowId": "@99",
+        "sidecar": {
+            "pid": response["sidecar"]["pid"],
+            "started_at": "2026-04-17T00:00:00Z",
+            "code_hash": sidecar.SIDECAR_BUILD_HASH,
+        },
     }

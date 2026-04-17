@@ -57,7 +57,9 @@ def format_body_warning(*, command: str, hint: dict[str, object]) -> str:
     details = ", ".join(summary)
     return (
         f"warning: body looks long or structured ({details}); consider stdin artifact:\n"
-        f"  printf '%s\\n' \"...\" | hive {command} <agent> \"<short summary>\" --artifact -"
+        f"  cat <<'EOF' | hive {command} <agent> \"<short summary>\" --artifact -\n"
+        "  ...\n"
+        "  EOF"
     )
 
 

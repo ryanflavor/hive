@@ -6,6 +6,7 @@ import json
 import os
 import secrets
 import shutil
+import subprocess
 import sys
 import time
 from collections import defaultdict
@@ -95,7 +96,10 @@ hive answer dodo "yes"
 hive suggest
 
 # Send detailed context via stdin artifact (preferred for long content)
-printf '%s\\n' "# Findings" "- item" | hive send dodo "see report" --artifact -'''
+cat <<'EOF' | hive send dodo "see report" --artifact -
+# Findings
+- item
+EOF'''
 
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
 _TMUX_OPTIONAL_ROOT_COMMANDS = {"plugin", "_notify-hook"}
@@ -284,6 +288,39 @@ def _resolve_workspace(team: Team | None = None, required: bool = False) -> str:
     return ""
 
 
+def _resolve_repo_root(cwd: str | None = None) -> str:
+    target_cwd = cwd or os.getcwd()
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=target_cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=2,
+        )
+    except Exception:
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def _add_runtime_location_fields(
+    payload: dict[str, object],
+    *,
+    workspace_key: str = "workspace",
+) -> dict[str, object]:
+    if "runtimeWorkspace" not in payload and workspace_key in payload:
+        payload["runtimeWorkspace"] = payload.pop(workspace_key)
+    cwd = os.getcwd()
+    payload["cwd"] = cwd
+    repo_root = _resolve_repo_root(cwd)
+    if repo_root:
+        payload["repoRoot"] = repo_root
+    return payload
+
+
 def _default_auto_workspace_path(session_name: str, window_id: str) -> Path:
     slug = window_id.lstrip("@") if window_id else "0"
     return Path(f"/tmp/hive-{session_name}-{slug}")
@@ -427,7 +464,7 @@ def _team_status_payload(t: Team) -> dict[str, object]:
         if ctx.get("team") == t.name and ctx.get("agent"):
             payload["self"] = str(ctx["agent"])
 
-    return payload
+    return _add_runtime_location_fields(payload)
 
 
 def _resolve_live_agent(t: Team | None, agent_name: str):
@@ -691,7 +728,7 @@ def current_cmd():
                 workspace=discovered.get("workspace", ""),
                 agent=discovered.get("agent", ""),
             )
-        click.echo(json.dumps(discovered, indent=2, ensure_ascii=False))
+        click.echo(json.dumps(_add_runtime_location_fields(dict(discovered)), indent=2, ensure_ascii=False))
         return
     result: dict[str, object] = {"team": None}
     session_name = tmux.get_current_session_name()
@@ -716,7 +753,7 @@ def current_cmd():
     }
     result["hint"] = "No team bound. Run `hive init` to create one from this tmux window."
 
-    click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+    click.echo(json.dumps(_add_runtime_location_fields(result), indent=2, ensure_ascii=False))
 
 
 _RANDOM_AGENT_NAMES = (
@@ -1850,17 +1887,6 @@ def terminal_remove(name: str):
 def peer():
     """Manage default peer mapping inside the team."""
     pass
-
-
-@peer.command("show")
-@click.argument("agent_name", required=False, default="")
-def peer_show(agent_name: str):
-    """Show resolved peer pairs for the current team."""
-    _, t = _resolve_scoped_team(None, required=True)
-    assert t is not None
-    if agent_name and agent_name not in t.peer_members():
-        _fail(f"agent '{agent_name}' not found in team '{t.name}'")
-    click.echo(json.dumps(t.peer_snapshot(agent_name), indent=2, ensure_ascii=False))
 
 
 @peer.command("set")

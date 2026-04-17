@@ -40,7 +40,10 @@ hive current                          # 看上下文
 hive team                             # 看成员 + runtime inputState/activityState + peer
 hive send dodo "hello"                # 发短消息（positional：收件人 + body，不要加 --to / --msg）
 hive send dodo "see attachment" --artifact /tmp/file.md
-printf '%s\n' "# Findings" "- item" | hive send dodo "see attachment" --artifact -
+cat <<'EOF' | hive send dodo "see attachment" --artifact -
+# Findings
+- item
+EOF
 hive reply dodo "ack, looking"        # 回复 dodo 最近一条给你的消息（自动 reply-to）
 hive answer claude "yes"              # 回答 agent 的 pending question
 hive suggest                          # 基于当前 runtime 建议协作对象
@@ -56,13 +59,22 @@ hive notify "按 Space 和我对话"       # 给当前 pane 的用户弹通知
 
 - 返回 `queued` / `pending` / `confirmed` 都代表已进后台追踪，直接继续工作
 - body 默认只放动作 + 摘要；长内容、多行结构化内容、需要后续引用的上下文一律先写 artifact
-- 首选 stdin artifact：`... | hive send <name> "<message>" --artifact -`；只有已有现成文件时才传 `--artifact <path>`。不要把 `$(cat <<EOF ...)` 这类多行 command substitution 直接塞进 `hive send`
+- 首选 heredoc + stdin artifact：
+  ```bash
+  cat <<'EOF' | hive send <name> "<message>" --artifact -
+  # Findings
+  - item
+  EOF
+  ```
+- 带引号的 `EOF` 标签不会做 shell 插值，markdown / 代码块 / 引号内容会原样传过去
+- `printf '%s\n' ... | hive send ... --artifact -` 只当备选；它更容易踩转义坑。只有已有现成文件时才传 `--artifact <path>`
+- 不要把 `$(cat <<EOF ...)` 这类多行 command substitution 直接塞进 `hive send`
 
 ### `hive reply` vs `hive send --reply-to`
 
 - 刚收到某 agent 的消息、直接回复就用 `hive reply <agent> "..."`：它自动把 `reply-to` 填成"最近一条来自该 agent 且你还没回过的入站消息"
 - 没有入站消息、或最近一条已经回过，`hive reply` 会直接报错，要求你传 `--reply-to <msgId>`；它**不会**跨线程猜
-- 已经拿到了特定 `msgId`（例如 handoff 时 fork prompt 里带的），继续用 `hive send <agent> "..." --reply-to <msgId>`
+- 已经拿到了特定 `msgId`（例如 handoff 时 prompt 里带的），继续用 `hive send <agent> "..." --reply-to <msgId>`
 
 ### 协作升级（4 条足矣）
 
@@ -100,14 +112,14 @@ Claude 偏前端体验、文案收敛和发散式讨论；GPT 偏后端 correctn
 
 ## Handoff / 接手
 
-收到新的独立任务而手头工作不该中断时，用 `hive fork --join-as <name> --prompt "<task summary>"` 或 `hive spawn` 分出处理者。bare `hive fork` 仅限明确只想开一个未注册的旁路 pane，不算正常分工/接管路径。
+收到新的独立任务而手头工作不该中断时，用 `hive spawn <name> --prompt "<task summary>"` 分出处理者。
 
-### fork --prompt 要包含什么
+### spawn --prompt 要包含什么
 
 要直接写清 initial prompt：先跑 `hive thread <msgId>` 拿原始上下文、要处理什么、相关 artifact 在哪、开始后要先 reply-to 谁说明接管、以及处理完成后应该继续 reply-to 谁回结果。只有不给 `--prompt` 时才退回手动 `hive send <fork-name> "<task summary>" [--artifact <path>]`。
 
 ```bash
-hive fork --join-as orch-2 --prompt "先跑 hive thread Veh9 看原始内容，开始后先 reply-to lulu 说明接管，处理完再 reply-to lulu"
+hive spawn orch-2 --prompt "先跑 hive thread Veh9 看原始内容，开始后先 reply-to lulu 说明接管，处理完再 reply-to lulu"
 ```
 
 ### 新处理者的动作
@@ -132,7 +144,6 @@ workflow 加载后继续用 Hive 命令作为通信与状态底座。
 - `hive delivery <msgId>` — 某条消息的投递状态
 - `hive thread <msgId>` — 某条消息的 reply / observation 串联
 - `hive teams` — 列出所有已知 team（跨 team 排障）
-- `hive peer show` — 查看默认 peer 映射（`hive team` JSON 已含 peer 字段）
 - `hive activity <agent>` — 分析 transcript 活跃度
 - `hive capture / inject / interrupt / kill / exec` — 低层 pane 操作
 

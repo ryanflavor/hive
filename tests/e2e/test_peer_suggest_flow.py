@@ -85,7 +85,7 @@ def _spawn_agent(
 
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required for e2e tests")
-def test_e2e_two_agent_team_shows_implicit_peer_mapping():
+def test_e2e_two_agent_team_surfaces_implicit_peer_mapping_in_team_output():
     workdir, env, session, pane_a, workspace = _start_e2e_session()
     team = f"e2e-peer-{uuid.uuid4().hex[:8]}"
 
@@ -106,13 +106,6 @@ def test_e2e_two_agent_team_shows_implicit_peer_mapping():
         assert alice["peer"] == "bob"
         assert bob["peer"] == "alice"
         assert "peer" not in _member(team_payload, "orch")
-
-        show_payload = _json_result(_run_in_pane(pane_a, ["peer", "show"], env=env, cwd=workdir))
-        assert show_payload["team"] == team
-        assert show_payload["mode"] == "implicit"
-        assert show_payload["pairs"] == [["alice", "bob"]]
-        assert _member(show_payload, "alice")["peer"] == "bob"
-        assert _member(show_payload, "bob")["peer"] == "alice"
     finally:
         _cleanup_e2e_session(session, workdir)
 
@@ -134,17 +127,8 @@ def test_e2e_peer_set_clear_with_three_agent_team():
         _wait_for_fake_droid_ready(str(_member(team_payload, "bob")["pane"]))
         _wait_for_fake_droid_ready(str(_member(team_payload, "carol")["pane"]))
 
-        show_payload = _json_result(_run_in_pane(pane_a, ["peer", "show"], env=env, cwd=workdir))
-        assert show_payload["team"] == team
-        assert show_payload["mode"] == "none"
-        assert "pairs" not in show_payload
-
         set_result = _run_in_pane(pane_a, ["peer", "set", "alice", "bob"], env=env, cwd=workdir)
         assert set_result.returncode == 0, set_result.stdout
-
-        show_payload = _json_result(_run_in_pane(pane_a, ["peer", "show"], env=env, cwd=workdir))
-        assert show_payload["mode"] == "explicit"
-        assert show_payload["pairs"] == [["alice", "bob"]]
 
         team_payload = _json_result(_run_in_pane(pane_a, ["team"], env=env, cwd=workdir))
         assert _member(team_payload, "alice")["peer"] == "bob"
@@ -155,9 +139,9 @@ def test_e2e_peer_set_clear_with_three_agent_team():
         clear_result = _run_in_pane(pane_a, ["peer", "clear", "alice"], env=env, cwd=workdir)
         assert clear_result.returncode == 0, clear_result.stdout
 
-        cleared_payload = _json_result(_run_in_pane(pane_a, ["peer", "show"], env=env, cwd=workdir))
-        assert cleared_payload["mode"] == "none"
-        assert "pairs" not in cleared_payload
+        cleared_payload = _json_result(_run_in_pane(pane_a, ["team"], env=env, cwd=workdir))
+        assert "peer" not in _member(cleared_payload, "alice")
+        assert "peer" not in _member(cleared_payload, "bob")
     finally:
         _cleanup_e2e_session(session, workdir)
 

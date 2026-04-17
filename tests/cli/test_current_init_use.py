@@ -1,4 +1,5 @@
 import json
+import os
 
 from hive import bus
 from hive.cli import cli
@@ -47,7 +48,9 @@ def test_current_reads_persisted_context(runner, configure_hive_home, tmp_path):
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["team"] == "team-d"
-    assert payload["workspace"] == str(workspace)
+    assert payload["runtimeWorkspace"] == str(workspace)
+    assert payload["cwd"] == os.getcwd()
+    assert payload["repoRoot"]
 
 
 def test_current_discovers_tmux_when_no_team(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -134,15 +137,15 @@ def test_current_discovers_registered_agent_from_tmux_pane(runner, configure_hiv
     result = runner.invoke(cli, ["current"])
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload == {
-        "team": "dev",
-        "workspace": str(tmp_path / "ws"),
-        "agent": "alpha",
-        "role": "agent",
-        "pane": "%9",
-        "tmuxSession": "dev",
-        "tmuxWindow": "dev:0",
-    }
+    assert payload["team"] == "dev"
+    assert payload["runtimeWorkspace"] == str(tmp_path / "ws")
+    assert payload["agent"] == "alpha"
+    assert payload["role"] == "agent"
+    assert payload["pane"] == "%9"
+    assert payload["tmuxSession"] == "dev"
+    assert payload["tmuxWindow"] == "dev:0"
+    assert payload["cwd"] == os.getcwd()
+    assert payload["repoRoot"]
 
 
 def test_current_shows_tagged_role_for_lead_pane(runner, configure_hive_home, monkeypatch, tmp_path):

@@ -45,7 +45,6 @@ npx skills add "$PWD" -g --skill hive --agent '*' -y
 # Inside tmux, bind the current window as a team
 hive init
 hive team
-hive peer show
 
 # Send a message (fire-and-forget, delivery tracked by sidecar)
 hive send dodo "review the staged diff"
@@ -54,7 +53,10 @@ hive send dodo "review the staged diff"
 hive send orch "done" --artifact /tmp/review.md
 
 # Pipe stdin as artifact (preferred for large content)
-printf '%s\n' "# Findings" "- item" | hive send orch "see report" --artifact -
+cat <<'EOF' | hive send orch "see report" --artifact -
+# Findings
+- item
+EOF
 
 # Reply to a specific message
 hive send orch "fixed" --reply-to aBc1
@@ -81,7 +83,7 @@ hive notify "done, press Space to come back"
 | `hive current` | Inspect current tmux/Hive binding |
 | `hive init` / `hive create` | Bind current window or create a team |
 | `hive team` / `hive teams` | Show team with runtime inputState/activity and peer info, or list teams |
-| `hive peer show\|set\|clear` | Inspect or persist default peer pairs |
+| `hive peer set\|clear` | Persist or clear default peer pairs |
 | `hive send <agent> "text"` | Send message (fire-and-forget with delivery tracking) |
 | `hive answer <agent> "text"` | Answer a pending AskUserQuestion |
 | `hive doctor [agent] [--skills]` | Diagnose agent connectivity and optional local hive skill drift |

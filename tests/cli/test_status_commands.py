@@ -46,6 +46,9 @@ def test_status_exposes_lead_session_id_via_daemon(runner, configure_hive_home, 
     payload = json.loads(result.output)
     assert payload["self"] == "orch"
     assert payload["tmuxWindow"] == "dev:0"
+    assert payload["runtimeWorkspace"] == str(workspace)
+    assert payload["cwd"] == os.getcwd()
+    assert payload["repoRoot"]
     orch = next(member for member in payload["members"] if member["name"] == "orch")
     assert orch["role"] == "agent"
     assert orch["sessionId"] == "orch-session-456"
@@ -80,6 +83,9 @@ def test_current_uses_daemon_for_model(runner, configure_hive_home, monkeypatch,
     assert payload["team"] == "team-current"
     assert payload["agent"] == "orch"
     assert payload["model"] == "gpt-5.4"
+    assert payload["runtimeWorkspace"] == str(workspace)
+    assert payload["cwd"] == os.getcwd()
+    assert payload["repoRoot"]
 
 
 def test_current_starts_sidecar_before_runtime_lookup(runner, configure_hive_home, monkeypatch, tmp_path):

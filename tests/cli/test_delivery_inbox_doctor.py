@@ -356,6 +356,37 @@ def test_doctor_requests_verbose_detail_by_default(runner, configure_hive_home, 
     assert payload["transcriptSize"] == 1234
 
 
+def test_doctor_includes_sidecar_metadata(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    _setup_team(monkeypatch, workspace)
+    monkeypatch.setattr(
+        "hive.sidecar.request_doctor",
+        lambda _ws, *, team, target_agent, verbose=False: {
+            "ok": True,
+            "agent": target_agent,
+            "team": team,
+            "alive": True,
+            "sidecar": {
+                "pid": 4242,
+                "started_at": "2026-04-17T00:00:00Z",
+                "code_hash": "deadbeef",
+            },
+        },
+    )
+    monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
+
+    result = runner.invoke(cli, ["doctor"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["sidecar"] == {
+        "pid": 4242,
+        "started_at": "2026-04-17T00:00:00Z",
+        "code_hash": "deadbeef",
+    }
+
+
 def test_doctor_with_skills_includes_local_skill_diagnostics(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"

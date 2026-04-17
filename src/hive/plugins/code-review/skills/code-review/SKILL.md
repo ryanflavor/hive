@@ -35,7 +35,7 @@ MANDATORY:
 优先顺序：
 
 1. 先执行 `hive current`
-2. 若已有 `team/workspace/agent`，继续用 Hive 命令
+2. 若已有 `team/runtimeWorkspace/agent`，继续用 Hive 命令
 3. 若没有 team 但在 tmux 中，执行 `hive init`
 4. 然后执行 `hive team`
 

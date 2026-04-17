@@ -343,9 +343,6 @@ class Team:
         names.extend(sorted(self.agents))
         return list(dict.fromkeys(names))
 
-    def peer_members(self) -> list[str]:
-        return self._peer_member_names()
-
     def _canonical_peer_map(self, peer_map: dict[str, str]) -> dict[str, str]:
         valid_names = set(self._peer_member_names())
         cleaned: dict[str, str] = {}
@@ -411,26 +408,6 @@ class Team:
         self.peer_map = updated
         self.save()
         return peer
-
-    def peer_snapshot(self, name: str = "") -> dict[str, object]:
-        members: list[dict[str, str]] = []
-        for member_name in self._peer_member_names():
-            if name and member_name != name:
-                continue
-            row: dict[str, str] = {"name": member_name}
-            peer_name = self.resolve_peer(member_name)
-            if peer_name:
-                row["peer"] = peer_name
-            members.append(row)
-        payload: dict[str, object] = {
-            "team": self.name,
-            "mode": self.peer_mode(),
-            "members": members,
-        }
-        pairs = self.peer_pairs()
-        if pairs:
-            payload["pairs"] = [[left, right] for left, right in pairs]
-        return payload
 
     @staticmethod
     def _clear_explicit_peer_from(peer_map: dict[str, str], name: str) -> None:

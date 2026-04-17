@@ -46,7 +46,15 @@ _FINALIZE_PENDING = "__finalize__"
 
 def _compute_build_hash() -> str:
     try:
-        return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+        root = Path(__file__).resolve().parent
+        hasher = hashlib.sha256()
+        for path in sorted(root.rglob("*.py")):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(root)
+            hasher.update(str(rel).encode())
+            hasher.update(path.read_bytes())
+        return hasher.hexdigest()
     except OSError:
         return "unknown"
 
@@ -58,6 +66,14 @@ def _now_iso() -> str:
     from datetime import UTC, datetime
 
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _sidecar_metadata(started_at: str) -> dict[str, Any]:
+    return {
+        "pid": os.getpid(),
+        "started_at": started_at,
+        "code_hash": SIDECAR_BUILD_HASH,
+    }
 
 
 def _run_dir(workspace: str) -> Path:
@@ -974,7 +990,14 @@ def _delivery_payload(workspace: str, pending: dict[str, dict[str, Any]], messag
     return payload
 
 
-def _doctor_payload(workspace: str, team_name: str, target_agent: str, *, verbose: bool = False) -> dict[str, Any]:
+def _doctor_payload(
+    workspace: str,
+    team_name: str,
+    target_agent: str,
+    *,
+    verbose: bool = False,
+    sidecar: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     from .team import Team
 
     team = Team.load(team_name)
@@ -989,6 +1012,8 @@ def _doctor_payload(workspace: str, team_name: str, target_agent: str, *, verbos
         "agent": target_agent,
         "team": team.name,
     }
+    if sidecar:
+        diag["sidecar"] = sidecar
     runtime = _member_runtime_payload(target.pane_id, role="agent")
     diag["alive"] = bool(runtime.get("alive", alive))
     if runtime.get("model"):
@@ -1509,9 +1534,11 @@ def _handle_request(
     team: str,
     tmux_window: str,
     tmux_window_id: str,
+    sidecar_started_at: str,
     pending: dict[str, dict[str, Any]],
     request: dict[str, Any],
 ) -> tuple[dict[str, Any], bool]:
+    sidecar = _sidecar_metadata(sidecar_started_at)
     action = request.get("action")
     if action == "ping":
         return {
@@ -1521,6 +1548,7 @@ def _handle_request(
             "team": team,
             "tmuxWindow": tmux_window,
             "tmuxWindowId": tmux_window_id,
+            "sidecar": sidecar,
         }, True
     if action == "send":
         try:
@@ -1566,6 +1594,7 @@ def _handle_request(
                 str(request.get("team") or team),
                 str(request.get("agent", "")),
                 verbose=bool(request.get("verbose", False)),
+                sidecar=sidecar,
             )
         except Exception as exc:
             response = {"ok": False, "error": str(exc)}
@@ -1620,6 +1649,7 @@ def _serve_requests(
     team: str,
     tmux_window: str,
     tmux_window_id: str,
+    sidecar_started_at: str,
     pending: dict[str, dict[str, Any]],
     timeout: float,
 ) -> bool:
@@ -1658,6 +1688,7 @@ def _serve_requests(
                 team=team,
                 tmux_window=tmux_window,
                 tmux_window_id=tmux_window_id,
+                sidecar_started_at=sidecar_started_at,
                 pending=pending,
                 request=request if isinstance(request, dict) else {},
             )
@@ -1670,6 +1701,7 @@ def _serve_requests(
 
 
 def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: str) -> None:
+    sidecar_started_at = _now_iso()
     pending: dict[str, dict[str, Any]] = {}
     last_window_check = 0.0
     server = _open_server_socket(workspace)
@@ -1691,6 +1723,7 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                 team=team,
                 tmux_window=tmux_window,
                 tmux_window_id=tmux_window_id,
+                sidecar_started_at=sidecar_started_at,
                 pending=pending,
                 timeout=ACTIVE_SLEEP if pending else IDLE_SLEEP,
             ):

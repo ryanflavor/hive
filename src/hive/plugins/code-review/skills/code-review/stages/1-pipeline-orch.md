@@ -40,7 +40,7 @@ flowchart TD
 
 ```bash
 CTX_JSON=$(hive current)
-WORKSPACE=$(printf '%s' "$CTX_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("workspace",""))')
+WORKSPACE=$(printf '%s' "$CTX_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("runtimeWorkspace",""))')
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 RUN_NAME="cr-${RUN_ID}"
 ARTIFACT_DIR="$WORKSPACE/artifacts/${RUN_NAME}"
@@ -129,7 +129,7 @@ verify done verifier=verifier-a artifact=/tmp/.../verifier-a-verify-result.md
 
 ```bash
 CTX_JSON=$(hive current)
-WORKSPACE=$(printf '%s' "$CTX_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("workspace",""))')
+WORKSPACE=$(printf '%s' "$CTX_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("runtimeWorkspace",""))')
 ARTIFACT_PATH="/tmp/.../reviewer-c-r1.md"  # 用当前 HIVE 消息里的 artifact 路径替换
 ARTIFACT_DIR=$(dirname "$ARTIFACT_PATH")
 RUN_NAME=$(basename "$ARTIFACT_DIR")
