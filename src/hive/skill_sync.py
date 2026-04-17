@@ -42,11 +42,26 @@ def _local_repo_root() -> Path | None:
 def _refresh_command() -> str:
     repo_root = _local_repo_root()
     source = shlex.quote(str(repo_root)) if repo_root is not None else _DEFAULT_REMOTE_SKILL_SOURCE
-    return f"npx skills add {source} -g --skill {_HIVE_SKILL_NAME} --agent '*' -y"
+    return f"npx skills add {source} -g --all"
 
 
 def _update_command() -> str:
     return f"npx skills update {_HIVE_SKILL_NAME} -g"
+
+
+def _preferred_refresh_hint() -> tuple[str, str]:
+    """Return (label, command) for the hint best suited to the current environment.
+
+    Local repo checkout (dev): `npx skills add` from $PWD. skills CLI does not
+    write a lock entry for local sources, so `npx skills update` cannot resolve
+    the skill — recommending it here would fail with "No installed skills found".
+
+    Otherwise (consumer install from github): `npx skills update` works because
+    the skills CLI recorded the github source during install.
+    """
+    if _local_repo_root() is not None:
+        return "Refresh with (local checkout):", _refresh_command()
+    return "Update with:", _update_command()
 
 
 def _shared_hive_skill_path() -> Path:
@@ -214,11 +229,10 @@ def render_hive_skill_warning(payload: dict[str, Any]) -> str:
         lines.append(f"  actual:    {payload['actualHash']}")
     if payload.get("sharedExists"):
         lines.append(f"  shared:    {payload.get('sharedPath', '')}")
+    hint_label, hint_command = _preferred_refresh_hint()
     lines.extend([
-        "Update with:",
-        f"  {payload.get('updateCommand', _update_command())}",
-        "For local development or a forced refresh, run:",
-        f"  {payload.get('refreshCommand', _refresh_command())}",
+        hint_label,
+        f"  {hint_command}",
         "Inspect details with:",
         "  hive doctor --skills",
     ])
@@ -228,12 +242,11 @@ def render_hive_skill_warning(payload: dict[str, Any]) -> str:
 def render_version_upgrade_warning(payload: dict[str, Any]) -> str:
     previous = payload.get("previousVersion") or "(unknown)"
     current = payload.get("currentVersion") or "(unknown)"
+    hint_label, hint_command = _preferred_refresh_hint()
     return "\n".join([
         f"Notice: hive upgraded from {previous} to {current}.",
-        "If this workspace uses the hive skill, update the installed skill with:",
-        f"  {payload.get('updateCommand', _update_command())}",
-        "For local development or a forced refresh, run:",
-        f"  {payload.get('refreshCommand', _refresh_command())}",
+        f"If this workspace uses the hive skill, {hint_label.lower().rstrip(':')}:",
+        f"  {hint_command}",
         "Inspect details with:",
         "  hive doctor --skills",
     ])

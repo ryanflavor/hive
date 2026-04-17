@@ -10,13 +10,13 @@ Hive CLI 是必须的外部依赖。安装方式：
 
 ```bash
 pipx install git+https://github.com/notdp/hive.git
-npx skills add https://github.com/notdp/hive -g --skill hive --agent '*' -y
+npx skills add https://github.com/notdp/hive -g --all
 # 升级 CLI：
 pipx upgrade hive
-# 升级全局安装的 hive skill（GitHub 安装）：
+# 升级全局 skill（从 GitHub 安装的用户用这条）：
 npx skills update hive -g
-# 本地开发时改为当前 checkout：
-npx skills add "$PWD" -g --skill hive --agent '*' -y
+# 本地 repo checkout 的刷新（skills lock 不跟踪 local source，update 用不了）：
+npx skills add "$PWD" -g --all
 ```
 
 升级 Hive CLI 不会自动刷新已安装的 `hive` skill；当 skill 过期时，在 agent pane 里运行 `hive` 命令会收到 stderr 提醒，也可以显式运行 `hive doctor --skills` 查看详情。

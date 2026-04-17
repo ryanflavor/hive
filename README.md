@@ -26,17 +26,17 @@ Requires: Python 3.11+, tmux, at least one agent CLI (`claude`, `codex`, or `dro
 ```bash
 pipx install git+https://github.com/notdp/hive.git
 pipx upgrade hive   # update the Hive CLI
-npx skills add https://github.com/notdp/hive -g --skill hive --agent '*' -y
-npx skills update hive -g   # update the globally installed hive skill
+npx skills add https://github.com/notdp/hive -g --all
+npx skills update hive -g   # refresh the globally installed hive skill (only works for github-sourced installs)
 ```
 
 Use `npx skills add` as the canonical installation path for the base `hive` skill. `hive plugin enable ...` installs plugin commands and plugin-owned skills such as `code-review`; it does not update the repo-root `skills/hive/SKILL.md`.
 Upgrading the CLI does not refresh the installed `hive` skill automatically. When the skill is stale, `hive` commands run from an agent pane warn on stderr, and `hive doctor --skills` shows the exact mismatch.
 
-For local development against your current checkout, install the skill from the repo path instead of GitHub:
+For local development against your current checkout, install the skill from the repo path instead of GitHub. The skills CLI does not record a lock entry for local sources, so `npx skills update` cannot refresh this install — rerun the same `npx skills add` command to pick up changes:
 
 ```bash
-npx skills add "$PWD" -g --skill hive --agent '*' -y
+npx skills add "$PWD" -g --all
 ```
 
 ## Quick Start
@@ -143,13 +143,13 @@ hive plugin enable fork      # vfork/hfork shortcuts
 hive plugin enable code-review  # multi-agent code review skill
 ```
 
-Plugin helpers (`cvim`, `vim`, `vfork`, `hfork`) are for the **human**, not the model. In Claude Code / Codex, use `!hive cvim` via shell escape. Plugin enable does not install or refresh the base `hive` skill; use `npx skills add ... --skill hive` for that.
+Plugin helpers (`cvim`, `vim`, `vfork`, `hfork`) are for the **human**, not the model. In Claude Code / Codex, use `!hive cvim` via shell escape. Plugin enable does not install or refresh the base `hive` skill; use `npx skills add <source> -g --all` for that.
 
 ## Development
 
 ```bash
 python3 -m pip install -e . --break-system-packages
-npx skills add "$PWD" -g --skill hive --agent '*' -y
+npx skills add "$PWD" -g --all
 hive plugin enable code-review && hive plugin enable cvim && hive plugin enable fork && hive plugin enable notify
 
 PYTHONPATH=src python -m pytest tests/ -q

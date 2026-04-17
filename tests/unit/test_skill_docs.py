@@ -4,8 +4,8 @@ from pathlib import Path
 def test_hive_skill_guides_multiline_send_via_artifact():
     skill_text = (Path(__file__).resolve().parents[2] / "skills" / "hive" / "SKILL.md").read_text()
 
-    assert 'npx skills add https://github.com/notdp/hive -g --skill hive --agent \'*\' -y' in skill_text
-    assert 'npx skills add "$PWD" -g --skill hive --agent \'*\' -y' in skill_text
+    assert 'npx skills add https://github.com/notdp/hive -g --all' in skill_text
+    assert 'npx skills add "$PWD" -g --all' in skill_text
     assert "pipx upgrade hive" in skill_text
     assert "npx skills update hive -g" in skill_text
     assert "--artifact -" in skill_text
@@ -37,9 +37,9 @@ def test_hive_install_docs_use_npx_skills_add_as_canonical_path():
 
     assert "pipx upgrade hive" in readme_text
     assert "npx skills update hive -g" in readme_text
-    assert 'npx skills add https://github.com/notdp/hive -g --skill hive --agent \'*\' -y' in readme_text
-    assert 'npx skills add "$PWD" -g --skill hive --agent \'*\' -y' in readme_text
+    assert 'npx skills add https://github.com/notdp/hive -g --all' in readme_text
+    assert 'npx skills add "$PWD" -g --all' in readme_text
     assert "hive handoff dodo --artifact /tmp/task.md" in readme_text
     assert 'Plugin enable does not install or refresh the base `hive` skill' in readme_text
-    assert 'npx skills add "$PWD" -g --skill hive --agent \'*\' -y' in agents_text
+    assert 'npx skills add "$PWD" -g --all' in agents_text
     assert 'repo changes to `skills/hive/SKILL.md` do not reach agents unless you refresh it via `npx skills add`' in agents_text

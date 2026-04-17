@@ -41,7 +41,7 @@ def test_diagnose_hive_skill_reports_missing_install(monkeypatch, tmp_path: Path
     assert payload["state"] == "missing"
     assert payload["recommendedAction"] == "refresh"
     assert payload["installedExists"] is False
-    assert "--skill hive" in payload["refreshCommand"]
+    assert "--all" in payload["refreshCommand"]
 
 
 def test_warn_hive_skill_drift_is_rate_limited(monkeypatch, tmp_path: Path):
