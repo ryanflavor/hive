@@ -621,7 +621,6 @@ def cli(ctx: click.Context):
         return
     if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
         return
-    skill_sync.check_version_upgrade()
     _warn_if_current_pane_hive_skill_is_stale()
     if ctx.invoked_subcommand not in _TMUX_OPTIONAL_ROOT_COMMANDS and ctx.invoked_subcommand is not None and not tmux.is_inside_tmux():
         _fail(_TMUX_REQUIRED_MESSAGE)

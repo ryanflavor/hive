@@ -29,24 +29,9 @@ def test_root_help_layers_daily_handoff_debug_sections(runner):
         assert command_name in debug_block
 
 
-def test_root_cli_checks_version_upgrade_before_tmux_guard(runner, monkeypatch):
-    called: list[str] = []
-
-    monkeypatch.setattr("hive.cli.skill_sync.check_version_upgrade", lambda: called.append("checked"))
-    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: False)
-
-    result = runner.invoke(cli, ["team"])
-
-    assert result.exit_code != 0
-    assert called == ["checked"]
-    assert "requires tmux" in result.output
-
-
 def test_root_cli_warns_when_current_agent_pane_skill_is_stale(runner, monkeypatch):
-    checked: list[str] = []
     warned: list[str] = []
 
-    monkeypatch.setattr("hive.cli.skill_sync.check_version_upgrade", lambda: checked.append("checked"))
     monkeypatch.setattr("hive.cli.skill_sync.maybe_warn_hive_skill_drift", lambda cli_name: warned.append(cli_name))
     monkeypatch.setattr("hive.cli._stderr_is_interactive", lambda: True)
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
@@ -58,14 +43,12 @@ def test_root_cli_warns_when_current_agent_pane_skill_is_stale(runner, monkeypat
     result = runner.invoke(cli, ["plugin", "list"])
 
     assert result.exit_code == 0
-    assert checked == ["checked"]
     assert warned == ["codex"]
 
 
 def test_root_cli_skips_skill_warning_for_non_agent_pane(runner, monkeypatch):
     warned: list[str] = []
 
-    monkeypatch.setattr("hive.cli.skill_sync.check_version_upgrade", lambda: None)
     monkeypatch.setattr("hive.cli.skill_sync.maybe_warn_hive_skill_drift", lambda cli_name: warned.append(cli_name))
     monkeypatch.setattr("hive.cli._stderr_is_interactive", lambda: True)
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
