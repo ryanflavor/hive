@@ -29,6 +29,7 @@ def test_status_exposes_lead_session_id_via_daemon(runner, configure_hive_home, 
                 "members": {
                     "orch": {
                         "alive": True,
+                        "busy": False,
                         "sessionId": "orch-session-456",
                         "model": "gpt-5.4",
                         "inputState": "ready",
@@ -55,6 +56,7 @@ def test_status_exposes_lead_session_id_via_daemon(runner, configure_hive_home, 
     assert payload["repoRoot"]
     orch = next(member for member in payload["members"] if member["name"] == "orch")
     assert orch["role"] == "agent"
+    assert orch["busy"] is False
     assert orch["sessionId"] == "orch-session-456"
     assert orch["model"] == "gpt-5.4"
     assert orch["inputState"] == "ready"
@@ -80,6 +82,7 @@ def test_current_uses_daemon_for_model(runner, configure_hive_home, monkeypatch,
                 "orch": {
                     "alive": True,
                     "model": "gpt-5.4",
+                    "busy": True,
                     "deferredCount": 1,
                     "deferredIds": ["aBc1"],
                     "deferred": [
@@ -103,6 +106,7 @@ def test_current_uses_daemon_for_model(runner, configure_hive_home, monkeypatch,
     assert payload["team"] == "team-current"
     assert payload["agent"] == "orch"
     assert payload["model"] == "gpt-5.4"
+    assert payload["busy"] is True
     assert payload["deferredCount"] == 1
     assert payload["deferredIds"] == ["aBc1"]
     assert payload["deferred"][0]["artifact"] == "/tmp/report.md"

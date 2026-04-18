@@ -42,6 +42,8 @@ SEND_GRACE_TIMEOUT = 3.0
 SEND_REQUEST_TIMEOUT = SEND_GRACE_TIMEOUT + 2.0
 SIDECAR_API_VERSION = 5
 _FINALIZE_PENDING = "__finalize__"
+BUSY_OUTPUT_THRESHOLD_SECONDS = 3.0
+_OUTPUT_BUSY_MONITOR = None
 
 
 def _compute_build_hash() -> str:
@@ -73,6 +75,20 @@ def _sidecar_metadata(started_at: str) -> dict[str, Any]:
         "pid": os.getpid(),
         "started_at": started_at,
         "code_hash": SIDECAR_BUILD_HASH,
+    }
+
+
+def _set_output_busy_monitor(monitor: Any) -> None:
+    global _OUTPUT_BUSY_MONITOR
+    _OUTPUT_BUSY_MONITOR = monitor
+
+
+def _busy_output_payload(pane_id: str) -> dict[str, Any]:
+    monitor = _OUTPUT_BUSY_MONITOR
+    if monitor is None or not pane_id:
+        return {"busy": False}
+    return {
+        "busy": bool(monitor.is_busy(pane_id, threshold_seconds=BUSY_OUTPUT_THRESHOLD_SECONDS)),
     }
 
 
@@ -488,19 +504,6 @@ def request_team_runtime(
     return _request_sidecar(
         workspace,
         {"action": "team-runtime", "team": team},
-        timeout=SOCKET_READY_TIMEOUT,
-    )
-
-
-def request_suggest(
-    workspace: str,
-    *,
-    team: str,
-    source_agent: str,
-) -> dict[str, Any] | None:
-    return _request_sidecar(
-        workspace,
-        {"action": "suggest", "team": team, "sourceAgent": source_agent},
         timeout=SOCKET_READY_TIMEOUT,
     )
 
@@ -1099,6 +1102,8 @@ def _doctor_payload(
         diag["activityState"] = runtime["activityState"]
     if runtime.get("activityReason"):
         diag["activityReason"] = runtime["activityReason"]
+    if "busy" in runtime:
+        diag["busy"] = bool(runtime["busy"])
     if runtime.get("interruptSafety"):
         diag["interruptSafety"] = runtime["interruptSafety"]
     if runtime.get("safetyReason"):
@@ -1148,6 +1153,7 @@ def _agent_runtime_payload(pane_id: str) -> dict[str, Any]:
     runtime: dict[str, Any] = {
         "alive": tmux.is_pane_alive(pane_id),
     }
+    runtime.update(_busy_output_payload(pane_id))
     if not runtime["alive"]:
         runtime["inputState"] = "offline"
         runtime["inputReason"] = "pane_dead"
@@ -1237,7 +1243,9 @@ def _member_runtime_payload(pane_id: str, *, role: str) -> dict[str, Any]:
     from . import tmux
 
     if role != "agent":
-        return {"alive": tmux.is_pane_alive(pane_id)}
+        payload = {"alive": tmux.is_pane_alive(pane_id)}
+        payload.update(_busy_output_payload(pane_id))
+        return payload
     return _agent_runtime_payload(pane_id)
 
 
@@ -1399,151 +1407,6 @@ def _team_member_bindings(team_name: str) -> dict[str, dict[str, Any]]:
         }
 
     return members
-
-
-def _candidate_score(
-    *,
-    source_model: str,
-    source_cli: str,
-    candidate_model: str,
-    candidate_cli: str,
-    input_state: str,
-    activity_state: str,
-    is_default_peer: bool,
-) -> tuple[int, list[str]]:
-    score = 0
-    reasons: list[str] = []
-
-    if input_state == "ready":
-        score += 100
-        reasons.append("ready")
-    elif input_state:
-        reasons.append(f"inputState={input_state}")
-
-    if activity_state == "idle":
-        score += 20
-        reasons.append("activity_idle")
-    elif activity_state == "active":
-        reasons.append("activity_active")
-    elif activity_state:
-        reasons.append(f"activityState={activity_state}")
-
-    if is_default_peer:
-        score += 15
-        reasons.append("default_peer")
-
-    if source_model and candidate_model:
-        if source_model != candidate_model:
-            score += 10
-            reasons.append("different_model")
-        else:
-            reasons.append("same_model_fallback")
-
-    if source_cli and candidate_cli:
-        if source_cli != candidate_cli:
-            score += 5
-            reasons.append("different_cli")
-        else:
-            reasons.append("same_cli_fallback")
-
-    if not reasons:
-        reasons.append("alive")
-    return score, reasons
-
-
-def _suggest_payload(team_name: str, source_agent: str) -> dict[str, Any]:
-    from .team import Team
-
-    team = Team.load(team_name)
-    bindings = _team_member_bindings(team_name)
-    runtime_payload = _team_runtime_payload(team_name)
-    runtime_members = runtime_payload.get("members")
-    if not isinstance(runtime_members, dict):
-        runtime_members = {}
-
-    if source_agent not in bindings and source_agent not in runtime_members:
-        return {"ok": False, "error": f"agent '{source_agent}' is not registered in team '{team_name}'"}
-
-    source_binding = bindings.get(source_agent, {})
-    source_runtime = runtime_members.get(source_agent, {})
-    if not isinstance(source_runtime, dict):
-        source_runtime = {}
-    source_cli = str(source_runtime.get("_cli") or source_binding.get("cli") or "")
-    source_model = str(source_runtime.get("model") or "")
-    source_peer = team.resolve_peer(source_agent) or ""
-
-    candidates: list[dict[str, Any]] = []
-    for name, binding in bindings.items():
-        if name == source_agent:
-            continue
-        runtime = runtime_members.get(name, {})
-        if not isinstance(runtime, dict):
-            runtime = {}
-        if not bool(runtime.get("alive", False)):
-            continue
-        candidate_cli = str(runtime.get("_cli") or binding.get("cli") or "")
-        candidate_model = str(runtime.get("model") or "")
-        input_state = str(runtime.get("inputState") or "unknown")
-        activity_state = str(runtime.get("activityState") or "unknown")
-        is_default_peer = bool(source_peer and name == source_peer)
-        score, reasons = _candidate_score(
-            source_model=source_model,
-            source_cli=source_cli,
-            candidate_model=candidate_model,
-            candidate_cli=candidate_cli,
-            input_state=input_state,
-            activity_state=activity_state,
-            is_default_peer=is_default_peer,
-        )
-        candidate: dict[str, Any] = {
-            "name": name,
-            "role": binding.get("role", ""),
-            "pane": binding.get("pane", ""),
-            "alive": True,
-            "inputState": input_state,
-            "score": score,
-            "reasons": reasons,
-        }
-        if candidate_cli:
-            candidate["cli"] = candidate_cli
-        if candidate_model:
-            candidate["model"] = candidate_model
-        if runtime.get("sessionId"):
-            candidate["sessionId"] = runtime["sessionId"]
-        if runtime.get("activityState"):
-            candidate["activityState"] = runtime["activityState"]
-        if runtime.get("activityReason"):
-            candidate["activityReason"] = runtime["activityReason"]
-        if runtime.get("activityObservedAt"):
-            candidate["activityObservedAt"] = runtime["activityObservedAt"]
-        if is_default_peer:
-            candidate["isPeer"] = True
-        candidates.append(candidate)
-
-    candidates.sort(key=lambda item: (-int(item.get("score", 0)), str(item.get("name", ""))))
-
-    source: dict[str, Any] = {"name": source_agent}
-    if source_cli:
-        source["cli"] = source_cli
-    if source_model:
-        source["model"] = source_model
-    if source_runtime.get("inputState"):
-        source["inputState"] = source_runtime["inputState"]
-    if source_peer:
-        source["peer"] = source_peer
-    if source_runtime.get("activityState"):
-        source["activityState"] = source_runtime["activityState"]
-    if source_runtime.get("activityReason"):
-        source["activityReason"] = source_runtime["activityReason"]
-    if source_runtime.get("activityObservedAt"):
-        source["activityObservedAt"] = source_runtime["activityObservedAt"]
-
-    return {
-        "ok": True,
-        "team": team_name,
-        "source": source,
-        "candidates": candidates,
-    }
 
 
 def _thread_payload(workspace: str, pending: dict[str, dict[str, Any]], message_id: str) -> dict[str, Any]:
@@ -1789,15 +1652,6 @@ def _handle_request(
         except Exception as exc:
             response = {"ok": False, "error": str(exc)}
         return response, True
-    if action == "suggest":
-        try:
-            response = _suggest_payload(
-                str(request.get("team") or team),
-                str(request.get("sourceAgent", "")),
-            )
-        except Exception as exc:
-            response = {"ok": False, "error": str(exc)}
-        return response, True
     if action == "thread":
         try:
             response = _thread_payload(workspace, pending, str(request.get("msgId", "")))
@@ -1885,10 +1739,17 @@ def _serve_requests(
 
 
 def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: str) -> None:
+    from . import tmux
+
     sidecar_started_at = _now_iso()
     pending: dict[str, dict[str, Any]] = {}
     last_window_check = 0.0
     server = _open_server_socket(workspace)
+    session_target = (tmux_window.split(":", 1)[0] if ":" in tmux_window else tmux_window).strip()
+    busy_monitor = tmux.ControlModeOutputMonitor(session_target) if session_target else None
+    _set_output_busy_monitor(busy_monitor)
+    if busy_monitor is not None:
+        busy_monitor.start()
 
     try:
         while True:
@@ -1936,6 +1797,9 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                     continue
                 pending.pop(message_id, None)
     finally:
+        if busy_monitor is not None:
+            busy_monitor.stop()
+        _set_output_busy_monitor(None)
         try:
             server.close()
         except OSError:

@@ -305,6 +305,7 @@ def test_doctor_self(runner, configure_hive_home, monkeypatch, tmp_path):
             "agent": target_agent,
             "team": team,
             "alive": True,
+            "busy": False,
             "model": "gpt-5.4",
             "inputState": "ready",
             "interruptSafety": "unknown",
@@ -323,6 +324,7 @@ def test_doctor_self(runner, configure_hive_home, monkeypatch, tmp_path):
     assert payload["agent"] == "claude"
     assert payload["team"] == "team-x"
     assert payload["alive"] is True
+    assert payload["busy"] is False
     assert payload["model"] == "gpt-5.4"
     assert payload["inputState"] == "ready"
     assert payload["interruptSafety"] == "unknown"
@@ -344,6 +346,7 @@ def test_doctor_named_agent(runner, configure_hive_home, monkeypatch, tmp_path):
             "agent": target_agent,
             "team": team,
             "alive": True,
+            "busy": True,
         },
     )
     monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
@@ -353,6 +356,7 @@ def test_doctor_named_agent(runner, configure_hive_home, monkeypatch, tmp_path):
     payload = json.loads(result.output)
     assert payload["agent"] == "gpt"
     assert payload["alive"] is True
+    assert payload["busy"] is True
 
 
 def test_doctor_requests_verbose_detail_by_default(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -370,6 +374,7 @@ def test_doctor_requests_verbose_detail_by_default(runner, configure_hive_home, 
             "agent": target_agent,
             "team": team,
             "alive": True,
+            "busy": False,
             "model": "gpt-5.4",
             "inputState": "ready",
             "gate": "clear",
@@ -401,6 +406,7 @@ def test_doctor_includes_sidecar_metadata(runner, configure_hive_home, monkeypat
             "agent": target_agent,
             "team": team,
             "alive": True,
+            "busy": False,
             "sidecar": {
                 "pid": 4242,
                 "started_at": "2026-04-17T00:00:00Z",
@@ -432,6 +438,7 @@ def test_doctor_with_skills_includes_local_skill_diagnostics(runner, configure_h
             "agent": target_agent,
             "team": team,
             "alive": True,
+            "busy": False,
             "model": "gpt-5.4",
             "inputState": "ready",
             "gate": "clear",
@@ -478,45 +485,6 @@ def test_doctor_unknown_agent(runner, configure_hive_home, monkeypatch, tmp_path
     assert "not registered" in result.output
 
 
-# --- hidden agent-facing views ---
-
-
-def test_suggest_command_outputs_candidates(runner, configure_hive_home, monkeypatch, tmp_path):
-    configure_hive_home()
-    workspace = tmp_path / "ws"
-    bus.init_workspace(workspace)
-    _setup_team(monkeypatch, workspace)
-    monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
-    monkeypatch.setattr(
-        "hive.sidecar.request_suggest",
-        lambda _ws, *, team, source_agent: {
-            "ok": True,
-            "team": team,
-            "source": {"name": source_agent, "cli": "codex", "model": "gpt-5.4"},
-            "candidates": [
-                {
-                    "name": "orch",
-                    "role": "agent",
-                    "pane": "%2",
-                    "cli": "claude",
-                    "model": "claude-opus-4-6",
-                    "alive": True,
-                    "inputState": "ready",
-                    "score": 140,
-                    "reasons": ["ready", "different_model", "different_cli"],
-                }
-            ],
-        },
-    )
-
-    result = runner.invoke(cli, ["suggest"])
-    assert result.exit_code == 0
-    payload = json.loads(result.output)
-    assert payload["source"]["name"] == "claude"
-    assert payload["candidates"][0]["name"] == "orch"
-    assert payload["candidates"][0]["score"] == 140
-
-
 def test_thread_command_outputs_thread_projection(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"
@@ -557,6 +525,7 @@ def test_activity_command_outputs_activity_probe(runner, configure_hive_home, mo
             "agent": target_agent,
             "team": team,
             "alive": True,
+            "busy": True,
             "inputState": "ready",
             "cli": "claude",
             "pane": "%99",
@@ -596,6 +565,7 @@ def test_activity_command_outputs_activity_probe(runner, configure_hive_home, mo
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["agent"] == "claude"
+    assert payload["busy"] is True
     assert payload["activityState"] == "active"
     assert payload["activityReason"] == "assistant_tool_use_open"
     assert payload["interruptSafety"] == "unsafe"

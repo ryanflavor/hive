@@ -1,4 +1,5 @@
 import subprocess
+import time
 
 from hive import tmux
 
@@ -257,6 +258,20 @@ def test_enable_pane_border_status_uses_hive_member_format(monkeypatch):
     assert calls[1] == (
         "set-window-option", "-t", "dev:1", "pane-border-format", tmux._HIVE_PANE_BORDER_FORMAT
     )
+
+
+def test_parse_control_mode_output_pane_matches_output_notifications():
+    assert tmux.parse_control_mode_output_pane("%output %2772 hello") == "%2772"
+    assert tmux.parse_control_mode_output_pane("%extended-output %2773 12 : world") == "%2773"
+    assert tmux.parse_control_mode_output_pane("%session-changed $1 dev") is None
+
+
+def test_control_mode_monitor_is_busy_uses_threshold():
+    monitor = tmux.ControlModeOutputMonitor("613")
+    monitor._last_output_at["%9"] = time.monotonic() - 1.0
+    assert monitor.is_busy("%9", threshold_seconds=3.0) is True
+    monitor._last_output_at["%9"] = time.monotonic() - 4.0
+    assert monitor.is_busy("%9", threshold_seconds=3.0) is False
 
 
 def test_window_option_helpers_and_flash(monkeypatch):

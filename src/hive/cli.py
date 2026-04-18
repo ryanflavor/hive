@@ -34,7 +34,6 @@ _COMMAND_HELP_SECTIONS = {
     "send": "Daily",
     "reply": "Daily",
     "answer": "Daily",
-    "suggest": "Daily",
     "notify": "Daily",
     # Handoff — spawn/fork a pane, load a workflow, or bring a pane into the team.
     "handoff": "Handoff",
@@ -95,9 +94,6 @@ hive handoff dodo --artifact /tmp/task.md
 
 # Answer a pending AskUserQuestion from another agent
 hive answer dodo "yes"
-
-# Find a good collaborator
-hive suggest
 
 # Send detailed context via stdin artifact (preferred for long content)
 cat <<'EOF' | hive send dodo "see report" --artifact -
@@ -431,6 +427,8 @@ def _augment_current_payload_with_runtime(payload: dict[str, object], t: Team) -
     model = member_runtime.get("model")
     if model:
         payload["model"] = model
+    if "busy" in member_runtime:
+        payload["busy"] = bool(member_runtime["busy"])
     deferred_count = member_runtime.get("deferredCount")
     if deferred_count not in ("", None):
         payload["deferredCount"] = deferred_count
@@ -463,6 +461,7 @@ def _augment_team_payload_with_runtime(t: Team, payload: dict[str, object]) -> d
             continue
         for key in (
             "alive",
+            "busy",
             "model",
             "sessionId",
             "inputState",
@@ -1866,26 +1865,6 @@ def delivery(message_id: str):
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
-@cli.command("suggest")
-@click.argument("source_agent", required=False, default="")
-def suggest(source_agent: str):
-    """Suggest likely collaboration candidates."""
-    _, t = _resolve_scoped_team(None, required=True)
-    assert t is not None
-    ws = _resolve_workspace(t, required=True)
-    resolved_source = source_agent or _resolve_sender(None)
-    from .sidecar import request_suggest
-
-    _ensure_team_sidecar(t, ws)
-    payload = request_suggest(str(ws), team=t.name, source_agent=resolved_source)
-    if not payload:
-        _fail("sidecar unavailable")
-    if payload.get("ok") is False:
-        _fail(str(payload.get("error", "suggest failed")))
-    payload.pop("ok", None)
-    click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
-
-
 @cli.command()
 @click.argument("message_id")
 def thread(message_id: str):
@@ -1951,6 +1930,7 @@ def activity(agent_name: str):
     activity_payload: dict[str, object] = {
         "agent": payload.get("agent", target_name),
         "team": payload.get("team", t.name),
+        "busy": bool(payload.get("busy", False)),
         "activityState": payload.get("activityState", "unknown"),
         "activityReason": payload.get("activityReason", "unknown"),
         "interruptSafety": payload.get("interruptSafety", "unknown"),

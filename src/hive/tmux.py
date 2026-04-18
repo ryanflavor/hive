@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import os
+import pty
+import re
 import shlex
+import select
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 
@@ -22,6 +26,170 @@ def _run(args: list[str], check: bool = True, timeout: int = 5) -> subprocess.Co
 def _run_output(args: list[str]) -> str:
     r = _run(args)
     return r.stdout.strip()
+
+
+_CONTROL_MODE_OUTPUT_RE = re.compile(r"^%(?:extended-)?output (?P<pane>%[0-9]+)\b")
+_CONTROL_MODE_RESTART_DELAY = 1.0
+
+
+def parse_control_mode_output_pane(line: str) -> str | None:
+    """Return the pane id for a control mode output line, if any."""
+    match = _CONTROL_MODE_OUTPUT_RE.match((line or "").strip())
+    if not match:
+        return None
+    return match.group("pane")
+
+
+class ControlModeOutputMonitor:
+    """Best-effort tmux control-mode monitor for pane output activity."""
+
+    def __init__(self, session_target: str):
+        self.session_target = session_target
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._proc: subprocess.Popen[bytes] | None = None
+        self._master_fd: int | None = None
+        self._last_output_at: dict[str, float] = {}
+
+    def start(self) -> None:
+        if not self.session_target:
+            return
+        with self._lock:
+            if self._thread and self._thread.is_alive():
+                return
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._run, name="hive-tmux-control", daemon=True)
+            self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._request_detach()
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=2.0)
+        self._terminate_proc()
+
+    def is_busy(self, pane_id: str, *, threshold_seconds: float) -> bool:
+        if not pane_id:
+            return False
+        with self._lock:
+            last = self._last_output_at.get(pane_id)
+        if last is None:
+            return False
+        return (time.monotonic() - last) <= threshold_seconds
+
+    def last_output_age(self, pane_id: str) -> float | None:
+        if not pane_id:
+            return None
+        with self._lock:
+            last = self._last_output_at.get(pane_id)
+        if last is None:
+            return None
+        return max(0.0, time.monotonic() - last)
+
+    def _request_detach(self) -> None:
+        with self._lock:
+            fd = self._master_fd
+        if fd is None:
+            return
+        try:
+            os.write(fd, b"detach-client\n")
+        except OSError:
+            pass
+
+    def _terminate_proc(self) -> None:
+        with self._lock:
+            proc = self._proc
+            self._proc = None
+            master_fd = self._master_fd
+            self._master_fd = None
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=1.0)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        if master_fd is not None:
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self._run_once()
+            except Exception:
+                # Best-effort monitor: fall back to retry rather than crashing sidecar.
+                pass
+            if self._stop.is_set():
+                break
+            time.sleep(_CONTROL_MODE_RESTART_DELAY)
+
+    def _run_once(self) -> None:
+        master_fd, slave_fd = pty.openpty()
+        proc: subprocess.Popen[bytes] | None = None
+        try:
+            proc = subprocess.Popen(
+                ["tmux", "-C", "attach", "-t", self.session_target],
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                close_fds=True,
+                start_new_session=True,
+            )
+        finally:
+            try:
+                os.close(slave_fd)
+            except OSError:
+                pass
+
+        with self._lock:
+            self._proc = proc
+            self._master_fd = master_fd
+
+        try:
+            buffer = b""
+            while not self._stop.is_set():
+                if proc.poll() is not None:
+                    break
+                ready, _, _ = select.select([master_fd], [], [], 0.5)
+                if not ready:
+                    continue
+                try:
+                    chunk = os.read(master_fd, 65536)
+                except OSError:
+                    break
+                if not chunk:
+                    continue
+                buffer += chunk
+                while b"\n" in buffer:
+                    raw_line, buffer = buffer.split(b"\n", 1)
+                    pane_id = parse_control_mode_output_pane(raw_line.decode(errors="ignore").rstrip("\r"))
+                    if pane_id:
+                        with self._lock:
+                            self._last_output_at[pane_id] = time.monotonic()
+        finally:
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+            with self._lock:
+                self._proc = None
+                self._master_fd = None
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass
 
 
 # --- Session ---

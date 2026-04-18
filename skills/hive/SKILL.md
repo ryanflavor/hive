@@ -45,8 +45,6 @@ cat <<'EOF' | hive send dodo "see attachment" --artifact -
 EOF
 hive reply dodo "ack, looking"        # 回复 dodo 最近一条给你的消息（自动 reply-to）
 hive answer claude "yes"              # 回答 agent 的 pending question
-hive suggest                          # 基于当前 runtime 建议协作对象
-hive suggest momo                     # 以指定 source agent 视角给出候选
 hive notify "按 Space 和我对话"       # 给当前 pane 的用户弹通知
 ```
 
@@ -94,27 +92,20 @@ hive notify "按 Space 和我对话"       # 给当前 pane 的用户弹通知
 
 ### 协作升级（4 条足矣）
 
-问题默认先在团队内消化——不要先把用户当传话筒。先 `hive team`，适合协作再 `hive suggest`，优先找**非同源模型 / 非同 CLI** 的 agent。
+问题默认先在团队内消化——不要先把用户当传话筒。先 `hive team` 看成员、runtime 和当前 deferred/等待状态，再决定要不要找人协作。
 
 只有以下情况升级给用户：
 
-1. 已完成 `hive team` / `hive suggest` 检查仍无合适 agent
+1. 已完成 `hive team` 检查仍无合适 agent
 2. 决策涉及不可逆外部副作用（`git push`、发 PR comment、删除数据、跑迁移、通知外部系统）
 3. 需要用户提供团队内 agent 都不掌握的信息、授权或偏好
 4. 用户明确要求参与这类决策
 
-升级时直接说明：`已先检查 hive team / hive suggest；这一步仍需你决定，因为 ...`。不要问用户「要不要我先找别人讨论」「下一步该找谁接手」这类把用户当传话筒的问题。
+升级时直接说明：`已先检查 hive team；这一步仍需你决定，因为 ...`。不要问用户「要不要我先找别人讨论」「下一步该找谁接手」这类把用户当传话筒的问题。
 
 ### 默认分工
 
 Claude 偏前端体验、文案收敛和发散式讨论；GPT 偏后端 correctness、约束检查和严谨 review。若项目已有更明确的人选或团队经验，以项目事实为准。
-
-### `hive suggest` 怎么用
-
-- 想找人 review / 讨论 / 帮忙时先跑 `hive suggest`，默认 source 是自己；替别人挑协作者时 `hive suggest <source-agent>`
-- 输出重点看 `score` / `reasons` / `model` / `cli` / `inputState` / `activityState` / `isPeer`
-- 排序偏向：排除自己 / offline → 优先 `ready` → 其次 `activityState=idle` → 默认 peer → 不同 model / CLI
-- `suggest` 只给建议，选中后仍然用 `hive send <name> "<message>"`
 
 ### `hive team` 状态字段
 

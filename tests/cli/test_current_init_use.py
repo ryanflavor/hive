@@ -738,7 +738,6 @@ def test_root_help_groups_commands_by_area(runner):
         "Show current Hive context.",
         "Show team overview.",
         "Initialize a team from the current tmux window.",
-        "Suggest likely collaboration candidates.",
         "Check delivery status of a sent message by ID.",
         "Show a reply thread rooted at a msgId.",
         "Classify transcript activity and interrupt safety.",
