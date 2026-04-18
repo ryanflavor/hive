@@ -26,6 +26,15 @@ from . import tmux
 _CODEX_PROMPT = "› "
 _CLAUDE_PROMPT = "❯\xa0"
 _DROID_PLACEHOLDER_HINTS = ('Try "', 'Suggest ', 'Ask ')
+# Claude renders dim-gray placeholder text inside the input box when the
+# user has not typed anything. `capture-pane -p` strips ANSI attributes,
+# so we cannot distinguish dim from normal by color and must match by
+# string. Missing an entry here causes the placeholder to be saved as if
+# it were the user's draft and pasted back after a send.
+_CLAUDE_PLACEHOLDER_HINTS = (
+    'Try "',
+    'Press up to edit queued messages',
+)
 
 
 @dataclass(frozen=True)
@@ -151,7 +160,12 @@ def _parse_claude(lines: list[str]) -> str:
     top = seps[-2] + 1
     bot = seps[-1]
     block = lines[top:bot]
-    return _strip_lines(block, first_prefix=_CLAUDE_PROMPT, cont_prefix="  ")
+    text = _strip_lines(block, first_prefix=_CLAUDE_PROMPT, cont_prefix="  ")
+    if "\n" not in text:
+        for placeholder in _CLAUDE_PLACEHOLDER_HINTS:
+            if text.startswith(placeholder):
+                return ""
+    return text
 
 
 def _parse_codex(lines: list[str]) -> str:

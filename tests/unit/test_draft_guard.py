@@ -25,6 +25,55 @@ def test_parse_claude_empty_input_returns_nothing():
     assert draft_guard._parse_claude(_lines(capture)) == ""
 
 
+def test_parse_claude_queued_placeholder_is_not_treated_as_draft():
+    # Regression: when the user has queued messages, Claude renders the dim
+    # placeholder "Press up to edit queued messages" inside the input box.
+    # `capture-pane -p` strips the dim ANSI, so the parser previously saw
+    # it as a real draft and the Hive send path saved it to a tmux buffer
+    # and pasted it back into the input box after the send completed —
+    # polluting the user's input with bogus characters.
+    capture = f"""
+ ▐▛███▜▌   Claude Code v2.1.111
+
+───────────────────────────────────────────────
+❯\xa0Press up to edit queued messages
+───────────────────────────────────────────────
+  /Users/notdp/Developer/hive · main · Opus 4.7 (1M context)
+"""
+    assert draft_guard._parse_claude(_lines(capture)) == ""
+
+
+def test_parse_claude_try_placeholder_is_not_treated_as_draft():
+    # Claude renders a dim `Try "..."` placeholder when the input box is
+    # empty. `capture-pane -p` drops ANSI attributes, so we match the
+    # string instead of the gray color.
+    capture = f"""
+ ▐▛███▜▌   Claude Code v2.1.111
+
+───────────────────────────────────────────────
+❯\xa0Try "explain this error"
+───────────────────────────────────────────────
+  status line
+"""
+    assert draft_guard._parse_claude(_lines(capture)) == ""
+
+
+def test_parse_claude_user_draft_that_starts_with_try_is_preserved():
+    # Defense against overreach: a real multi-line draft that happens to
+    # begin with `Try ` must still be parsed. The placeholder gate only
+    # fires when the whole parsed block is a single line.
+    capture = f"""
+ ▐▛███▜▌   Claude Code v2.1.111
+
+───────────────────────────────────────────────
+❯\xa0Try this query
+  against the new index
+───────────────────────────────────────────────
+  status line
+"""
+    assert draft_guard._parse_claude(_lines(capture)) == "Try this query\nagainst the new index"
+
+
 def test_parse_claude_two_line_draft():
     # Note: Claude uses U+276F '❯' followed by U+00A0 NO-BREAK SPACE as prompt
     capture = """
@@ -120,6 +169,22 @@ def test_suspected_draft_claude_empty_input_is_false(monkeypatch):
     capture = """
 ───────────────────────────────────────────────
 ❯\xa0
+───────────────────────────────────────────────
+  status
+"""
+    monkeypatch.setattr(draft_guard.tmux, "display_value", lambda *a, **kw: "30")
+    monkeypatch.setattr(
+        draft_guard.tmux,
+        "capture_pane",
+        lambda _pane, lines=50: capture.lstrip("\n"),
+    )
+    assert draft_guard.suspected_draft("%999", "claude") is False
+
+
+def test_suspected_draft_claude_queued_placeholder_is_false(monkeypatch):
+    capture = """
+───────────────────────────────────────────────
+❯\xa0Press up to edit queued messages
 ───────────────────────────────────────────────
   status
 """
