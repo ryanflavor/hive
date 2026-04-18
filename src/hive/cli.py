@@ -428,15 +428,6 @@ def _augment_current_payload_with_runtime(payload: dict[str, object], t: Team) -
         payload["model"] = model
     if "busy" in member_runtime:
         payload["busy"] = bool(member_runtime["busy"])
-    deferred_count = member_runtime.get("deferredCount")
-    if deferred_count not in ("", None):
-        payload["deferredCount"] = deferred_count
-    deferred_ids = member_runtime.get("deferredIds")
-    if isinstance(deferred_ids, list) and deferred_ids:
-        payload["deferredIds"] = deferred_ids
-    deferred = member_runtime.get("deferred")
-    if isinstance(deferred, list) and deferred:
-        payload["deferred"] = deferred
     return payload
 
 
@@ -466,10 +457,7 @@ def _augment_team_payload_with_runtime(t: Team, payload: dict[str, object]) -> d
             "inputState",
             "inputReason",
             "pendingQuestion",
-            "interruptSafety",
-            "safetyReason",
-            "deferredCount",
-            "deferredIds",
+            "turnPhase",
         ):
             value = runtime_fields.get(key)
             if value in ("", None):
@@ -586,7 +574,6 @@ def _request_send_payload(
     artifact: str = "",
     reply_to: str = "",
     wait: bool = False,
-    enforce_safety_gate: bool = False,
     command_name: str = "send",
     warn_on_long_body: bool = True,
 ) -> dict[str, object]:
@@ -605,7 +592,6 @@ def _request_send_payload(
         artifact=artifact,
         reply_to=reply_to,
         wait=wait,
-        enforce_safety_gate=enforce_safety_gate,
     )
     if not payload:
         raise RuntimeError("sidecar unavailable")
@@ -987,6 +973,7 @@ def _fork_registered_agent(
     split: str,
     join_as: str,
     prompt: str = "",
+    boundary_prompt: str = "",
 ) -> tuple[Agent, str]:
     _ensure_pane_in_scope(t, pane_id)
     window_target = t.tmux_window or tmux.get_current_window_target() or ""
@@ -1014,11 +1001,101 @@ def _fork_registered_agent(
     if not tmux.wait_for_text(new_pane, profile.ready_text, timeout=AGENT_STARTUP_TIMEOUT):
         _fail(f"forked pane '{new_pane}' did not become ready before sending prompt")
     time.sleep(1)
-    composed = _fork_boundary_prompt(join_as)
+    composed = boundary_prompt or _fork_boundary_prompt(join_as)
     if prompt:
         composed = composed + "\n\n" + prompt
     registered_agent.send(composed)
     return registered_agent, new_pane
+
+
+def _next_busy_fork_name(t: Team, base_name: str) -> str:
+    window_target = t.tmux_window or tmux.get_current_window_target() or ""
+    panes = tmux.list_panes_full(window_target) if window_target else []
+    seen_names = _window_seen_names(t, panes)
+    suffix = 1
+    while True:
+        candidate = f"{base_name}-c{suffix}"
+        if candidate not in seen_names:
+            return candidate
+        suffix += 1
+
+
+def _busy_fork_system_block(*, original_target: str, clone_name: str) -> str:
+    return (
+        f"<HIVE-SYSTEM type=busy-fork target={original_target} clone={clone_name}>\n"
+        f"FORK BOUNDARY: you are the fork '{clone_name}', cloned from '{original_target}' because the original agent is currently busy. "
+        "The prior transcript is read-only context only — every pending tool call, bash command, or action in it belongs to the original agent and has either already completed or is being handled on their side. "
+        "Do not continue or re-execute the original agent's pending work. "
+        "The next inbound HIVE message is the new root you should handle on behalf of the busy target. "
+        "Act only on new instructions that appear from this message onward.\n"
+        "</HIVE-SYSTEM>"
+    )
+
+
+def _maybe_route_busy_root_send(
+    *,
+    t: Team,
+    workspace: str | Path,
+    target_agent: str,
+    reply_to: str,
+) -> tuple[str, dict[str, object]]:
+    if reply_to.strip():
+        return target_agent, {}
+
+    from .sidecar import request_team_runtime
+
+    try:
+        target_member = t.get(target_agent)
+    except KeyError:
+        return target_agent, {}
+    if not getattr(target_member, "is_alive", lambda: False)():
+        return target_agent, {}
+    target_pane = getattr(target_member, "pane_id", "") or ""
+    if not target_pane:
+        return target_agent, {}
+    profile = detect_profile_for_pane(target_pane)
+    if not profile:
+        return target_agent, {}
+    if not resolve_session_id_for_pane(target_pane, profile=profile):
+        return target_agent, {}
+
+    _ensure_team_sidecar(t, workspace)
+    runtime_payload = request_team_runtime(str(workspace), team=t.name) or {}
+    members = runtime_payload.get("members")
+    if not isinstance(members, dict):
+        return target_agent, {}
+    runtime = members.get(target_agent)
+    if not isinstance(runtime, dict):
+        return target_agent, {}
+    reason = str(runtime.get("turnPhase") or "")
+    if reason in {"task_closed", "turn_closed"}:
+        return target_agent, {}
+    if not bool(runtime.get("busy")) and reason not in {
+        "user_prompt_pending",
+        "tool_result_pending_reply",
+        "tool_open",
+    }:
+        return target_agent, {}
+
+    clone_name = _next_busy_fork_name(t, target_agent)
+    try:
+        clone_member, clone_pane = _fork_registered_agent(
+            t=t,
+            pane_id=target_pane,
+            split="auto",
+            join_as=clone_name,
+            boundary_prompt=_busy_fork_system_block(original_target=target_agent, clone_name=clone_name),
+        )
+    except SystemExit:
+        return target_agent, {}
+    return clone_name, {
+        "requestedTo": target_agent,
+        "effectiveTarget": clone_name,
+        "routingMode": "fork_handoff",
+        "routingReason": "active_turn_fork",
+        "forkedFromPane": target_pane,
+        "forkedToPane": clone_pane,
+    }
 
 
 def _resolve_handoff_anchor_event(
@@ -1703,7 +1780,6 @@ def send(
 
     `queued` / `pending` mean the message was accepted and background tracking continues.
     `confirmed` means delivery was confirmed in the initial send window.
-    `deferred` means Hive accepted the root message but postponed receiver review.
     `failed` means local submit failed and should be retried.
     """
     _reject_legacy_recipient_options(to_option, msg_option, command="send", to_agent=to_agent)
@@ -1713,23 +1789,30 @@ def send(
     ws = _resolve_workspace(t, required=True)
     if not reply_to.strip():
         _validate_root_send_protocol(body, artifact)
+    effective_target, routing = _maybe_route_busy_root_send(
+        t=t,
+        workspace=ws,
+        target_agent=to_agent,
+        reply_to=reply_to,
+    )
     resolved_artifact = _resolve_artifact_path(artifact, workspace=ws)
     try:
         payload = _request_send_payload(
             workspace=ws,
             team=t,
             sender_agent=sender,
-            target_agent=to_agent,
+            target_agent=effective_target,
             body=body,
             artifact=resolved_artifact,
             reply_to=reply_to,
             wait=wait,
-            enforce_safety_gate=True,
             command_name="send",
         )
     except RuntimeError as exc:
         _fail(str(exc))
         return
+    if routing:
+        payload.update(routing)
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 

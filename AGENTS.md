@@ -21,9 +21,7 @@ Tests live under `tests/` and are split by level:
 - Keep runtime-field semantics there in sync with code:
   - `busy`
   - `inputState`
-  - `interruptSafety`
-  - `safetyReason`
-  - deferred root delivery
+  - `turnPhase`
 - `CLAUDE.md` is only a symlink entrypoint to this file. Do not edit it separately.
 
 ## Build, Test, and Development Commands

@@ -18,7 +18,7 @@ Hive currently does **not** compute `busy` from transcript/JCL.
 Current split:
 
 - `busy` comes from tmux control-mode output activity
-- `interruptSafety` / `safetyReason` come from transcript/JCL
+- `turnPhase` come from transcript/JCL
 - deferred `opened` detection also comes from transcript/JCL
 
 So if someone remembers an earlier “JSONL busy” discussion, that was design
@@ -51,28 +51,21 @@ Examples:
 - Codex: `function_call` / `custom_tool_call` without matching output
 - Droid: `tool_use` without matching `tool_result`
 
-### Interrupt Safety
+### Turn Phase
 
-`interruptSafety` is the exported interface built on top of transcript/JCL
-signals.
+`turnPhase` is the exported interface built on top of transcript/JCL signals.
+It reports a single token describing the transcript tail. Consumers choose their
+own subsets (see `docs/runtime-model.md`):
 
-It has three values:
+- `tool_open` — hard-busy (tool_use open)
+- `input_backlog` — strategy-level busy (queue has unprocessed enqueues)
+- `task_closed` / `turn_closed` — turn collapsed
+- `tool_result_pending_reply` — tool result observed, assistant hasn't continued
+- `user_prompt_pending` — user prompt observed, assistant hasn't acked
+- `assistant_text_idle` — assistant text without stop_reason
+- `unknown_evidence` — no reliable probe evidence
 
-- `safe`
-- `unsafe`
-- `unknown`
-
-It is wider than hard busy:
-
-- hard busy feeds into `unsafe`
-- close evidence feeds into `safe`
-- ambiguous mid-turn states feed into `unknown`
-- some strategy-level cases such as `input_backlog` also feed into `unsafe`
-
-So:
-
-- hard busy is a subset of `interruptSafety=unsafe`
-- `interruptSafety=unsafe` is not limited to hard busy
+Hard busy is a subset of "not closed" but not the only member.
 
 ## Claude Code Transcript
 
@@ -86,28 +79,24 @@ Hive expects Claude transcript records in JSONL form and looks at:
 
 ### Signals Used
 
-#### Unsafe
 
 - queue backlog from `queue-operation`
   - `enqueue` increments backlog
   - `dequeue` / `remove` decrement backlog
-  - backlog > 0 => `interruptSafety=unsafe`, `safetyReason=input_backlog`
+  - backlog > 0 => `turnPhase=input_backlog`
 - `assistant` with:
   - `stop_reason=tool_use`
   - or any `content[*].type == tool_use`
-  - => `interruptSafety=unsafe`, `safetyReason=tool_open`
+  - => `turnPhase=tool_open`
 
-#### Safe
 
 - `system.subtype=turn_duration`
 - `system.subtype=stop_hook_summary` with `preventedContinuation=false`
 
 Both map to:
 
-- `interruptSafety=safe`
-- `safetyReason=turn_closed`
+- `turnPhase=turn_closed`
 
-#### Unknown
 
 - `user` carrying `tool_result`
   - => `tool_result_pending_reply`
@@ -137,19 +126,16 @@ Hive treats Codex session logs as JCL-like event JSONL and looks at:
 
 ### Signals Used
 
-#### Unsafe
 
 - `event_msg.payload.type = task_started`
-  - => `interruptSafety=unsafe`, `safetyReason=tool_open`
+  - => `turnPhase=tool_open`
 - `response_item.payload.type in {function_call, custom_tool_call}`
-  - => `interruptSafety=unsafe`, `safetyReason=tool_open`
+  - => `turnPhase=tool_open`
 
-#### Safe
 
 - `event_msg.payload.type in {task_complete, turn_aborted}`
-  - => `interruptSafety=safe`, `safetyReason=task_closed`
+  - => `turnPhase=task_closed`
 
-#### Unknown
 
 - `event_msg.payload.type in {exec_command_end, mcp_tool_call_end, patch_apply_end}`
   - => `tool_result_pending_reply`
@@ -181,16 +167,13 @@ Hive treats Droid transcript as message-oriented JSONL and looks at:
 
 ### Signals Used
 
-#### Unsafe
 
 - assistant message containing `tool_use`
-  - => `interruptSafety=unsafe`, `safetyReason=tool_open`
+  - => `turnPhase=tool_open`
 
-#### Safe
 
 - none from the simple transcript probe alone
 
-#### Unknown
 
 - `tool_result`
   - => `tool_result_pending_reply`

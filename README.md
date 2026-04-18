@@ -87,9 +87,9 @@ hive notify "done, press Space to come back"
 |---------|-------------|
 | `hive current` | Inspect current tmux/Hive binding |
 | `hive init` / `hive create` | Bind current window or create a team |
-| `hive team` / `hive teams` | Show team with runtime `busy` / `inputState` / `interruptSafety` and peer info, or list teams |
+| `hive team` / `hive teams` | Show team with runtime `busy` / `inputState` and peer info, or list teams |
 | `hive peer set\|clear` | Persist or clear default peer pairs |
-| `hive send <agent> "text"` | Send message (`reply` stays direct; root sends may defer instead of interrupting when target is hard-unsafe) |
+| `hive send <agent> "text"` | Send message (`reply` stays direct; root sends auto-fork a clone when target is in an active turn) |
 | `hive handoff <agent>` | Delegate a thread via direct send, spawn, or fork wrapper |
 | `hive answer <agent> "text"` | Answer a pending AskUserQuestion |
 | `hive doctor [agent] [--skills]` | Diagnose agent connectivity and optional local hive skill drift |
@@ -127,11 +127,10 @@ For accepted sends, `hive send` uses a 1-second grace window to confirm delivery
 - Results land as observation events in `hive.db`
 - High-value exceptions (`unconfirmed`, `tracking_lost`) are injected back to the sender pane
 
-Root sends without `--reply-to` must keep `body` to a short summary and put detailed context in `artifact` (prefer `--artifact -`; only use a file path when you already have one). Hive currently enforces this by rejecting root bodies that are longer than `500` chars, have `3+` lines, contain fenced code (`````), or start markdown heading/list lines (`# ` / `- ` / `* `). When the target member is in a hard `unsafe` state from its own receiver transcript, Hive accepts the message but returns `deferred`: the full message is stored durably, the receiver pane only gets the normal short Hive summary message, and the receiver can review it after the current work finishes. Current hard `unsafe` sources are transcript-driven and CLI-specific: Claude (`tool_use`, queue backlog), Codex (open task / tool call), Droid (`tool_use` block).
+Root sends without `--reply-to` must keep `body` to a short summary and put detailed context in `artifact` (prefer `--artifact -`; only use a file path when you already have one). Hive currently enforces this by rejecting root bodies that are longer than `500` chars, have `3+` lines, contain fenced code (`````), or start markdown heading/list lines (`# ` / `- ` / `* `). When the target member is in an active turn (transcript still shows `tool_open` / `user_prompt_pending` / `tool_result_pending_reply`, or `busy=True` with any non-closed `turnPhase`), the root send path auto-forks a clone pane so the new thread runs without interrupting the original; the response payload carries `routingMode=fork_handoff` and `routingReason=active_turn_fork`.
 
 Immediate `hive send` states:
 
-- `deferred`: accepted by Hive and deferred for receiver review
 - `queued`: accepted and now tracked in the background; continue working
 - `pending`: submit completed and background tracking continues; continue working
 - `confirmed`: delivery was confirmed in the initial send window
@@ -160,7 +159,7 @@ PYTHONPATH=src python -m pytest tests/ -q
 
 If a local code change affects sidecar-backed behavior, do not trust an already-running sidecar during manual verification. After the install + skill refresh + plugin re-enable step, stop the current workspace sidecar first, then rerun the verification command so it starts a fresh daemon from the updated code. This applies to checks like `hive doctor`, delivery tracking, and other sidecar-derived runtime fields.
 
-For the current runtime-field model and deferred-delivery semantics, see
+For the current runtime-field model and fork-gate semantics, see
 `docs/runtime-model.md`.
 
 ## License

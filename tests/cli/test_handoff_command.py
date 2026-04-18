@@ -38,7 +38,6 @@ def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
         artifact: str = "",
         reply_to: str = "",
         wait: bool = False,
-        enforce_safety_gate: bool = False,
     ):
         from hive.sidecar import _send_payload
 
@@ -54,7 +53,6 @@ def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
                 artifact=artifact,
                 reply_to=reply_to,
                 wait=wait,
-                enforce_safety_gate=enforce_safety_gate,
             )
         except Exception as exc:
             return {"ok": False, "error": str(exc)}

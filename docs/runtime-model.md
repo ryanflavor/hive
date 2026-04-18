@@ -11,8 +11,7 @@ This document covers:
 
 - `busy`
 - `inputState`
-- `interruptSafety`
-- `safetyReason`
+- `turnPhase`
 - root-message summary/artifact protocol
 - `deferred` root delivery
 - deferred lifecycle: `unopened` / `opened` / `handled`
@@ -31,8 +30,8 @@ runtime decisions, see `docs/transcript-signals.md`.
 
 Hive now exposes two different runtime layers on purpose:
 
-1. Output activity layer
-2. Interrupt-safety layer
+1. Output activity layer (`busy`)
+2. Turn phase layer (`turnPhase`)
 
 They answer different questions and should not be conflated.
 
@@ -56,22 +55,21 @@ What it is not:
 - not a semantic "agent is definitely busy"
 - not a safe-to-interrupt truth value
 
-### Interrupt-Safety Layer
+### Turn Phase Layer
 
-Fields:
+Field:
 
-- `interruptSafety: safe | unsafe | unknown`
-- `safetyReason: <token>`
+- `turnPhase: <token>`
 
 Question answered:
 
-- If Hive inserts a new root thread now, does current transcript/JCL evidence
-  make that look safe, unsafe, or unknown?
+- What phase of a turn does the receiver's transcript tail currently show?
 
 What it is good for:
 
 - deciding whether a root send should become `deferred`
-- explaining why Hive treated that target as safe/unsafe/unknown
+- deciding whether to fork the target or direct-send
+- explaining why Hive treated that target as it did
 
 What it is not:
 
@@ -119,29 +117,13 @@ Important consumer:
 
 - `hive answer`
 
-### `interruptSafety`
+### `turnPhase`
 
 Source:
 
-- transcript/JCL probe
+- transcript/JCL probe (last observed transcript state)
 
 Current values:
-
-- `safe`
-- `unsafe`
-- `unknown`
-
-Meaning:
-
-- root-send safety, not output activity
-
-### `safetyReason`
-
-Source:
-
-- specific branch hit inside the transcript/JCL interrupt-safety probe
-
-Current reasons in active use:
 
 - `tool_open`
 - `task_closed`
@@ -152,7 +134,12 @@ Current reasons in active use:
 - `assistant_text_idle`
 - `unknown_evidence`
 
-## Hard Busy vs Interrupt Safety
+Meaning:
+
+- the phase the receiver's turn is in, as seen in the transcript tail
+- consumers pick the subsets they care about (see "Consumer Subsets" below)
+
+## Hard Busy vs Turn Phase
 
 These are related, but they are not the same concept.
 
@@ -170,83 +157,53 @@ Examples:
 - Codex: `function_call` / `custom_tool_call` without matching output
 - Droid: `tool_use` without matching `tool_result`
 
-This is the strongest negative evidence Hive currently has.
+In `turnPhase` terms, hard busy surfaces as `tool_open`. `input_backlog` is a
+strategy-level non-open state that also matters to consumers but is not hard
+busy.
 
 Hard busy is not currently surfaced as its own public runtime field.
 
-### Interrupt Safety
+## Consumer Subsets of `turnPhase`
 
-`interruptSafety` is the normalized interface Hive actually exports and consumes.
+Two decision sites inside Hive read `turnPhase` directly. Each defines its own
+subset, without a second-layer abstraction:
 
-It is wider than hard busy:
+- Safety gate in root send (`sidecar._send_with_gate`):
+  - `turnPhase ∈ {tool_open, input_backlog}` → deferred delivery
+- Fork selector in root send (`cli._maybe_route_busy_root_send`):
+  - `turnPhase ∈ {task_closed, turn_closed}` → never fork (turn already closed)
+  - `busy=False ∧ turnPhase ∈ {tool_open, user_prompt_pending, tool_result_pending_reply}` → fork (hard unclosed even though pane is idle)
+  - otherwise, fork only when `busy=True`
 
-- `unsafe` includes hard-busy cases such as `tool_open`
-- `unsafe` also includes strategy-level non-open cases such as
-  `input_backlog`
-- `safe` exists for closed-turn/task evidence
-- `unknown` covers ambiguous mid-turn states
+## Current CLI-Specific Evidence
 
-So:
-
-- hard busy is a subset of `interruptSafety=unsafe`
-- `interruptSafety=unsafe` is not limited to hard busy
-
-This distinction matters because `input_backlog` is currently treated as
-`unsafe`, but it is not an "open without close" state.
-
-## Current CLI-Specific Interrupt-Safety Evidence
+Each row maps a transcript/JCL observation to the emitted `turnPhase` value.
 
 ### Claude
 
-`unsafe`:
-
-- `tool_use` open
-- queue backlog (`input_backlog`)
-
-`safe`:
-
-- `turn_duration`
-- `stop_hook_summary` with `preventedContinuation=false`
-
-`unknown`:
-
-- tool result arrived but assistant has not clearly continued
-- real user prompt pending
-- assistant text without stronger closing/opening evidence
+- `tool_open` — `tool_use` open
+- `input_backlog` — queue backlog observed
+- `turn_closed` — `turn_duration` or `stop_hook_summary` with `preventedContinuation=false`
+- `tool_result_pending_reply` — tool result arrived but assistant has not clearly continued
+- `user_prompt_pending` — real user prompt pending
+- `assistant_text_idle` — assistant text without stronger closing/opening evidence
 
 ### Codex
 
-`unsafe`:
-
-- `task_started` without `task_complete` / `turn_aborted`
-- `function_call` / `custom_tool_call` without matching output
-
-`safe`:
-
-- `task_complete`
-- `turn_aborted`
-
-`unknown`:
-
-- tool output just returned
-- user prompt pending
-- assistant text without stronger closing/opening evidence
+- `tool_open` — `task_started` without `task_complete` / `turn_aborted`, or `function_call` / `custom_tool_call` without matching output
+- `task_closed` — `task_complete` or `turn_aborted`
+- `tool_result_pending_reply` — tool output just returned
+- `user_prompt_pending` — user prompt pending
+- `assistant_text_idle` — assistant text without stronger closing/opening evidence
 
 ### Droid
 
-`unsafe`:
+- `tool_open` — `tool_use` block without matching `tool_result`
+- `tool_result_pending_reply` — tool result just arrived
+- `user_prompt_pending` — real user text pending
+- `assistant_text_idle` — assistant text without `tool_use`
 
-- `tool_use` block without matching `tool_result`
-
-`safe`:
-
-- none from the simple message-shape probe alone
-
-`unknown`:
-
-- tool result just arrived
-- real user text pending
-- assistant text without `tool_use`
+Droid's simple message-shape probe does not currently emit `task_closed` / `turn_closed`.
 
 ## Root Send Protocol
 
@@ -272,8 +229,8 @@ limits.
 
 ## Deferred Root Delivery
 
-When a root send targets a member whose current `interruptSafety` is `unsafe`,
-Hive currently:
+When a root send targets a member whose current `turnPhase` is in the safety
+gate subset (`tool_open`, `input_backlog`), Hive currently:
 
 1. accepts the send
 2. stores the message durably in the bus/artifact layer

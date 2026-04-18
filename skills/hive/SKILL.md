@@ -37,7 +37,7 @@ npx skills add "$PWD" -g --all
 
 ```bash
 hive current                          # 看上下文
-hive team                             # 看成员 + runtime inputState/busy/interruptSafety + peer
+hive team                             # 看成员 + runtime inputState/busy/turnPhase + peer
 hive send dodo "see attachment" --artifact /tmp/file.md   # 仅当你已经有现成文件
 cat <<'EOF' | hive send dodo "see attachment" --artifact -
 # Findings
@@ -74,15 +74,7 @@ hive notify "按 Space 和我对话"       # 给当前 pane 的用户弹通知
 - `printf '%s\n' ... | hive send ... --artifact -` 只当备选；它更容易踩转义坑。只有已有现成文件时才传 `--artifact <path>`
 - 不要把 `$(cat <<EOF ...)` 这类多行 command substitution 直接塞进 `hive send`
 - `reply` 不受这套 root 协议影响，仍然可以只回一句短文本
-- 目标命中硬 `unsafe` 时，root send 会返回 `deferred`：
-  - 当前这条 `unsafe` 判定来自各家 receiver transcript / JCL 观察，不是 hook 挂牌
-  - Claude 常见是 `tool_use` 或 queue backlog
-  - Codex 常见是未闭合 task / tool call
-  - Droid 常见是 `tool_use`
-  - Hive 收下消息，不丢
-  - receiver pane 只会看到正常 Hive 的短摘要消息，不直接打入完整内容
-  - receiver 自己稍后处理
-- 看到 `deferred` 时，继续工作即可；这是“已被 Hive 接收并延后给对方 review”，不是失败
+- target 正在 active turn 时，root send 路径会自动 fork 一个 clone 接管（`routingMode=fork_handoff, routingReason=active_turn_fork`）；不再有 `deferred` 状态
 
 ### `hive reply` vs `hive send --reply-to`
 
@@ -92,7 +84,15 @@ hive notify "按 Space 和我对话"       # 给当前 pane 的用户弹通知
 
 ### 协作升级（4 条足矣）
 
-问题默认先在团队内消化——不要先把用户当传话筒。先 `hive team` 看成员、runtime 和当前 deferred/等待状态，再决定要不要找人协作。
+问题默认先在团队内消化——不要先把用户当传话筒。先 `hive team` 看成员和 runtime 状态，再决定要不要找人协作。
+
+和 peer 讨论时，默认目标是**先在 team 内把结论收敛**，再对用户汇报；不要把仍在摇摆的 A/B/C、peer 的中间态分歧、或你准备回去继续 challenge 的漏洞，直接倒给用户。除非用户明确要求看原始讨论过程，否则对用户只给：
+
+1. 已收敛结论
+2. 仍未收敛但真正阻断推进的单个问题
+3. 你建议的下一步动作
+
+如果 peer 的论证里有洞，先直接回 peer 挑明并收敛，不要先把这个洞抛给用户代你消化。
 
 只有以下情况升级给用户：
 
@@ -111,7 +111,7 @@ Claude 偏前端体验、文案收敛和发散式讨论；GPT 偏后端 correctn
 
 - `inputState=waiting_user` 说明对方在等答案，用 `hive answer` 回答
 - `busy=true/false` 是 tmux 输出层的秒级活动布尔，不等于语义上的 busy/idle
-- `interruptSafety` / `safetyReason` 才是“现在插 new root 是否容易打断对方”的 transcript/JCL 语义层
+- `turnPhase` 才是“现在插 new root 是否容易打断对方”的 transcript/JCL 语义层
 
 ### `hive notify` 原则
 

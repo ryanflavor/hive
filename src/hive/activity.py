@@ -138,20 +138,18 @@ def _read_tail_payloads(path: Path, *, sample_limit: int) -> list[dict[str, Any]
     return recent
 
 
-def _interrupt_payload(
+def _phase_payload(
     *,
-    state: str,
     reason: str,
     observed_at: str = "",
     evidence_tail: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "interruptSafety": state,
-        "safetyReason": reason,
+        "turnPhase": reason,
         "evidence": {"tail": evidence_tail or []},
     }
     if observed_at:
-        payload["safetyObservedAt"] = observed_at
+        payload["phaseObservedAt"] = observed_at
     return payload
 
 
@@ -192,7 +190,7 @@ def _assistant_has_text(message: dict[str, Any]) -> bool:
     return any(block.get("type") == "text" and str(block.get("text") or "").strip() for block in _content_blocks(message))
 
 
-def _probe_claude_interrupt_safety(records: list[dict[str, Any]]) -> dict[str, Any]:
+def _probe_claude_turn_phase(records: list[dict[str, Any]]) -> dict[str, Any]:
     tail = [_raw_record_summary(record) for record in records]
     backlog = 0
     for record in records:
@@ -208,8 +206,7 @@ def _probe_claude_interrupt_safety(records: list[dict[str, Any]]) -> dict[str, A
             (record for record in reversed(records) if record.get("type") == "queue-operation" and str(record.get("operation") or "") == "enqueue"),
             records[-1] if records else {},
         )
-        return _interrupt_payload(
-            state="unsafe",
+        return _phase_payload(
             reason="input_backlog",
             observed_at=_raw_timestamp(queue_record),
             evidence_tail=tail,
@@ -220,15 +217,13 @@ def _probe_claude_interrupt_safety(records: list[dict[str, Any]]) -> dict[str, A
         if record_type == "system":
             subtype = str(record.get("subtype") or "")
             if subtype == "turn_duration":
-                return _interrupt_payload(
-                    state="safe",
+                return _phase_payload(
                     reason="turn_closed",
                     observed_at=_raw_timestamp(record),
                     evidence_tail=tail,
                 )
             if subtype == "stop_hook_summary" and record.get("preventedContinuation") is False:
-                return _interrupt_payload(
-                    state="safe",
+                return _phase_payload(
                     reason="turn_closed",
                     observed_at=_raw_timestamp(record),
                     evidence_tail=tail,
@@ -241,15 +236,13 @@ def _probe_claude_interrupt_safety(records: list[dict[str, Any]]) -> dict[str, A
             stop_reason = str(message.get("stop_reason") or "")
             part_kinds = [str(block.get("type")) for block in _content_blocks(message)]
             if stop_reason == "tool_use" or "tool_use" in part_kinds:
-                return _interrupt_payload(
-                    state="unsafe",
+                return _phase_payload(
                     reason="tool_open",
                     observed_at=_raw_timestamp(record),
                     evidence_tail=tail,
                 )
             if _assistant_has_text(message):
-                return _interrupt_payload(
-                    state="unknown",
+                return _phase_payload(
                     reason="assistant_text_idle",
                     observed_at=_raw_timestamp(record),
                     evidence_tail=tail,
@@ -258,21 +251,19 @@ def _probe_claude_interrupt_safety(records: list[dict[str, Any]]) -> dict[str, A
         if record_type == "user":
             tool_result_state = _claude_tool_result_state(record)
             if tool_result_state is not None:
-                return _interrupt_payload(
-                    state="unknown",
+                return _phase_payload(
                     reason="tool_result_pending_reply",
                     observed_at=_raw_timestamp(record),
                     evidence_tail=tail,
                 )
             if _claude_real_user_text(record):
-                return _interrupt_payload(
-                    state="unknown",
+                return _phase_payload(
                     reason="user_prompt_pending",
                     observed_at=_raw_timestamp(record),
                     evidence_tail=tail,
                 )
 
-    return _interrupt_payload(state="unknown", reason="unknown_evidence", evidence_tail=tail)
+    return _phase_payload(reason="unknown_evidence", evidence_tail=tail)
 
 
 def _codex_message_has_text(body: dict[str, Any]) -> bool:
@@ -289,7 +280,7 @@ def _codex_message_has_text(body: dict[str, Any]) -> bool:
     return False
 
 
-def _probe_codex_interrupt_safety(records: list[dict[str, Any]]) -> dict[str, Any]:
+def _probe_codex_turn_phase(records: list[dict[str, Any]]) -> dict[str, Any]:
     tail = [_raw_record_summary(record) for record in records]
     for record in reversed(records):
         record_type = str(record.get("type") or "")
@@ -297,29 +288,25 @@ def _probe_codex_interrupt_safety(records: list[dict[str, Any]]) -> dict[str, An
         if record_type == "event_msg" and isinstance(body, dict):
             event_type = str(body.get("type") or "")
             if event_type == "task_started":
-                return _interrupt_payload(
-                    state="unsafe",
+                return _phase_payload(
                     reason="tool_open",
                     observed_at=_raw_timestamp(record),
                     evidence_tail=tail,
                 )
             if event_type in {"task_complete", "turn_aborted"}:
-                return _interrupt_payload(
-                    state="safe",
+                return _phase_payload(
                     reason="task_closed",
                     observed_at=_raw_timestamp(record),
                     evidence_tail=tail,
                 )
             if event_type in {"exec_command_end", "mcp_tool_call_end", "patch_apply_end"}:
-                return _interrupt_payload(
-                    state="unknown",
+                return _phase_payload(
                     reason="tool_result_pending_reply",
                     observed_at=_raw_timestamp(record),
                     evidence_tail=tail,
                 )
             if event_type == "user_message":
-                return _interrupt_payload(
-                    state="unknown",
+                return _phase_payload(
                     reason="user_prompt_pending",
                     observed_at=_raw_timestamp(record),
                     evidence_tail=tail,
@@ -327,15 +314,13 @@ def _probe_codex_interrupt_safety(records: list[dict[str, Any]]) -> dict[str, An
         if record_type == "response_item" and isinstance(body, dict):
             item_type = str(body.get("type") or "")
             if item_type in {"function_call", "custom_tool_call"}:
-                return _interrupt_payload(
-                    state="unsafe",
+                return _phase_payload(
                     reason="tool_open",
                     observed_at=_raw_timestamp(record),
                     evidence_tail=tail,
                 )
             if item_type in {"function_call_output", "custom_tool_call_output"}:
-                return _interrupt_payload(
-                    state="unknown",
+                return _phase_payload(
                     reason="tool_result_pending_reply",
                     observed_at=_raw_timestamp(record),
                     evidence_tail=tail,
@@ -343,21 +328,19 @@ def _probe_codex_interrupt_safety(records: list[dict[str, Any]]) -> dict[str, An
             if item_type == "message":
                 role = str(body.get("role") or "")
                 if role == "user":
-                    return _interrupt_payload(
-                        state="unknown",
+                    return _phase_payload(
                         reason="user_prompt_pending",
                         observed_at=_raw_timestamp(record),
                         evidence_tail=tail,
                     )
                 if role == "assistant" and _codex_message_has_text(body):
-                    return _interrupt_payload(
-                        state="unknown",
+                    return _phase_payload(
                         reason="assistant_text_idle",
                         observed_at=_raw_timestamp(record),
                         evidence_tail=tail,
                     )
 
-    return _interrupt_payload(state="unknown", reason="unknown_evidence", evidence_tail=tail)
+    return _phase_payload(reason="unknown_evidence", evidence_tail=tail)
 
 
 def _droid_real_user_text(record: dict[str, Any]) -> bool:
@@ -409,142 +392,38 @@ def _droid_has_assistant_text(record: dict[str, Any]) -> bool:
     )
 
 
-def _probe_droid_interrupt_safety(records: list[dict[str, Any]]) -> dict[str, Any]:
+def _probe_droid_turn_phase(records: list[dict[str, Any]]) -> dict[str, Any]:
     tail = [_raw_record_summary(record) for record in records]
     for record in reversed(records):
         if _droid_has_tool_use(record):
-            return _interrupt_payload(
-                state="unsafe",
+            return _phase_payload(
                 reason="tool_open",
                 observed_at=_raw_timestamp(record),
                 evidence_tail=tail,
             )
         if _droid_has_tool_result(record):
-            return _interrupt_payload(
-                state="unknown",
+            return _phase_payload(
                 reason="tool_result_pending_reply",
                 observed_at=_raw_timestamp(record),
                 evidence_tail=tail,
             )
         if _droid_real_user_text(record):
-            return _interrupt_payload(
-                state="unknown",
+            return _phase_payload(
                 reason="user_prompt_pending",
                 observed_at=_raw_timestamp(record),
                 evidence_tail=tail,
             )
         if _droid_has_assistant_text(record):
-            return _interrupt_payload(
-                state="unknown",
+            return _phase_payload(
                 reason="assistant_text_idle",
                 observed_at=_raw_timestamp(record),
                 evidence_tail=tail,
             )
 
-    return _interrupt_payload(state="unknown", reason="unknown_evidence", evidence_tail=tail)
+    return _phase_payload(reason="unknown_evidence", evidence_tail=tail)
 
 
-def _claude_artifact_read_match(record: dict[str, Any], artifact_path: str, *, since: str) -> str:
-    if record.get("type") != "assistant":
-        return ""
-    if not _timestamp_at_or_after(_raw_timestamp(record), since):
-        return ""
-    message = record.get("message")
-    if not isinstance(message, dict):
-        return ""
-    for block in _content_blocks(message):
-        if block.get("type") != "tool_use":
-            continue
-        if str(block.get("name") or "") != "Read":
-            continue
-        tool_input = block.get("input")
-        if not isinstance(tool_input, dict):
-            continue
-        if str(tool_input.get("file_path") or "") == artifact_path:
-            return _raw_timestamp(record)
-    return ""
-
-
-def _droid_artifact_read_match(record: dict[str, Any], artifact_path: str, *, since: str) -> str:
-    if record.get("type") != "message":
-        return ""
-    if not _timestamp_at_or_after(_raw_timestamp(record), since):
-        return ""
-    message = record.get("message")
-    if not isinstance(message, dict) or str(message.get("role") or "") != "assistant":
-        return ""
-    for block in _content_blocks(message):
-        if block.get("type") != "tool_use":
-            continue
-        if str(block.get("name") or "") != "Read":
-            continue
-        tool_input = block.get("input")
-        if not isinstance(tool_input, dict):
-            continue
-        if str(tool_input.get("file_path") or "") == artifact_path:
-            return _raw_timestamp(record)
-    return ""
-
-
-def _codex_artifact_read_match(record: dict[str, Any], artifact_path: str, *, since: str) -> str:
-    if record.get("type") != "event_msg":
-        return ""
-    if not _timestamp_at_or_after(_raw_timestamp(record), since):
-        return ""
-    body = record.get("payload")
-    if not isinstance(body, dict) or str(body.get("type") or "") != "exec_command_end":
-        return ""
-    parsed_cmd = body.get("parsed_cmd")
-    if not isinstance(parsed_cmd, list):
-        return ""
-    for item in parsed_cmd:
-        if not isinstance(item, dict):
-            continue
-        if str(item.get("type") or "") != "read":
-            continue
-        if str(item.get("path") or "") == artifact_path:
-            return _raw_timestamp(record)
-    return ""
-
-
-def probe_transcript_artifact_opened(
-    cli_name: str,
-    transcript: str | Path,
-    artifact_path: str,
-    *,
-    since: str = "",
-) -> dict[str, Any]:
-    path = Path(transcript)
-    if not artifact_path or not path.exists():
-        return {"opened": False}
-
-    try:
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-            for raw_line in handle:
-                line = raw_line.strip()
-                if not line:
-                    continue
-                payload = safe_json_loads(line)
-                if not isinstance(payload, dict):
-                    continue
-                observed_at = ""
-                if cli_name == "claude":
-                    observed_at = _claude_artifact_read_match(payload, artifact_path, since=since)
-                elif cli_name == "droid":
-                    observed_at = _droid_artifact_read_match(payload, artifact_path, since=since)
-                elif cli_name == "codex":
-                    observed_at = _codex_artifact_read_match(payload, artifact_path, since=since)
-                if observed_at:
-                    return {
-                        "opened": True,
-                        "observedAt": observed_at,
-                    }
-    except OSError:
-        return {"opened": False}
-    return {"opened": False}
-
-
-def probe_transcript_interrupt_safety(
+def probe_transcript_turn_phase(
     cli_name: str,
     transcript: str | Path,
     *,
@@ -552,20 +431,19 @@ def probe_transcript_interrupt_safety(
 ) -> dict[str, Any]:
     path = Path(transcript)
     if not path.exists():
-        return _interrupt_payload(state="unknown", reason="unknown_evidence")
+        return _phase_payload(reason="unknown_evidence")
 
     records = _read_tail_payloads(path, sample_limit=sample_limit)
     if not records:
-        return _interrupt_payload(state="unknown", reason="unknown_evidence")
+        return _phase_payload(reason="unknown_evidence")
 
     if cli_name == "claude":
-        return _probe_claude_interrupt_safety(records)
+        return _probe_claude_turn_phase(records)
     if cli_name == "codex":
-        return _probe_codex_interrupt_safety(records)
+        return _probe_codex_turn_phase(records)
     if cli_name == "droid":
-        return _probe_droid_interrupt_safety(records)
-    return _interrupt_payload(
-        state="unknown",
+        return _probe_droid_turn_phase(records)
+    return _phase_payload(
         reason="unknown_evidence",
         evidence_tail=[_raw_record_summary(record) for record in records],
     )

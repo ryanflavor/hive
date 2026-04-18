@@ -34,10 +34,7 @@ def test_status_exposes_lead_session_id_via_daemon(runner, configure_hive_home, 
                         "model": "gpt-5.4",
                         "inputState": "ready",
                         "inputReason": "",
-                        "interruptSafety": "safe",
-                        "safetyReason": "turn_closed",
-                        "deferredCount": 1,
-                        "deferredIds": ["aBc1"],
+                        "turnPhase": "turn_closed",
                     }
                 }
             },
@@ -57,10 +54,7 @@ def test_status_exposes_lead_session_id_via_daemon(runner, configure_hive_home, 
     assert orch["sessionId"] == "orch-session-456"
     assert orch["model"] == "gpt-5.4"
     assert orch["inputState"] == "ready"
-    assert orch["interruptSafety"] == "safe"
-    assert orch["safetyReason"] == "turn_closed"
-    assert orch["deferredCount"] == 1
-    assert orch["deferredIds"] == ["aBc1"]
+    assert orch["turnPhase"] == "turn_closed"
 
 
 def test_current_uses_daemon_for_model(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -77,18 +71,6 @@ def test_current_uses_daemon_for_model(runner, configure_hive_home, monkeypatch,
                     "alive": True,
                     "model": "gpt-5.4",
                     "busy": True,
-                    "deferredCount": 1,
-                    "deferredIds": ["aBc1"],
-                    "deferred": [
-                        {
-                            "msgId": "aBc1",
-                            "from": "dodo",
-                            "body": "see report",
-                            "artifact": "/tmp/report.md",
-                            "createdAt": "2026-04-18T00:00:00Z",
-                            "state": "opened",
-                        }
-                    ],
                 }
             }
         },
@@ -101,9 +83,6 @@ def test_current_uses_daemon_for_model(runner, configure_hive_home, monkeypatch,
     assert payload["agent"] == "orch"
     assert payload["model"] == "gpt-5.4"
     assert payload["busy"] is True
-    assert payload["deferredCount"] == 1
-    assert payload["deferredIds"] == ["aBc1"]
-    assert payload["deferred"][0]["artifact"] == "/tmp/report.md"
     assert payload["runtimeWorkspace"] == str(workspace)
     assert payload["cwd"] == os.getcwd()
     assert payload["repoRoot"]
