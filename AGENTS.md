@@ -14,6 +14,18 @@ Tests live under `tests/` and are split by level:
 - `tests/cli/` for command behavior with mocks
 - `tests/e2e/` for real tmux-backed flows
 
+## Design Docs
+
+- Runtime design lives in `docs/runtime-model.md`.
+- Raw Claude/Codex/Droid transcript and JCL parsing rules live in `docs/transcript-signals.md`.
+- Keep runtime-field semantics there in sync with code:
+  - `busy`
+  - `inputState`
+  - `interruptSafety`
+  - `safetyReason`
+  - deferred root delivery
+- `CLAUDE.md` is only a symlink entrypoint to this file. Do not edit it separately.
+
 ## Build, Test, and Development Commands
 
 - `python3 -m pip install -e .` — install Hive in editable mode.
@@ -23,7 +35,7 @@ Tests live under `tests/` and are split by level:
   ```
   This is a single mandatory step. Do not skip it. Do not split it. Do not "do it later".
 - Why this matters: plugin commands under `~/.factory/commands/` are materialized copies, not symlinks, so changing plugin code without re-enabling can leave you testing stale command files. The base `hive` skill also lives outside the plugin install path, so repo changes to `skills/hive/SKILL.md` do not reach agents unless you refresh it via `npx skills add`.
-- Sidecar upgrade rule: if your manual verification depends on new sidecar behavior or fields (for example `hive doctor`, `hive activity`, delivery tracking, or other sidecar-backed runtime data), stop the existing sidecar for the current workspace after the mandatory refresh step, then rerun the target command so the sidecar restarts under the new code. Otherwise you may be verifying a stale daemon process instead of the code you just changed.
+- Sidecar upgrade rule: if your manual verification depends on new sidecar behavior or fields (for example `hive doctor`, delivery tracking, or other sidecar-backed runtime data), stop the existing sidecar for the current workspace after the mandatory refresh step, then rerun the target command so the sidecar restarts under the new code. Otherwise you may be verifying a stale daemon process instead of the code you just changed.
 - `PYTHONPATH=src python -m pytest tests/ -q` — run the full test suite.
 - `PYTHONPATH=src python -m pytest tests/ -m unit -q` — fast unit tests only.
 - `PYTHONPATH=src python -m pytest tests/ -m cli -q` — CLI-layer tests.

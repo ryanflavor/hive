@@ -87,7 +87,7 @@ hive notify "done, press Space to come back"
 |---------|-------------|
 | `hive current` | Inspect current tmux/Hive binding |
 | `hive init` / `hive create` | Bind current window or create a team |
-| `hive team` / `hive teams` | Show team with runtime inputState/activity and peer info, or list teams |
+| `hive team` / `hive teams` | Show team with runtime `busy` / `inputState` / `interruptSafety` and peer info, or list teams |
 | `hive peer set\|clear` | Persist or clear default peer pairs |
 | `hive send <agent> "text"` | Send message (`reply` stays direct; root sends may defer instead of interrupting when target is hard-unsafe) |
 | `hive handoff <agent>` | Delegate a thread via direct send, spawn, or fork wrapper |
@@ -158,7 +158,10 @@ hive plugin enable code-review && hive plugin enable cvim && hive plugin enable 
 PYTHONPATH=src python -m pytest tests/ -q
 ```
 
-If a local code change affects sidecar-backed behavior, do not trust an already-running sidecar during manual verification. After the install + skill refresh + plugin re-enable step, stop the current workspace sidecar first, then rerun the verification command so it starts a fresh daemon from the updated code. This applies to checks like `hive doctor`, delivery tracking, `hive activity`, and other sidecar-derived runtime fields.
+If a local code change affects sidecar-backed behavior, do not trust an already-running sidecar during manual verification. After the install + skill refresh + plugin re-enable step, stop the current workspace sidecar first, then rerun the verification command so it starts a fresh daemon from the updated code. This applies to checks like `hive doctor`, delivery tracking, and other sidecar-derived runtime fields.
+
+For the current runtime-field model and deferred-delivery semantics, see
+`docs/runtime-model.md`.
 
 ## License
 
