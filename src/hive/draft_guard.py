@@ -35,6 +35,9 @@ _CLAUDE_PLACEHOLDER_HINTS = (
     'Try "',
     'Press up to edit queued messages',
 )
+_CODEX_PLACEHOLDER_HINTS = (
+    'Improve documentation in @filename',
+)
 
 
 @dataclass(frozen=True)
@@ -188,7 +191,12 @@ def _parse_codex(lines: list[str]) -> str:
             break
     if start is None:
         return ""
-    return _strip_lines(lines[start : end + 1], first_prefix=_CODEX_PROMPT, cont_prefix="  ")
+    text = _strip_lines(lines[start : end + 1], first_prefix=_CODEX_PROMPT, cont_prefix="  ")
+    if "\n" not in text:
+        for placeholder in _CODEX_PLACEHOLDER_HINTS:
+            if text.startswith(placeholder):
+                return ""
+    return text
 
 
 def _parse_droid(lines: list[str]) -> str:

@@ -114,6 +114,37 @@ def test_parse_codex_prompt_placeholder_text_is_returned_verbatim():
     assert draft_guard._parse_codex(_lines(capture)) == "Use /skills to list available skills"
 
 
+def test_parse_codex_improve_documentation_placeholder_is_not_treated_as_draft():
+    # Codex renders `› Improve documentation in @filename` as dim placeholder
+    # when the input box is empty. `capture-pane -p` strips ANSI attributes,
+    # so we match the exact string instead of the gray color.
+    capture = """
+• earlier turn
+
+› Improve documentation in @filename
+
+  gpt-5.4 xhigh fast · ~/Developer/hive
+"""
+    assert draft_guard._parse_codex(_lines(capture)) == ""
+
+
+def test_parse_codex_user_draft_that_starts_with_improve_is_preserved():
+    # Defense against overreach: a real multi-line draft that happens to
+    # begin with the placeholder text must still be parsed. The gate only
+    # fires when the whole parsed block is a single line.
+    capture = """
+• earlier turn
+
+› Improve documentation in @filename
+  and also add a usage example
+
+  gpt-5.4 xhigh fast · ~/Developer/hive
+"""
+    assert draft_guard._parse_codex(_lines(capture)) == (
+        "Improve documentation in @filename\nand also add a usage example"
+    )
+
+
 def test_parse_codex_multi_line_draft_is_joined():
     capture = """
 • earlier turn
