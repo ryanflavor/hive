@@ -175,4 +175,4 @@ For the current runtime-field model and fork-gate semantics, see
 
 ## License
 
-MIT
+[GPL-3.0-or-later](LICENSE) © 2026 notdp
