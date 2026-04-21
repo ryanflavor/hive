@@ -14,6 +14,70 @@ CLI_ALIASES = {
     "claudecode": "claude",
 }
 
+# Anti-homogeneous peer CLI mapping. Peers across model families (Anthropic vs
+# OpenAI) produce more diverse viewpoints than same-family pairs. Used by:
+# - `hive gang init` to pick skeptic's CLI
+# - `hive init` peer discovery / spawn fallback
+_ANTI_PEER_CLI = {"claude": "codex", "codex": "claude", "droid": "claude"}
+
+
+def anti_peer_cli(current_cli: str) -> str:
+    """Return the anti-family peer CLI for *current_cli* (claude↔codex; droid→claude).
+
+    droid wraps arbitrary models; default peer = claude. Callers that know
+    droid is running an Anthropic model (opus/sonnet) should override with
+    'codex' explicitly.
+    """
+    return _ANTI_PEER_CLI.get(current_cli, "claude")
+
+
+def classify_model_family(model: str) -> str:
+    """Classify a model identifier into a coarse family for peer diversity.
+
+    Returns 'anthropic', 'openai', or 'unknown'. Handles droid's 'custom:'
+    prefix and common aliases.
+    """
+    if not model:
+        return "unknown"
+    m = model.lower().strip()
+    if m.startswith("custom:"):
+        m = m[len("custom:"):]
+    m = m.lstrip("-")
+    if "claude" in m or m.startswith(("opus", "sonnet", "haiku")):
+        return "anthropic"
+    if "codex" in m or m.startswith(("gpt", "o1", "o3", "o4")):
+        return "openai"
+    return "unknown"
+
+
+def family_for_pane(pane_id: str) -> str:
+    """Best-effort classify the agent pane's model family.
+
+    Reads model via resolve_model_for_pane; falls back to CLI identity when
+    the model is unavailable (claude→anthropic, codex→openai, droid→unknown).
+    """
+    profile = detect_profile_for_pane(pane_id)
+    if not profile:
+        return "unknown"
+    model = resolve_model_for_pane(pane_id, cli_name=profile.name)
+    family = classify_model_family(model)
+    if family != "unknown":
+        return family
+    if profile.name == "claude":
+        return "anthropic"
+    if profile.name == "codex":
+        return "openai"
+    return "unknown"
+
+
+def peer_cli_for_family(my_family: str) -> str:
+    """CLI to spawn as an anti-family peer when my family is *my_family*."""
+    if my_family == "anthropic":
+        return "codex"
+    if my_family == "openai":
+        return "claude"
+    return "claude"
+
 
 def normalize_command(command: str) -> str:
     value = (command or "").strip().lower().rsplit("/", 1)[-1]

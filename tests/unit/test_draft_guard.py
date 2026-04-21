@@ -99,19 +99,17 @@ def test_parse_codex_no_draft_block_returns_nothing():
     assert draft_guard._parse_codex(_lines(capture)) == ""
 
 
-def test_parse_codex_prompt_placeholder_text_is_returned_verbatim():
-    # Codex renders `› Use /skills to list available skills` as gray
-    # placeholder; the parser cannot distinguish placeholder from a user
-    # draft that happens to start with that phrase. The gate relies on
-    # cursor_x to avoid calling the parser in that empty state.
+def test_parse_codex_single_line_real_draft_is_preserved():
+    # A single-line input that doesn't match any known codex placeholder
+    # hint must be returned as-is (real user draft).
     capture = """
 • earlier turn
 
-› Use /skills to list available skills
+› hello team what's next
 
   gpt-5.4 xhigh fast · ~/Developer/hive
 """
-    assert draft_guard._parse_codex(_lines(capture)) == "Use /skills to list available skills"
+    assert draft_guard._parse_codex(_lines(capture)) == "hello team what's next"
 
 
 def test_parse_codex_improve_documentation_placeholder_is_not_treated_as_draft():

@@ -58,8 +58,15 @@ def test_peer_set_clear_and_team_output(runner, configure_hive_home, monkeypatch
     cleared_team_payload = json.loads(runner.invoke(cli, ["team"]).output)
     orch = next(member for member in cleared_team_payload["members"] if member["name"] == "orch")
     kiki = next(member for member in cleared_team_payload["members"] if member["name"] == "kiki")
+    momo = next(member for member in cleared_team_payload["members"] if member["name"] == "momo")
+    # 3-agent team with no explicit peer mapping → peer_mode == "none".
+    # `hive team` renders `peer` only for explicit mappings or the 2-agent
+    # implicit auto-pair; in `none` mode nobody gets a `peer` field (the
+    # anti-family CLI "suggested partner" is route-layer concern, not a
+    # displayed relationship).
     assert "peer" not in orch
     assert "peer" not in kiki
+    assert "peer" not in momo
 
 
 def test_peer_show_command_is_removed(runner, configure_hive_home):

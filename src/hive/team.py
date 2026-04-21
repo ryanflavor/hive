@@ -19,6 +19,7 @@ _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session 
 class Terminal:
     name: str
     pane_id: str
+    role: str = "terminal"
 
     def is_alive(self) -> bool:
         return tmux.is_pane_alive(self.pane_id)
@@ -26,6 +27,7 @@ class Terminal:
     def to_dict(self) -> dict:
         return {
             "name": self.name,
+            "role": self.role,
             "tmuxPaneId": self.pane_id,
             "isActive": self.is_alive(),
         }
@@ -132,7 +134,7 @@ class Team:
         for pane in panes:
             if pane.team != name:
                 continue
-            if pane.role in ("lead", "orchestrator", "agent", "terminal"):
+            if pane.role in ("lead", "orchestrator", "agent", "terminal", "board"):
                 if pane.role in ("lead", "orchestrator"):
                     team.lead_pane_id = pane.pane_id
                     team.lead_name = pane.agent or LEAD_AGENT_NAME
@@ -150,8 +152,8 @@ class Team:
                         cwd=tmux.display_value(pane.pane_id, "#{pane_current_path}") or "",
                     )
                     team.agents[pane.agent] = agent
-                elif pane.role == "terminal":
-                    terminal = Terminal(name=pane.agent, pane_id=pane.pane_id)
+                elif pane.role in ("terminal", "board"):
+                    terminal = Terminal(name=pane.agent, pane_id=pane.pane_id, role=pane.role)
                     team.terminals[pane.agent] = terminal
 
         team.peer_map = team._canonical_peer_map(team.peer_map)
@@ -228,7 +230,6 @@ class Team:
             skill=initial_skill,
             extra_env=extra_env,
             cli=cli,
-            send_bootstrap_prompt=initial_skill == "hive",
         )
 
         tmux.tag_pane(agent.pane_id, "agent", name, self.name, cli=cli)
@@ -258,6 +259,13 @@ class Team:
 
     def status(self) -> dict:
         """Get team status."""
+        # Only surface `peer` in rendering for agents that are actually paired:
+        # explicit `hive peer set` mappings or the 2-agent implicit auto-pair.
+        # In `none` mode (3+ agents, no explicit mapping) `resolve_peer` would
+        # fall back to a "no-peer candidate" suggestion, which is useful to
+        # callers picking partners but misleading when echoed as if it were a
+        # real peer. Gate on `peer_mode` to keep the field meaning stable.
+        render_peer = self.peer_mode() != "none"
         members: list[dict[str, object]] = []
         lead = self.lead_agent()
         if lead is not None:
@@ -266,9 +274,10 @@ class Team:
                 "role": member_role_for_pane(lead.pane_id),
                 "pane": lead.pane_id,
             }
-            peer_name = self.resolve_peer(lead.name)
-            if peer_name:
-                row["peer"] = peer_name
+            if render_peer:
+                peer_name = self.resolve_peer(lead.name)
+                if peer_name:
+                    row["peer"] = peer_name
             members.append(row)
         for name in sorted(self.agents):
             row = {
@@ -276,15 +285,16 @@ class Team:
                 "role": "agent",
                 "pane": self.agents[name].pane_id,
             }
-            peer_name = self.resolve_peer(name)
-            if peer_name:
-                row["peer"] = peer_name
+            if render_peer:
+                peer_name = self.resolve_peer(name)
+                if peer_name:
+                    row["peer"] = peer_name
             members.append(row)
         for name in sorted(self.terminals):
             terminal = self.terminals[name]
             members.append({
                 "name": name,
-                "role": "terminal",
+                "role": terminal.role,
                 "pane": terminal.pane_id,
             })
         return {
@@ -356,18 +366,61 @@ class Team:
             return "explicit"
         return "implicit" if len(self._peer_member_names()) == 2 else "none"
 
+    def implicit_pair(self) -> tuple[str, str] | None:
+        """If in `implicit` mode (2 peer members, no explicit map), return
+        the pair as a (left, right) tuple. Otherwise None.
+
+        Callers use this to freeze the auto-pair into an explicit mapping
+        before adding a third member (which would otherwise flip mode to
+        `none` and silently drop the existing peer display).
+        """
+        if self._canonical_peer_map(self.peer_map):
+            return None
+        members = self._peer_member_names()
+        if len(members) != 2:
+            return None
+        return members[0], members[1]
+
     def resolve_peer(self, name: str) -> str | None:
+        """Find *name*'s peer, preferring no-peer + anti-family CLI candidates.
+
+        Rule (mirrors `hive gang spawn-peer`'s anti-family philosophy):
+          1. explicit peer from peer_map (set by `hive peer set`)
+          2. otherwise: pick a member that has no explicit peer yet
+             (`no-peer`), preferring one whose CLI is anti-family of *name*'s
+             CLI (claude↔codex; droid defaults to claude pairing)
+          3. fall back to any no-peer member (deterministic sort) if no
+             anti-family candidate exists
+          4. return None if nobody is available
+        """
         if name not in self._peer_member_names():
             return None
         explicit = self._canonical_peer_map(self.peer_map).get(name)
         if explicit:
             return explicit
+
         members = self._peer_member_names()
-        if len(members) == 2:
-            for candidate in members:
-                if candidate != name:
-                    return candidate
-        return None
+        peered = set(self._canonical_peer_map(self.peer_map).keys())
+        candidates = [m for m in members if m != name and m not in peered]
+        if not candidates:
+            return None
+
+        from .agent_cli import anti_peer_cli
+
+        my_cli = self._member_cli(name)
+        if my_cli:
+            desired = anti_peer_cli(my_cli)
+            anti = [c for c in candidates if self._member_cli(c) == desired]
+            if anti:
+                return sorted(anti)[0]
+        return sorted(candidates)[0]
+
+    def _member_cli(self, name: str) -> str:
+        """Return the CLI (claude/codex/droid) for *name*, or '' if unknown."""
+        agent = self.agents.get(name)
+        if agent:
+            return getattr(agent, "cli", "") or ""
+        return ""
 
     def peer_pairs(self) -> list[tuple[str, str]]:
         explicit = self._canonical_peer_map(self.peer_map)

@@ -88,9 +88,8 @@ hive notify "done, press Space to come back"
 
 | Command | Description |
 |---------|-------------|
-| `hive current` | Inspect current tmux/Hive binding |
 | `hive init` / `hive create` | Bind current window or create a team |
-| `hive team` | Show team with runtime `busy` / `inputState` and peer info |
+| `hive team` | Show team with runtime `busy` / `inputState` / peer info + `selfMember` ID card (projects `members[self]` + pane-local `group`); in tmux with no team bound, returns a bootstrap payload (`team: null`, tmux panes, `hint`) |
 | `hive peer set\|clear` | Persist or clear default peer pairs |
 | `hive send <agent> "text"` | Start a new thread (root send only; artifact required; auto-forks a clone when target is in an active turn) |
 | `hive reply <agent> "text"` | Reply on an existing thread (auto-picks latest unanswered inbound; `--reply-to` for explicit msgId) |

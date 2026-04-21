@@ -30,10 +30,12 @@ class FakeTmuxState:
         key = option.removeprefix("@")
         self.window_options.get(target, {}).pop(key, None)
 
-    def tag_pane(self, pane_id: str, role: str, agent: str, team: str, *, cli: str = "") -> None:
+    def tag_pane(self, pane_id: str, role: str, agent: str, team: str, *, cli: str = "", group: str = "") -> None:
         opts = {"hive-role": role, "hive-agent": agent, "hive-team": team}
         if cli:
             opts["hive-cli"] = cli
+        if group:
+            opts["hive-group"] = group
         self.pane_options[pane_id] = {**self.pane_options.get(pane_id, {}), **opts}
 
     def get_pane_option(self, pane_id: str, key: str) -> str | None:
@@ -82,7 +84,23 @@ class FakeTmuxState:
                     agent=opts.get("hive-agent", ""),
                     team=opts.get("hive-team", ""),
                     cli=opts.get("hive-cli", ""),
+                    group=opts.get("hive-group", ""),
                 ))
+        return result
+
+    def list_panes_all(self) -> list[PaneInfo]:
+        result = []
+        for pane_id, opts in self.pane_options.items():
+            result.append(PaneInfo(
+                pane_id=pane_id,
+                title="",
+                command="droid",
+                role=opts.get("hive-role", ""),
+                agent=opts.get("hive-agent", ""),
+                team=opts.get("hive-team", ""),
+                cli=opts.get("hive-cli", ""),
+                group=opts.get("hive-group", ""),
+            ))
         return result
 
 
@@ -147,6 +165,12 @@ def configure_hive_home(monkeypatch, tmp_path):
         monkeypatch.setattr("hive.cli.tmux.is_pane_alive", lambda _pane: True)
         monkeypatch.setattr("hive.cli.tmux.tag_pane", state.tag_pane)
         monkeypatch.setattr("hive.cli.tmux.clear_pane_tags", state.clear_pane_tags)
+        monkeypatch.setattr("hive.cli.tmux.list_panes_all", state.list_panes_all)
+        # Peer auto-attach during `hive init` spawns or discovers another agent
+        # pane. Tests that want to exercise that flow must override this mock;
+        # by default we return None so plain `hive init` tests stay focused on
+        # the init scaffolding itself.
+        monkeypatch.setattr("hive.cli._attach_peer_to_team", lambda *_a, **_kw: None)
         monkeypatch.delenv("TMUX_PANE", raising=False)
         # Default: skip the real sidecar fork + 2s socket-ready wait. Tests
         # that want to observe sidecar startup patch this themselves.
@@ -159,7 +183,13 @@ def configure_hive_home(monkeypatch, tmp_path):
 @pytest.fixture
 def mock_tmux_send(monkeypatch):
     sent: list[tuple[str, str]] = []
-    monkeypatch.setattr("hive.agent.tmux.send_keys", lambda pane, text, enter=True: sent.append((pane, text)))
+
+    def _send_keys(pane, text, enter=True):
+        sent.append((pane, text))
+        if enter:
+            sent.append((pane, "<Enter>"))
+
+    monkeypatch.setattr("hive.agent.tmux.send_keys", _send_keys)
     monkeypatch.setattr("hive.agent.tmux.send_key", lambda pane, key: sent.append((pane, f"<{key}>")))
     monkeypatch.setattr("hive.agent.time.sleep", lambda _s: None)
     return sent

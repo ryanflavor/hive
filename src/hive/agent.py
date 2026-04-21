@@ -177,12 +177,17 @@ class Agent:
         is_first: bool = False,
         split_horizontal: bool = True,
         split_size: str | None = None,
+        split_window: bool = True,
         skill: str = "hive",
         extra_env: dict[str, str] | None = None,
         cli: str = "droid",
-        send_bootstrap_prompt: bool = True,
     ) -> Agent:
-        """Spawn an agent CLI (droid/claude/codex) in a tmux pane."""
+        """Spawn an agent CLI (droid/claude/codex) in a tmux pane.
+
+        If split_window is True (default), splits *target_pane* and runs the
+        CLI in the new pane. If False, runs the CLI in *target_pane* itself
+        (target must be a shell pane, not already running an agent).
+        """
         if cli not in CLI_BINS:
             raise ValueError(f"unsupported cli '{cli}', must be one of: {', '.join(CLI_BINS)}")
         cwd = cwd or os.getcwd()
@@ -195,7 +200,10 @@ class Agent:
 
         resolved_model = model
 
-        pane_id = tmux.split_window(target_pane, horizontal=split_horizontal, size=split_size)
+        if split_window:
+            pane_id = tmux.split_window(target_pane, horizontal=split_horizontal, size=split_size)
+        else:
+            pane_id = target_pane
         tmux.set_pane_title(pane_id, f"[{name}]")
         tmux.tag_pane(pane_id, "agent", name, team_name, cli=cli)
 
@@ -261,14 +269,6 @@ class Agent:
             if skill and skill != "none":
                 agent.load_skill(skill)
 
-            if skill == "hive" and send_bootstrap_prompt:
-                _submit_interactive_text(
-                    pane_id,
-                    "I am a hive teammate. "
-                    "Use `hive team` and `hive send` to collaborate. "
-                    "Hive messages arrive inline as <HIVE ...> ... </HIVE> blocks.",
-                    cli,
-                )
             if prompt:
                 _submit_interactive_text(pane_id, prompt, cli)
 
@@ -281,17 +281,28 @@ class Agent:
         _submit_interactive_text(self.pane_id, text, self.cli)
 
     def load_skill(self, skill_name: str) -> None:
-        """Load a skill in the pane using the CLI-specific command."""
+        """Load a skill in the pane using the CLI-specific command.
+
+        Uses raw `tmux.send_keys` instead of `_submit_interactive_text` —
+        skill loading happens at spawn time on a fresh pane with no user
+        draft to preserve, and the draft-guard placeholder detection can
+        misidentify CLI placeholder hints (e.g. codex's rotating
+        `Find and fix a bug in @filename`) as drafts and paste them back
+        as real input after the skill submits.
+        """
         if not skill_name or skill_name == "none":
             return
         if skill_name == "hive":
             skill_sync.maybe_warn_hive_skill_drift(self.cli)
         from .agent_cli import get_profile
         profile = get_profile(self.cli)
-        if profile:
-            _submit_interactive_text(self.pane_id, profile.skill_cmd.format(name=skill_name), self.cli)
-        else:
-            _submit_interactive_text(self.pane_id, f"/{skill_name}", self.cli)
+        text = profile.skill_cmd.format(name=skill_name) if profile else f"/{skill_name}"
+        # Type + wait for picker to open; codex skill picker = 2 Enters
+        # (pick entry, then submit), others = 1.
+        tmux.send_keys(self.pane_id, text, enter=False)
+        time.sleep(0.1)
+        for _ in range(2 if self.cli == "codex" else 1):
+            tmux.send_key(self.pane_id, "Enter")
         time.sleep(2)
 
     def interrupt(self) -> None:

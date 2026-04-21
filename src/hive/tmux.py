@@ -269,6 +269,100 @@ def kill_session(name: str) -> None:
     _run(["kill-session", "-t", name], check=False)
 
 
+def new_window(
+    session: str,
+    *,
+    name: str = "",
+    cwd: str | None = None,
+    detach: bool = True,
+    index: int | None = None,
+) -> tuple[str, str]:
+    """Create a new tmux window in *session*. Returns (window_target, pane_id).
+
+    If *index* is given, the new window is created at that explicit tmux
+    window index via `-t session:index`. Caller must ensure the index is
+    free — tmux refuses with "index N in use" otherwise. Used by gang
+    spawn-peer to place peer windows at 1000+ so they never collide with
+    the user's regular low-index windows.
+    """
+    if index is not None:
+        target = f"{session}:{index}"
+    else:
+        # Force `-t` to reference a session, not a window index. Bare numeric
+        # session names (e.g. "613") are ambiguous and tmux can treat `-t 613`
+        # as an index rather than a session, which fails with "index N in use"
+        # once any window exists at that index.
+        target = session if (":" in session or session.startswith("$")) else f"{session}:"
+    args = ["new-window", "-t", target]
+    if detach:
+        args.append("-d")
+    if name:
+        args.extend(["-n", name])
+    if cwd:
+        args.extend(["-c", cwd])
+    args.extend(["-P", "-F", "#{session_name}:#{window_index}\t#{pane_id}"])
+    r = _run(args)
+    out = r.stdout.strip()
+    if "\t" not in out:
+        return out, ""
+    target, pane_id = out.split("\t", 1)
+    return target, pane_id
+
+
+def break_pane(pane_id: str, *, name: str = "", detach: bool = True) -> tuple[str, str]:
+    """Break *pane_id* out into its own new window. Returns (window_target, pane_id).
+
+    The pane's running process (e.g. agent CLI) continues — only its window
+    parent changes.
+    """
+    args = ["break-pane", "-s", pane_id]
+    if detach:
+        args.append("-d")
+    if name:
+        args.extend(["-n", name])
+    args.extend(["-P", "-F", "#{session_name}:#{window_index}\t#{pane_id}"])
+    r = _run(args)
+    out = r.stdout.strip()
+    if "\t" not in out:
+        return out, pane_id
+    target, new_pane_id = out.split("\t", 1)
+    return target, new_pane_id or pane_id
+
+
+def join_pane(source_pane: str, target_pane: str, *, horizontal: bool = True, size: str | None = None) -> str:
+    """Move *source_pane* into the window owning *target_pane* via tmux join-pane.
+
+    The moved pane keeps its process and pane_id; only its window parent
+    changes. Returns the (unchanged) source pane_id.
+    """
+    args = ["join-pane", "-s", source_pane, "-t", target_pane]
+    args.append("-h" if horizontal else "-v")
+    if size:
+        args.extend(["-l", size])
+    _run(args, check=False)
+    return source_pane
+
+
+def window_size(window_target: str) -> tuple[int, int]:
+    """Return (width, height) for *window_target*, or (0, 0) on error."""
+    r = _run(
+        ["display-message", "-t", window_target, "-p", "#{window_width}\t#{window_height}"],
+        check=False,
+    )
+    out = r.stdout.strip()
+    if "\t" not in out:
+        return 0, 0
+    try:
+        w, h = out.split("\t", 1)
+        return int(w), int(h)
+    except ValueError:
+        return 0, 0
+
+
+def select_window(window_target: str) -> None:
+    _run(["select-window", "-t", window_target], check=False)
+
+
 # --- Pane ---
 
 def split_window(
@@ -382,6 +476,10 @@ def is_pane_alive(pane_id: str) -> bool:
 
 def kill_pane(pane_id: str) -> None:
     _run(["kill-pane", "-t", pane_id], check=False)
+
+
+def kill_window(target: str) -> None:
+    _run(["kill-window", "-t", target], check=False)
 
 
 # --- Layout & Appearance ---
@@ -706,6 +804,8 @@ class PaneInfo:
     agent: str = ""
     team: str = ""
     cli: str = ""
+    group: str = ""
+    owner: str = ""
 
 
 def list_panes_with_titles(target: str) -> list[PaneInfo]:
@@ -733,18 +833,42 @@ _PANE_BASE_FMT = "\t".join([
     "#{@hive-agent}",
     "#{@hive-team}",
     "#{@hive-cli}",
+    "#{@hive-group}",
+    "#{@hive-owner}",
 ])
 
 
 def list_panes_full(target: str) -> list[PaneInfo]:
     """List all panes with command and hive identity (@hive-*)."""
     r = _run(["list-panes", "-t", target, "-F", _PANE_BASE_FMT], check=False)
-    result = []
+    return _parse_panes_full(r.stdout)
+
+
+def list_panes_all() -> list[PaneInfo]:
+    """List every pane across all sessions/windows with hive identity tags."""
+    r = _run(["list-panes", "-a", "-F", _PANE_BASE_FMT], check=False)
+    return _parse_panes_full(r.stdout)
+
+
+def list_window_indices(session: str) -> list[int]:
+    """Return tmux window indices in *session*, ignoring non-numeric output."""
+    r = _run(["list-windows", "-t", session, "-F", "#{window_index}"], check=False)
+    out: list[int] = []
     for line in r.stdout.strip().split("\n"):
+        line = line.strip()
+        if not line.isdigit():
+            continue
+        out.append(int(line))
+    return out
+
+
+def _parse_panes_full(stdout: str) -> list[PaneInfo]:
+    result: list[PaneInfo] = []
+    for line in stdout.strip().split("\n"):
         if not line:
             continue
         parts = line.split("\t")
-        while len(parts) < 7:
+        while len(parts) < 9:
             parts.append("")
         result.append(PaneInfo(
             pane_id=parts[0],
@@ -754,6 +878,8 @@ def list_panes_full(target: str) -> list[PaneInfo]:
             agent=parts[4] or "",
             team=parts[5] or "",
             cli=parts[6] or "",
+            group=parts[7] or "",
+            owner=parts[8] or "",
         ))
     return result
 
@@ -776,16 +902,18 @@ def clear_pane_option(pane_id: str, key: str) -> None:
     _run(["set-option", "-p", "-t", pane_id, "-u", f"@{key}"], check=False)
 
 
-_PANE_TAG_KEYS = ("hive-role", "hive-agent", "hive-team", "hive-cli")
+_PANE_TAG_KEYS = ("hive-role", "hive-agent", "hive-team", "hive-cli", "hive-group", "hive-owner")
 
 
-def tag_pane(pane_id: str, role: str, agent: str, team: str, *, cli: str = "") -> None:
+def tag_pane(pane_id: str, role: str, agent: str, team: str, *, cli: str = "", group: str = "") -> None:
     """Set all hive identity options on a pane."""
     set_pane_option(pane_id, "hive-role", role)
     set_pane_option(pane_id, "hive-agent", agent)
     set_pane_option(pane_id, "hive-team", team)
     if cli:
         set_pane_option(pane_id, "hive-cli", cli)
+    if group:
+        set_pane_option(pane_id, "hive-group", group)
 
 
 def clear_pane_tags(pane_id: str) -> None:

@@ -21,7 +21,11 @@ def _setup_tmux_mocks(monkeypatch):
     monkeypatch.setattr("hive.agent.tmux.wait_for_texts", lambda *_args, **_kw: True)
     monkeypatch.setattr("hive.agent.tmux.is_pane_in_mode", lambda _pane: False)
     monkeypatch.setattr("hive.agent.tmux.cancel_pane_mode", lambda _pane: None)
-    monkeypatch.setattr("hive.agent.tmux.send_keys", lambda _pane, text, enter=True: calls.append(text))
+    def _send_keys(_pane, text, enter=True):
+        calls.append(text)
+        if enter:
+            calls.append("<Enter>")
+    monkeypatch.setattr("hive.agent.tmux.send_keys", _send_keys)
     monkeypatch.setattr("hive.agent.tmux.send_key", lambda _pane, key: calls.append(f"<{key}>"))
     monkeypatch.setattr("hive.agent.draft_guard.supported_profile", lambda _profile: False)
     monkeypatch.setattr("hive.agent.resolve_session_id_for_pane", lambda _pane: None)
@@ -97,7 +101,7 @@ def test_spawn_without_extra_env_does_not_export_default_hive_vars(monkeypatch):
     assert "export " not in startup_cmd
 
 
-def test_spawn_hive_bootstraps_and_sends_prompt(monkeypatch):
+def test_spawn_hive_loads_skill_and_sends_prompt(monkeypatch):
     calls, _ = _setup_tmux_mocks(monkeypatch)
 
     Agent.spawn(
@@ -107,12 +111,10 @@ def test_spawn_hive_bootstraps_and_sends_prompt(monkeypatch):
     )
 
     assert "/hive" in calls
-    assert any("Use `hive team` and `hive send`" in c for c in calls)
-    assert any("<HIVE ...> ... </HIVE>" in c for c in calls)
     assert "Please check your inbox." in calls
 
 
-def test_spawn_codex_hive_bootstraps_and_sends_prompt(monkeypatch):
+def test_spawn_codex_hive_loads_skill_and_sends_prompt(monkeypatch):
     calls, _ = _setup_tmux_mocks(monkeypatch)
 
     Agent.spawn(
@@ -122,24 +124,10 @@ def test_spawn_codex_hive_bootstraps_and_sends_prompt(monkeypatch):
     )
 
     assert "$hive" in calls
-    assert any("Use `hive team` and `hive send`" in c for c in calls)
     assert "Please check your inbox." in calls
-    assert calls.count("<Enter>") == 3
-
-
-def test_spawn_hive_can_skip_bootstrap_message(monkeypatch):
-    calls, _ = _setup_tmux_mocks(monkeypatch)
-
-    Agent.spawn(
-        name="w1", team_name="t", target_pane="%0",
-        cwd="/tmp", is_first=True, skill="hive",
-        prompt="Please check your inbox.",
-        send_bootstrap_prompt=False,
-    )
-
-    assert "/hive" in calls
-    assert not any("Use `hive team` and `hive send`" in c for c in calls)
-    assert "Please check your inbox." in calls
+    # 4 Enters: initial `cd ... && exec codex`; skill load is 2 Enters for
+    # codex (picker select + submit); then user prompt.
+    assert calls.count("<Enter>") == 4
 
 
 def test_load_skill_sends_slash_command(monkeypatch):
@@ -157,7 +145,8 @@ def test_load_skill_uses_cli_specific_command(monkeypatch):
 
     agent.load_skill("code-review")
 
-    assert calls == ["$code-review", "<Enter>"]
+    # codex skill picker needs two Enters: first picks the entry, second submits.
+    assert calls == ["$code-review", "<Enter>", "<Enter>"]
 
 
 def test_load_hive_skill_checks_for_drift_before_loading(monkeypatch):
@@ -169,7 +158,7 @@ def test_load_hive_skill_checks_for_drift_before_loading(monkeypatch):
     agent.load_skill("hive")
 
     assert warned == ["codex"]
-    assert calls == ["$hive", "<Enter>"]
+    assert calls == ["$hive", "<Enter>", "<Enter>"]
 
 
 def test_send_submits_text_with_enter(monkeypatch):

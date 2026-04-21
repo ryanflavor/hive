@@ -15,7 +15,7 @@ Dependency: this skill depends on the `hive` skill. Your first action after ente
 MANDATORY:
 
 1. 不要退化成普通单 agent review。
-2. 如果 `hive current` 返回 `team: null` 且存在 tmux session，必须立即执行 `hive init`，然后再执行 `hive team`。
+2. 先跑幂等的 `hive init`，再用 `hive team` 确认 `team/runtimeWorkspace/selfMember` 齐全；若 `hive team` 返回 `team: null`，回头补一次 `hive init`。
 3. 在完成 `hive init` / `hive team` / reviewer `spawn` 之前，不要运行 `git diff`、`git diff --cached`、`git status -s`、`gh pr diff`，也不要直接输出 review findings。
 4. `git diff` / `git status` 这些命令属于 reviewer 执行 request 时的工作，不是 orchestrator 在 bootstrap 阶段的工作。
 
@@ -34,31 +34,26 @@ MANDATORY:
 
 优先顺序：
 
-1. 先执行 `hive current`
-2. 若已有 `team/runtimeWorkspace/agent`，继续用 Hive 命令
-3. 若没有 team 但在 tmux 中，执行 `hive init`
-4. 然后执行 `hive team`
+1. 直接执行 `hive init`(幂等;没 team 会新建,已有 team 会把当前 pane 补进去)
+2. 再执行 `hive team` 验证 `team/runtimeWorkspace/selfMember.name` 齐全
 
-始终以 `hive current` 的输出为准绳。
+始终以 `hive team` 的输出为准绳。
 
-如果 `hive current` 的结果类似：
+如果 `hive team` 的结果是 unbound bootstrap payload：
 
 ```json
 {
   "team": null,
   "tmux": { "session": "...", "window": "...", "paneCount": 2 },
-  "hint": "No team bound. Run `hive init` to create one from this tmux window."
+  "hint": "No team bound. Run `hive init` to create one from this tmux window.",
+  "runtimeWorkspace": "/tmp/hive-<session>-<slug>",
+  "cwd": "/absolute/path/to/repo"
 }
 ```
 
-那么下一步必须是：
+说明第一步的 `hive init` 没落成,需要回头再跑一次 `hive init`,直到 `hive team` 返回 bound payload（含 `selfMember` + `runtimeWorkspace` 指向团队 workspace）再继续。
 
-```bash
-hive init
-hive team
-```
-
-不要在这两步之前执行任何 git diff / git status。
+不要在拿到 bound `hive team` 输出之前执行任何 git diff / git status。
 
 ## 2. Review 模式
 
@@ -205,8 +200,7 @@ flowchart TB
 
 | 命令 | 用途 |
 | ---- | ---- |
-| `hive current` | 查看当前 Hive 上下文 |
-| `hive team` | 查看团队成员 |
+| `hive team` | 查看团队成员 + 当前 pane 的 `selfMember` ID card |
 | `hive init` | 初始化 team |
 | `hive spawn <agent>` | 启动 agent pane |
 | `hive send <agent> <msg>` | 发任务 |

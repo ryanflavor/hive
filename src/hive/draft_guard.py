@@ -36,7 +36,14 @@ _CLAUDE_PLACEHOLDER_HINTS = (
     'Press up to edit queued messages',
 )
 _CODEX_PLACEHOLDER_HINTS = (
+    'Explain this codebase',
+    'Summarize recent commits',
+    'Implement {feature}',
+    'Find and fix a bug in @filename',
+    'Write tests for @filename',
     'Improve documentation in @filename',
+    'Run /review on my current changes',
+    'Use /skills to list available skills',
 )
 
 

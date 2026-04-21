@@ -10,14 +10,14 @@ def test_current_reads_persisted_context(runner, configure_hive_home, tmp_path):
     workspace = tmp_path / "ws"
 
     assert runner.invoke(cli, ["create", "team-d", "--workspace", str(workspace)]).exit_code == 0
-    result = runner.invoke(cli, ["current"])
+    result = runner.invoke(cli, ["team"])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["team"] == "team-d"
+    assert payload["name"] == "team-d"
     assert payload["runtimeWorkspace"] == str(workspace)
     assert payload["cwd"] == os.getcwd()
-    assert payload["repoRoot"]
+    assert payload["selfMember"]["name"] == "orch"
 
 
 def test_current_discovers_tmux_when_no_team(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -37,7 +37,7 @@ def test_current_discovers_tmux_when_no_team(runner, configure_hive_home, monkey
         ],
     )
 
-    result = runner.invoke(cli, ["current"])
+    result = runner.invoke(cli, ["team"])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
@@ -56,7 +56,7 @@ def test_current_ignores_persisted_context_inside_tmux_when_window_is_unbound(ru
     ctx_dir.mkdir(parents=True, exist_ok=True)
     (ctx_dir / "default.json").write_text(json.dumps({"team": "stale-team", "workspace": "/tmp/ws", "agent": "claude"}))
 
-    result = runner.invoke(cli, ["current"])
+    result = runner.invoke(cli, ["team"])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
@@ -72,7 +72,7 @@ def test_current_ignores_window_only_team_binding_without_pane_registration(runn
     tmux.set_window_option("dev:0", "@hive-workspace", str(tmp_path / "ws"))
     tmux.set_window_option("dev:0", "@hive-created", "0")
 
-    result = runner.invoke(cli, ["current"])
+    result = runner.invoke(cli, ["team"])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
@@ -80,11 +80,11 @@ def test_current_ignores_window_only_team_binding_without_pane_registration(runn
     assert payload["hint"].startswith("No team bound")
 
 
-def test_current_no_tmux_no_team(runner, configure_hive_home, monkeypatch):
+def test_team_no_tmux_no_team(runner, configure_hive_home, monkeypatch):
     configure_hive_home()
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: False)
 
-    result = runner.invoke(cli, ["current"])
+    result = runner.invoke(cli, ["team"])
 
     assert result.exit_code != 0
     assert "requires tmux" in result.output
@@ -101,18 +101,17 @@ def test_current_discovers_registered_agent_from_tmux_pane(runner, configure_hiv
     tmux.tag_pane("%0", "lead", "orch", "dev")
     tmux.tag_pane("%9", "agent", "alpha", "dev")
 
-    result = runner.invoke(cli, ["current"])
+    result = runner.invoke(cli, ["team"])
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["team"] == "dev"
+    assert payload["name"] == "dev"
     assert payload["runtimeWorkspace"] == str(tmp_path / "ws")
-    assert payload["agent"] == "alpha"
-    assert payload["role"] == "agent"
-    assert payload["pane"] == "%9"
+    assert payload["self"] == "alpha"
+    assert payload["selfMember"]["name"] == "alpha"
+    assert payload["selfMember"]["pane"] == "%9"
     assert payload["tmuxSession"] == "dev"
     assert payload["tmuxWindow"] == "dev:0"
     assert payload["cwd"] == os.getcwd()
-    assert payload["repoRoot"]
 
 
 def test_current_shows_tagged_role_for_lead_pane(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -125,14 +124,15 @@ def test_current_shows_tagged_role_for_lead_pane(runner, configure_hive_home, mo
     tmux.set_window_option("dev:0", "@hive-created", "0")
     tmux.tag_pane("%0", "lead", "orch", "dev")
 
-    # Even when the pane command is a shell, role comes from tmux tag
+    # Even when the pane command is a shell, selfMember discovery still works off the tmux tag.
     monkeypatch.setattr("hive.cli.tmux.get_pane_current_command", lambda _pane: "python3.12")
 
-    result = runner.invoke(cli, ["current"])
+    result = runner.invoke(cli, ["team"])
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    # Role is now read from tmux pane tags, not dynamic command detection
-    assert payload["role"] == "lead"
+    assert payload["self"] == "orch"
+    assert payload["selfMember"]["name"] == "orch"
+    assert payload["selfMember"]["pane"] == "%0"
 
 
 def test_current_returns_tagged_role_regardless_of_tty(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -145,17 +145,18 @@ def test_current_returns_tagged_role_regardless_of_tty(runner, configure_hive_ho
     tmux.set_window_option("dev:0", "@hive-created", "0")
     tmux.tag_pane("%0", "lead", "orch", "dev")
 
-    # These overrides don't affect the role (it comes from pane tags now)
+    # These overrides don't break selfMember discovery (self is taken from the pane tag).
     monkeypatch.setattr("hive.cli.tmux.get_pane_current_command", lambda _pane: "2.1.88")
     monkeypatch.setattr("hive.cli.tmux.get_pane_title", lambda _pane: "✳ Claude Code")
     monkeypatch.setattr("hive.cli.tmux.get_pane_tty", lambda _pane: "/dev/ttys012")
     monkeypatch.setattr("hive.cli.tmux.list_tty_commands", lambda _tty: ["-zsh", "claude"])
 
-    result = runner.invoke(cli, ["current"])
+    result = runner.invoke(cli, ["team"])
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    # Role is determined by tmux pane tags, not command/tty detection
-    assert payload["role"] == "lead"
+    assert payload["self"] == "orch"
+    assert payload["selfMember"]["name"] == "orch"
+    assert payload["selfMember"]["pane"] == "%0"
 
 
 def test_init_returns_existing_team_for_registered_member(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -465,7 +466,8 @@ def test_init_detects_preopened_codex_cli_and_uses_codex_commands(
     codex_events = [text for pane, text in mock_tmux_send if pane == "%11"]
     assert "$hive" in codex_events
     assert "/hive" not in codex_events
-    assert codex_events.count("<Enter>") == 2
+    # codex skill picker = 2 Enters (pick + submit); plus join-message Enter = 3.
+    assert codex_events.count("<Enter>") == 3
 
 
 def test_init_no_notify(runner, configure_hive_home, monkeypatch, mock_tmux_send, tmp_path):
@@ -662,7 +664,7 @@ def test_init_custom_name(runner, configure_hive_home, monkeypatch, mock_tmux_se
     assert payload["team"] == "my-team"
 
 
-def test_current_gc_removes_leftover_team_dir_for_dead_team(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_team_gc_removes_leftover_team_dir_for_dead_team(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home(current_pane="%8", session_name="dev")
     monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "dev:1")
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%8")
@@ -675,7 +677,7 @@ def test_current_gc_removes_leftover_team_dir_for_dead_team(runner, configure_hi
     team_dir = tmp_path / ".hive" / "teams" / "dev-0"
     team_dir.mkdir(parents=True)
 
-    result = runner.invoke(cli, ["current"])
+    result = runner.invoke(cli, ["team"])
 
     assert result.exit_code == 0
     # GC removes leftover team dirs not backed by live tmux windows
@@ -769,7 +771,6 @@ def test_root_help_groups_commands_by_area(runner):
         assert section in output
 
     for short_help in (
-        "Show current Hive context.",
         "Show team overview.",
         "Initialize a team from the current tmux window.",
         "Check delivery status of a sent message by ID.",

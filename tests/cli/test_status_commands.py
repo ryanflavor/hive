@@ -47,7 +47,6 @@ def test_status_exposes_lead_session_id_via_daemon(runner, configure_hive_home, 
     assert payload["tmuxWindow"] == "dev:0"
     assert payload["runtimeWorkspace"] == str(workspace)
     assert payload["cwd"] == os.getcwd()
-    assert payload["repoRoot"]
     orch = next(member for member in payload["members"] if member["name"] == "orch")
     assert orch["role"] == "agent"
     assert orch["busy"] is False
@@ -55,60 +54,6 @@ def test_status_exposes_lead_session_id_via_daemon(runner, configure_hive_home, 
     assert orch["model"] == "gpt-5.4"
     assert orch["inputState"] == "ready"
     assert orch["turnPhase"] == "turn_closed"
-
-
-def test_current_uses_daemon_for_model(runner, configure_hive_home, monkeypatch, tmp_path):
-    configure_hive_home()
-    monkeypatch.setattr("hive.agent.detect_current_session_id", lambda _cwd, model="", pane_id="": "orch-session-456")
-    workspace = tmp_path / "ws"
-
-    assert runner.invoke(cli, ["create", "team-current", "--workspace", str(workspace)]).exit_code == 0
-    _patch_runtime(
-        monkeypatch,
-        {
-            "members": {
-                "orch": {
-                    "alive": True,
-                    "model": "gpt-5.4",
-                    "busy": True,
-                }
-            }
-        },
-    )
-
-    result = runner.invoke(cli, ["current"])
-    assert result.exit_code == 0
-    payload = json.loads(result.output)
-    assert payload["team"] == "team-current"
-    assert payload["agent"] == "orch"
-    assert payload["model"] == "gpt-5.4"
-    assert payload["busy"] is True
-    assert payload["runtimeWorkspace"] == str(workspace)
-    assert payload["cwd"] == os.getcwd()
-    assert payload["repoRoot"]
-
-
-def test_current_starts_sidecar_before_runtime_lookup(runner, configure_hive_home, monkeypatch, tmp_path):
-    configure_hive_home()
-    workspace = tmp_path / "ws"
-    assert runner.invoke(cli, ["create", "team-current", "--workspace", str(workspace)]).exit_code == 0
-
-    calls: list[tuple[str, str, str, str]] = []
-
-    def _fake_ensure_sidecar(workspace_arg: str, team: str, tmux_window: str, tmux_window_id: str):
-        calls.append((workspace_arg, team, tmux_window, tmux_window_id))
-        return 4321
-
-    monkeypatch.setattr("hive.sidecar.ensure_sidecar", _fake_ensure_sidecar)
-    monkeypatch.setattr(
-        "hive.sidecar.request_team_runtime",
-        lambda _ws, *, team: {"ok": True, "team": team, "members": {"orch": {"alive": True, "model": "gpt-5.4"}}},
-    )
-
-    result = runner.invoke(cli, ["current"])
-
-    assert result.exit_code == 0
-    assert calls == [(str(workspace), "team-current", "dev:0", "@0")]
 
 
 def test_team_starts_sidecar_before_runtime_lookup(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -313,3 +258,111 @@ def test_team_runtime_keeps_distinct_claude_sessions_for_same_window(
     bobo = next(member for member in payload["members"] if member["name"] == "bobo")
     assert orch["sessionId"] == "sess-old"
     assert bobo["sessionId"] == "sess-new"
+
+
+def test_team_exposes_self_member(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    assert runner.invoke(cli, ["create", "team-sm", "--workspace", str(workspace)]).exit_code == 0
+    _patch_runtime(
+        monkeypatch,
+        {
+            "members": {
+                "orch": {
+                    "alive": True,
+                    "busy": False,
+                    "model": "gpt-5.4",
+                    "sessionId": "orch-session-1",
+                    "inputState": "ready",
+                    "turnPhase": "turn_closed",
+                }
+            }
+        },
+    )
+
+    result = runner.invoke(cli, ["team"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+
+    assert payload["self"] == "orch"
+    assert isinstance(payload["self"], str)
+    self_member = payload["selfMember"]
+    assert self_member["name"] == "orch"
+    assert self_member["role"] == "agent"
+    assert self_member["pane"].startswith("%")
+    assert "group" in self_member
+    assert self_member["model"] == "gpt-5.4"
+    assert self_member["busy"] is False
+    assert self_member["sessionId"] == "orch-session-1"
+    assert "group" not in payload
+
+
+def test_team_self_member_projects_only_available_fields(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home(current_pane="%11", session_name="dev")
+    workspace = tmp_path / "ws"
+    assert runner.invoke(cli, ["create", "team-b", "--workspace", str(workspace)]).exit_code == 0
+
+    from hive import tmux
+    tmux.tag_pane("%11", "board", "myboard", "team-b")
+
+    _patch_runtime(
+        monkeypatch,
+        {
+            "members": {
+                "myboard": {
+                    "alive": True,
+                    "busy": False,
+                }
+            }
+        },
+    )
+
+    result = runner.invoke(cli, ["team"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+
+    self_member = payload["selfMember"]
+    assert self_member["name"] == "myboard"
+    assert self_member["role"] == "board"
+    assert self_member["pane"].startswith("%")
+    assert "group" in self_member
+    assert "model" not in self_member
+    assert "sessionId" not in self_member
+    assert "turnPhase" not in self_member
+    assert "inputState" not in self_member
+
+
+def test_team_unbound_returns_bootstrap(runner, configure_hive_home, monkeypatch):
+    configure_hive_home()
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
+    monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "main")
+    monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "main:1")
+    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%0")
+
+    from hive.tmux import PaneInfo
+
+    monkeypatch.setattr(
+        "hive.cli.tmux.list_panes_full",
+        lambda _target: [
+            PaneInfo("%0", "[orch]", command="droid"),
+            PaneInfo("%12", "[claude]", command="droid"),
+        ],
+    )
+
+    result = runner.invoke(cli, ["team"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["team"] is None
+    assert payload["tmux"]["paneCount"] == 2
+    assert "hive init" in payload["hint"]
+
+
+def test_current_migration_stub(runner, configure_hive_home):
+    configure_hive_home()
+
+    result = runner.invoke(cli, ["current"])
+
+    assert result.exit_code != 0
+    assert "was removed" in result.output
+    assert "hive team" in result.output

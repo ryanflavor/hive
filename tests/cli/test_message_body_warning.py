@@ -146,7 +146,7 @@ def test_reply_warns_for_fenced_block_body_but_still_replies(runner, configure_h
     assert 'hive reply <agent> "<short summary>" --artifact -' in result.stderr
 
 
-def test_send_requires_artifact_for_new_root(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_send_accepts_short_root_without_artifact(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     _patch_ack(monkeypatch)
     workspace = tmp_path / "ws"
@@ -160,8 +160,8 @@ def test_send_requires_artifact_for_new_root(runner, configure_hive_home, monkey
 
     result = runner.invoke(cli, ["send", "dodo", "ack: see #1234"])
 
-    assert result.exit_code != 0
-    assert "new root send requires --artifact" in result.output
+    # Short, clean, single-line body should succeed without --artifact.
+    assert result.exit_code == 0, result.output
 
 
 def test_send_accepts_short_root_summary_with_artifact(runner, configure_hive_home, monkeypatch, tmp_path):

@@ -30,7 +30,7 @@ def test_e2e_init_current_exec_and_terminal_management(tmp_path: Path):
         return run_hive_in_tmux_pane(pane_a, args, env=env, cwd=workdir)
 
     try:
-        before_result = run_in_pane(["current"])
+        before_result = run_in_pane(["team"])
         assert before_result.returncode == 0, before_result.stdout
         before_payload = json.loads(before_result.stdout)
         assert before_payload["team"] is None

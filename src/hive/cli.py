@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import secrets
+import shlex
 import shutil
 import subprocess
 import sys
 import time
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 import click
@@ -22,13 +25,12 @@ from . import plugin_manager
 from . import skill_sync
 from . import tmux
 from .agent import AGENT_STARTUP_TIMEOUT, Agent
-from .agent_cli import AGENT_CLI_NAMES, detect_profile_for_pane, member_role_for_pane, normalize_command, resolve_session_id_for_pane
+from .agent_cli import AGENT_CLI_NAMES, anti_peer_cli, detect_profile_for_pane, family_for_pane, member_role_for_pane, normalize_command, peer_cli_for_family, resolve_session_id_for_pane
 from .team import HIVE_HOME, LEAD_AGENT_NAME, Team, Terminal
 
 
 _COMMAND_HELP_SECTIONS = {
     # Daily — the default agent collaboration path.
-    "current": "Daily",
     "init": "Daily",
     "team": "Daily",
     "send": "Daily",
@@ -78,10 +80,7 @@ _COMMAND_HELP_SECTION_DESCRIPTIONS = {
     "Plugin Helpers": "Human-only editor and split helpers backed by enabled plugin scripts. Droid exposes them as native slash commands (`/cvim`, `/vim`, ...); in Claude Code and Codex the human types them inline via the shell escape (e.g. `!hive cvim`). These are NOT meant for the model to call on its own.",
     "Extensions": "Manage first-party Hive plugins that materialize commands and skills for Factory, Claude Code, and Codex.",
 }
-_ROOT_HELP_EXAMPLES = '''# Inspect current tmux/Hive binding
-hive current
-
-# Show team members, peers, and runtime input/busy/safety state
+_ROOT_HELP_EXAMPLES = '''# Show team members, peers, and runtime input/busy/safety state
 hive team
 
 # Send a short message to a peer
@@ -149,6 +148,7 @@ def _discover_tmux_binding() -> dict[str, str]:
     window_target = tmux.get_current_window_target() or ""
     session_name = tmux.get_current_session_name() or ""
     workspace = tmux.get_window_option(window_target, "hive-workspace") if window_target else ""
+    group = tmux.get_pane_option(current_pane, "hive-group") or ""
     payload = {
         "team": team_name,
         "workspace": workspace or "",
@@ -158,6 +158,8 @@ def _discover_tmux_binding() -> dict[str, str]:
         "tmuxSession": session_name,
         "tmuxWindow": window_target,
     }
+    if group:
+        payload["group"] = group
     return payload
 
 
@@ -276,8 +278,9 @@ def _validate_root_send_protocol(body: str, artifact: str) -> None:
     summary = body.strip()
     if not summary:
         _fail("new root send requires a short body summary")
-    if not artifact:
-        _fail("new root send requires --artifact; put details in the artifact and keep body as a short summary")
+    # artifact is not mandatory — short confirmations like "ack" or "已就位"
+    # legitimately don't need one. The length/structure gate below already
+    # forces bulky or structured content into --artifact.
     if body_warning_hint(summary) is not None:
         _fail(
             "new root send body must stay short and unstructured; move details into --artifact "
@@ -301,24 +304,6 @@ def _resolve_workspace(team: Team | None = None, required: bool = False) -> str:
     return ""
 
 
-def _resolve_repo_root(cwd: str | None = None) -> str:
-    target_cwd = cwd or os.getcwd()
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=target_cwd,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=2,
-        )
-    except Exception:
-        return ""
-    if result.returncode != 0:
-        return ""
-    return result.stdout.strip()
-
-
 def _add_runtime_location_fields(
     payload: dict[str, object],
     *,
@@ -326,11 +311,7 @@ def _add_runtime_location_fields(
 ) -> dict[str, object]:
     if "runtimeWorkspace" not in payload and workspace_key in payload:
         payload["runtimeWorkspace"] = payload.pop(workspace_key)
-    cwd = os.getcwd()
-    payload["cwd"] = cwd
-    repo_root = _resolve_repo_root(cwd)
-    if repo_root:
-        payload["repoRoot"] = repo_root
+    payload["cwd"] = os.getcwd()
     return payload
 
 
@@ -404,32 +385,6 @@ def _ensure_team_sidecar(t: Team, workspace: str | Path) -> int | None:
     return ensure_sidecar(str(workspace), t.name, window_target, window_id)
 
 
-def _augment_current_payload_with_runtime(payload: dict[str, object], t: Team) -> dict[str, object]:
-    if not payload.get("agent"):
-        return payload
-    from .sidecar import request_team_runtime
-
-    ws = _resolve_workspace(t, required=False)
-    if not ws:
-        return payload
-    _ensure_team_sidecar(t, ws)
-    runtime = request_team_runtime(str(ws), team=t.name)
-    if not runtime or runtime.get("ok") is False:
-        return payload
-    members = runtime.get("members")
-    if not isinstance(members, dict):
-        return payload
-    member_runtime = members.get(str(payload["agent"]))
-    if not isinstance(member_runtime, dict):
-        return payload
-    model = member_runtime.get("model")
-    if model:
-        payload["model"] = model
-    if "busy" in member_runtime:
-        payload["busy"] = bool(member_runtime["busy"])
-    return payload
-
-
 def _augment_team_payload_with_runtime(t: Team, payload: dict[str, object]) -> dict[str, object]:
     from .sidecar import request_team_runtime
 
@@ -468,8 +423,56 @@ def _augment_team_payload_with_runtime(t: Team, payload: dict[str, object]) -> d
     return payload
 
 
+_SELF_MEMBER_PROJECTION_KEYS = (
+    "peer",
+    "alive",
+    "busy",
+    "model",
+    "sessionId",
+    "inputState",
+    "inputReason",
+    "pendingQuestion",
+    "turnPhase",
+)
+
+
+def _build_self_member(payload: dict[str, object], self_name: str) -> dict[str, object] | None:
+    members = payload.get("members")
+    if not isinstance(members, list):
+        return None
+    self_row: dict[str, object] | None = None
+    for member in members:
+        if isinstance(member, dict) and member.get("name") == self_name:
+            self_row = member
+            break
+    if self_row is None:
+        return None
+    current_pane = tmux.get_current_pane_id() if tmux.is_inside_tmux() else ""
+    group = tmux.get_pane_option(current_pane, "hive-group") if current_pane else ""
+    self_member: dict[str, object] = {
+        "name": self_name,
+        "role": self_row.get("role", ""),
+        "pane": self_row.get("pane", ""),
+        "group": group or "",
+    }
+    for key in _SELF_MEMBER_PROJECTION_KEYS:
+        if key in self_row:
+            self_member[key] = self_row[key]
+    return self_member
+
+
+def _should_show_description(desc: object) -> bool:
+    if not isinstance(desc, str) or not desc:
+        return False
+    if desc.startswith("auto-init from "):
+        return False
+    return True
+
+
 def _team_status_payload(t: Team) -> dict[str, object]:
     payload = _augment_team_payload_with_runtime(t, t.status())
+    if not _should_show_description(payload.get("description")):
+        payload.pop("description", None)
     discovered = _discover_tmux_binding() if tmux.is_inside_tmux() else {}
     if discovered.get("team") == t.name and discovered.get("agent"):
         payload["self"] = str(discovered["agent"])
@@ -477,6 +480,12 @@ def _team_status_payload(t: Team) -> dict[str, object]:
         ctx = hive_context.load_current_context()
         if ctx.get("team") == t.name and ctx.get("agent"):
             payload["self"] = str(ctx["agent"])
+
+    self_name = payload.get("self")
+    if isinstance(self_name, str) and self_name:
+        self_member = _build_self_member(payload, self_name)
+        if self_member is not None:
+            payload["selfMember"] = self_member
 
     return _add_runtime_location_fields(payload)
 
@@ -732,49 +741,9 @@ def fork_cmd(pane_id: str, split: str, join_as: str, prompt: str):
     tmux.send_keys(new_pane, profile.resume_cmd.format(session_id=session_id))
 
 
-@cli.command("current")
+@cli.command("current", hidden=True)
 def current_cmd():
-    """Show current Hive context."""
-    _gc_dead_teams()
-    discovered = _discover_tmux_binding()
-    if discovered.get("team"):
-        _, t = _resolve_scoped_team(str(discovered.get("team")), required=False)
-        if t is not None:
-            discovered = _augment_current_payload_with_runtime(discovered, t)
-        pane_id = tmux.get_current_pane_id() or ""
-        if pane_id:
-            hive_context.save_context_for_pane(
-                pane_id,
-                team=discovered.get("team", ""),
-                workspace=discovered.get("workspace", ""),
-                agent=discovered.get("agent", ""),
-            )
-        click.echo(json.dumps(_add_runtime_location_fields(dict(discovered)), indent=2, ensure_ascii=False))
-        return
-    result: dict[str, object] = {"team": None}
-    session_name = tmux.get_current_session_name()
-    window_target = tmux.get_current_window_target()
-    current_pane = tmux.get_current_pane_id()
-    panes = tmux.list_panes_full(window_target) if window_target else []
-    result["tmux"] = {
-        "session": session_name,
-        "window": window_target,
-        "currentPane": current_pane,
-        "panes": [
-            {
-                "id": p.pane_id,
-                "command": p.command,
-                "role": p.role or member_role_for_pane(p.pane_id),
-                "agent": p.agent,
-                "team": p.team,
-            }
-            for p in panes
-        ],
-        "paneCount": len(panes),
-    }
-    result["hint"] = "No team bound. Run `hive init` to create one from this tmux window."
-
-    click.echo(json.dumps(_add_runtime_location_fields(result), indent=2, ensure_ascii=False))
+    _fail("`hive current` was removed; use `hive team` to inspect team overview + self")
 
 
 _RANDOM_AGENT_NAMES = (
@@ -860,6 +829,7 @@ def _register_agent_member(
     pane_cli: str,
     cwd: str,
     notify: bool,
+    group: str = "",
 ) -> Agent:
     agent = Agent(
         name=agent_name,
@@ -869,7 +839,7 @@ def _register_agent_member(
         cli=pane_cli,
     )
     t.agents[agent_name] = agent
-    tmux.tag_pane(pane_id, "agent", agent_name, team_name, cli=pane_cli)
+    tmux.tag_pane(pane_id, "agent", agent_name, team_name, cli=pane_cli, group=group)
     ws = _resolve_workspace(t, required=False)
     if ws:
         hive_context.save_context_for_pane(pane_id, team=team_name, workspace=ws, agent=agent_name)
@@ -1030,6 +1000,7 @@ def _maybe_route_busy_root_send(
     t: Team,
     workspace: str | Path,
     target_agent: str,
+    sender_agent: str = "",
 ) -> tuple[str, dict[str, object]]:
     from .sidecar import request_team_runtime
 
@@ -1059,6 +1030,19 @@ def _maybe_route_busy_root_send(
     reason = str(runtime.get("turnPhase") or "")
     if reason in {"task_closed", "turn_closed"}:
         return target_agent, {}
+    if sender_agent and t.resolve_peer(target_agent) == sender_agent:
+        return target_agent, {}
+    # Owner/child bypass: sender spawned target (parent -> child),
+    # or target spawned sender (child -> parent). Both are expected
+    # signaling channels, not hostile interrupts.
+    target_owner = tmux.get_pane_option(target_pane, "hive-owner") or ""
+    if sender_agent and sender_agent == target_owner:
+        return target_agent, {}
+    sender_pane = tmux.get_current_pane_id() or ""
+    if sender_pane:
+        sender_owner = tmux.get_pane_option(sender_pane, "hive-owner") or ""
+        if sender_owner and target_agent == sender_owner:
+            return target_agent, {}
     if not bool(runtime.get("busy")) and reason not in {
         "user_prompt_pending",
         "tool_result_pending_reply",
@@ -1110,6 +1094,61 @@ def _resolve_handoff_anchor_event(
     return latest
 
 
+def _find_qualified_agent_target(qualified: str) -> tuple[str, str] | None:
+    """Locate a pane by qualified agent name `<group>.<name>`.
+
+    Scans every hive-tagged pane across all sessions. Returns
+    ``(team_name, agent_name)`` on unique match or ``None`` if no match.
+    Raises ``ValueError`` when multiple panes claim the same qualified
+    name (group membership must be unique per qualified name).
+    """
+    if "." not in qualified:
+        return None
+    group_name, _, _ = qualified.partition(".")
+    if not group_name:
+        return None
+    matches = [
+        p for p in tmux.list_panes_all()
+        if p.group == group_name and p.agent == qualified
+    ]
+    if not matches:
+        return None
+    if len(matches) > 1:
+        raise ValueError(
+            f"agent '{qualified}' matches {len(matches)} panes; "
+            "group membership must be unique"
+        )
+    target = matches[0]
+    return target.team, target.agent
+
+
+def _resolve_send_target_team(to_agent: str) -> tuple[str, Team]:
+    """Resolve the team that owns *to_agent* for send/reply.
+
+    Qualified names (`<group>.<name>`) bypass the current-window check
+    and load the target pane's team directly, so cross-team sends work
+    across tmux windows. Bare names fall back to the caller's scoped
+    team (same behaviour as before).
+    """
+    if "." in to_agent:
+        try:
+            resolved = _find_qualified_agent_target(to_agent)
+        except ValueError as exc:
+            _fail(str(exc))
+            raise  # unreachable — _fail exits
+        if resolved is None:
+            _fail(
+                f"agent '{to_agent}' not found in any team "
+                f"(check @hive-group tag on the target pane)"
+            )
+            raise AssertionError("unreachable")
+        target_team_name, _ = resolved
+        return target_team_name, _load_team(target_team_name)
+    team_name, t = _resolve_scoped_team(None, required=True)
+    assert team_name is not None and t is not None
+    return team_name, t
+
+
 def _existing_team_agent(t: Team, agent_name: str) -> Agent | None:
     try:
         return t.get(agent_name)
@@ -1143,6 +1182,170 @@ def _handoff_announce_body(*, target_agent: str) -> str:
         f"Delegating this thread to {target_agent}. "
         "Their handoff message is in flight."
     )
+
+
+def _pane_last_activity(pane_id: str) -> int:
+    try:
+        return int(tmux.display_value(pane_id, "#{pane_last_activity}") or "0")
+    except (ValueError, TypeError):
+        return 0
+
+
+def _pane_is_idle_for_pairing(pane_id: str) -> bool:
+    """Return True when *pane_id* is an agent pane safe to pair with.
+
+    Uses sidecar runtime inspection (turnPhase) with a graceful fallback:
+    freshly-opened CLIs without a session yet count as idle, turn_closed
+    and task_closed count as idle, everything else is treated as 'busy'.
+    """
+    try:
+        from .sidecar import _agent_runtime_payload
+        runtime = _agent_runtime_payload(pane_id)
+    except Exception:
+        return False
+    if not runtime.get("alive", True):
+        return False
+    phase = str(runtime.get("turnPhase") or "")
+    if phase in {"turn_closed", "task_closed"}:
+        return True
+    if runtime.get("inputReason") == "no_session":
+        return True
+    return False
+
+
+def _discover_peer_candidate(current_pane: str, my_family: str) -> tmux.PaneInfo | None:
+    """Find an idle anti-family agent pane not already committed to any group.
+
+    Candidates are sorted MRU (most-recent tmux activity first); the first
+    qualifying pane wins.  Returns None when no candidate qualifies.
+    """
+    candidates: list[tuple[int, tmux.PaneInfo]] = []
+    for pane in tmux.list_panes_all():
+        if pane.pane_id == current_pane:
+            continue
+        if pane.team or pane.group:
+            continue
+        if detect_profile_for_pane(pane.pane_id) is None:
+            continue
+        other_family = family_for_pane(pane.pane_id)
+        if (
+            my_family != "unknown"
+            and other_family != "unknown"
+            and my_family == other_family
+        ):
+            continue
+        if not _pane_is_idle_for_pairing(pane.pane_id):
+            continue
+        candidates.append((_pane_last_activity(pane.pane_id), pane))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda t: t[0], reverse=True)
+    return candidates[0][1]
+
+
+def _attach_peer_to_team(
+    t: Team,
+    *,
+    current_pane: str,
+    workspace: str,
+    notify: bool,
+) -> dict[str, object] | None:
+    """`hive init` peer-group attach: discover or spawn an anti-family peer.
+
+    Tags both the lead pane and the peer pane with ``@hive-group=peer`` so
+    the pair is identifiable cross-window (mirrors how gang uses
+    ``@hive-group=gang``).  Returns a descriptor, or ``None`` when the
+    current pane has no detectable agent CLI.
+    """
+    if not current_pane:
+        return None
+    if detect_profile_for_pane(current_pane) is None:
+        return None
+
+    # Declare peer-group intent on the lead pane even if we end up finding
+    # no candidate and the spawn falls through — makes the window self-
+    # identifying.
+    tmux.set_pane_option(current_pane, "hive-group", "peer")
+
+    my_family = family_for_pane(current_pane)
+    seen_names = set(t.agents.keys())
+    seen_names.add(t.lead_name or LEAD_AGENT_NAME)
+
+    lead_name = t.lead_name or LEAD_AGENT_NAME
+
+    def _declare_pair(peer_name: str) -> None:
+        """Persist the lead↔peer pair so `hive team` reflects it even when
+        a third agent later joins the team (no reliance on the 2-agent
+        implicit derive)."""
+        try:
+            t.set_peer(lead_name, peer_name)
+        except (KeyError, ValueError):
+            pass
+
+    candidate = _discover_peer_candidate(current_pane, my_family)
+    if candidate is not None:
+        peer_name = _derive_agent_name(seen_names)
+        profile = detect_profile_for_pane(candidate.pane_id)
+        pane_cli = profile.name if profile else "claude"
+        cwd = tmux.display_value(candidate.pane_id, "#{pane_current_path}") or os.getcwd()
+
+        # Invariant: one window = one team. If the candidate sits in another
+        # tmux window, migrate it into the current window via `tmux join-pane`
+        # before tagging it as a team member. Peer is NOT cross-window (only
+        # group is — that's GANG's job).
+        my_window = tmux.get_pane_window_target(current_pane) or ""
+        their_window = tmux.get_pane_window_target(candidate.pane_id) or ""
+        if my_window and their_window and my_window != their_window:
+            tmux.join_pane(candidate.pane_id, current_pane, horizontal=True)
+
+        _register_agent_member(
+            t,
+            pane_id=candidate.pane_id,
+            team_name=t.name,
+            agent_name=peer_name,
+            pane_cli=pane_cli,
+            cwd=cwd,
+            notify=notify,
+            group="peer",
+        )
+        _declare_pair(peer_name)
+        return {
+            "mode": "discovered",
+            "pane": candidate.pane_id,
+            "name": peer_name,
+            "cli": pane_cli,
+            "pair": [lead_name, peer_name],
+        }
+
+    # Spawn fallback: create an anti-family peer pane in the current window.
+    peer_cli = peer_cli_for_family(my_family)
+    peer_name = _derive_agent_name(seen_names)
+    peer_cwd = tmux.display_value(current_pane, "#{pane_current_path}") or os.getcwd()
+    peer_agent = Agent.spawn(
+        name=peer_name,
+        team_name=t.name,
+        target_pane=current_pane,
+        cwd=peer_cwd,
+        split_horizontal=True,
+        cli=peer_cli,
+        skill="hive",
+    )
+    t.agents[peer_name] = peer_agent
+    tmux.set_pane_option(peer_agent.pane_id, "hive-group", "peer")
+    hive_context.save_context_for_pane(
+        peer_agent.pane_id,
+        team=t.name,
+        workspace=workspace,
+        agent=peer_name,
+    )
+    _declare_pair(peer_name)
+    return {
+        "mode": "spawned",
+        "pane": peer_agent.pane_id,
+        "name": peer_name,
+        "cli": peer_cli,
+        "pair": [lead_name, peer_name],
+    }
 
 
 def _register_existing_pane(
@@ -1205,6 +1408,17 @@ def init_cmd(name: str, workspace: str, notify: bool):
             panes = tmux.list_panes_full(window_target) if window_target else []
             current_info = next((pane for pane in panes if pane.pane_id == current_pane), None)
             if current_info and (not current_info.team or current_info.team == bound_team):
+                # Freeze any 2-agent implicit pair into explicit BEFORE adding
+                # a third agent — mirrors the fresh-init `_declare_pair`
+                # guarantee. Without this, registering a new member below
+                # flips peer_mode from `implicit` to `none` and the existing
+                # (auto-paired) relationship vanishes from `hive team`.
+                pair = loaded.implicit_pair()
+                if pair is not None:
+                    try:
+                        loaded.set_peer(pair[0], pair[1])
+                    except (KeyError, ValueError):
+                        pass
                 seen_names = _names_used_in_window(panes)
                 seen_names.add(loaded.lead_name or LEAD_AGENT_NAME)
                 role, member_name, member = _register_existing_pane(
@@ -1315,15 +1529,28 @@ def init_cmd(name: str, workspace: str, notify: bool):
             "isSelf": False,
         })
 
+    # `hive init` = peer group entry. Discover (or spawn) an anti-family peer
+    # so `hive team` immediately reflects the pair.  `hive gang init` takes a
+    # different entry (`_auto_init_team_for_gang`) and sets up the gang group
+    # without touching this path.
+    peer_info = _attach_peer_to_team(
+        t,
+        current_pane=current_pane or "",
+        workspace=str(ws_path),
+        notify=notify,
+    )
+
     # Start team sidecar for pending send tracking.
     _ensure_team_sidecar(t, ws_path)
 
-    result = {
+    result: dict[str, object] = {
         "team": team_name,
         "workspace": str(ws_path),
         "window": window_target,
         "panes": discovered,
     }
+    if peer_info is not None:
+        result["peer"] = peer_info
     click.echo(json.dumps(result, indent=2, ensure_ascii=False))
 
 
@@ -1331,7 +1558,8 @@ def init_cmd(name: str, workspace: str, notify: bool):
 @click.argument("pane_id")
 @click.option("--as", "name_override", default="", help="Name for the new member (default: auto-derived)")
 @click.option("--notify/--no-notify", default=True, help="Push hive skill + join message to the pane")
-def register_cmd(pane_id: str, name_override: str, notify: bool):
+@click.option("--group", "group_name", default="", help="Cross-team group tag (e.g. 'gang'). Required for qualified-name routing.")
+def register_cmd(pane_id: str, name_override: str, notify: bool, group_name: str):
     """Register an external pane into the current team."""
     if not tmux.is_inside_tmux():
         _fail("hive register requires a tmux session.")
@@ -1370,21 +1598,25 @@ def register_cmd(pane_id: str, name_override: str, notify: bool):
             pane_cli=pane_cli,
             cwd=tmux.display_value(pane_id, "#{pane_current_path}") or os.getcwd(),
             notify=notify,
+            group=group_name,
         )
         member_name = agent_name
     else:
         terminal_name = name_override or _derive_terminal_name(seen_names)
         terminal = Terminal(name=terminal_name, pane_id=pane_id)
         t.terminals[terminal_name] = terminal
-        tmux.tag_pane(pane_id, "terminal", terminal_name, team_name)
+        tmux.tag_pane(pane_id, "terminal", terminal_name, team_name, group=group_name)
         member_name = terminal_name
 
-    click.echo(json.dumps({
+    result_payload = {
         "registered": member_name,
         "role": role,
         "pane": pane_id,
         "team": team_name,
-    }, indent=2, ensure_ascii=False))
+    }
+    if group_name:
+        result_payload["group"] = group_name
+    click.echo(json.dumps(result_payload, indent=2, ensure_ascii=False))
 
 
 @cli.command()
@@ -1683,9 +1915,39 @@ def inject_cmd(agent_name: str, text: str):
 @cli.command("team")
 def team_cmd():
     """Show team overview."""
-    _, t = _resolve_scoped_team(None, required=True)
-    assert t is not None
-    click.echo(json.dumps(_team_status_payload(t), indent=2, ensure_ascii=False))
+    _gc_dead_teams()
+    discovered = _discover_tmux_binding()
+    if discovered.get("team"):
+        _, t = _resolve_scoped_team(str(discovered.get("team")), required=False)
+        if t is not None:
+            click.echo(json.dumps(_team_status_payload(t), indent=2, ensure_ascii=False))
+            return
+    result: dict[str, object] = {"team": None}
+    session_name = tmux.get_current_session_name()
+    window_target = tmux.get_current_window_target()
+    current_pane = tmux.get_current_pane_id()
+    panes = tmux.list_panes_full(window_target) if window_target else []
+    result["tmux"] = {
+        "session": session_name,
+        "window": window_target,
+        "currentPane": current_pane,
+        "panes": [
+            {
+                "id": p.pane_id,
+                "command": p.command,
+                "role": p.role or member_role_for_pane(p.pane_id),
+                "agent": p.agent,
+                "team": p.team,
+            }
+            for p in panes
+        ],
+        "paneCount": len(panes),
+    }
+    result["hint"] = "No team bound. Run `hive init` to create one from this tmux window."
+    window_id = tmux.get_current_window_id() or ""
+    if session_name and window_id:
+        result["runtimeWorkspace"] = str(_default_auto_workspace_path(session_name, window_id))
+    click.echo(json.dumps(_add_runtime_location_fields(result), indent=2, ensure_ascii=False))
 
 
 @cli.command(hidden=True)
@@ -1711,6 +1973,702 @@ def layout_cmd(preset: str):
         tmux.set_window_option(window_target, dim, "50%")
     tmux.select_layout(window_target, preset)
     click.echo(json.dumps({"layout": preset, "window": window_target}))
+
+
+BLACKBOARD_FILENAME = "BLACKBOARD.md"
+
+BLACKBOARD_STUB = """# Mission: <pending>
+
+## Goal
+<一句话>
+
+## Core concepts
+- <不变量>
+
+## Constraints
+- <边界>
+
+## Definition of done
+- [VAL-001] <断言>
+
+## Open questions
+- [OPEN] <question>
+"""
+
+_BOARD_VIM_SETUP = (
+    "set autoread",
+    "set updatetime=1000",
+    "autocmd CursorHold,CursorHoldI * silent! checktime",
+    "autocmd FocusGained,BufEnter * silent! checktime",
+    "autocmd FileChangedShellPost * echohl WarningMsg | echo 'board reloaded' | echohl None",
+    "if has('timers') | call timer_start(200, { -> execute('silent! checktime') }, {'repeat': -1}) | endif",
+    "autocmd BufWritePost <buffer> silent! call job_start(['hive', 'board', 'ping'])",
+)
+
+
+def _tag_pane_as_board(pane_id: str, team_name: str, name: str) -> None:
+    tmux.set_pane_option(pane_id, "hive-role", "board")
+    tmux.set_pane_option(pane_id, "hive-agent", name)
+    tmux.set_pane_option(pane_id, "hive-team", team_name)
+    tmux.set_pane_title(pane_id, "BLACKBOARD")
+
+
+def _ensure_blackboard(path: Path) -> None:
+    if path.is_file():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(BLACKBOARD_STUB)
+
+
+@cli.group("board")
+def board_cmd():
+    """Blackboard utilities: open, bind, ping, path."""
+
+
+@board_cmd.command("path")
+def board_path_cmd():
+    """Print absolute path to the team's BLACKBOARD.md."""
+    _, t = _resolve_scoped_team(None, required=True)
+    assert t is not None
+    ws = _resolve_workspace(t, required=True)
+    click.echo(str(Path(ws) / BLACKBOARD_FILENAME))
+
+
+@board_cmd.command("bind")
+@click.option("--name", default="board", help="Pane member name (default: board)")
+def board_bind_cmd(name: str):
+    """Tag the current pane as the blackboard seat (role=board, pane title set)."""
+    if not tmux.is_inside_tmux():
+        _fail("must run inside tmux")
+    pane_id = tmux.get_current_pane_id() or ""
+    if not pane_id:
+        _fail("no current tmux pane id")
+    _, t = _resolve_scoped_team(None, required=True)
+    assert t is not None
+    _tag_pane_as_board(pane_id, t.name, name)
+    click.echo(json.dumps({
+        "paneId": pane_id,
+        "role": "board",
+        "name": name,
+        "team": t.name,
+    }, indent=2))
+
+
+@board_cmd.command("open")
+@click.option("--name", default="board", help="Pane member name (default: board)")
+def board_open_cmd(name: str):
+    """Bind current pane as board and replace shell with vim on BLACKBOARD.md.
+
+    Creates BLACKBOARD.md from stub if missing. Loads autoread + 200ms timer
+    so external edits (by orch) reflect in the vim buffer within 200ms.
+    """
+    if not tmux.is_inside_tmux():
+        _fail("must run inside tmux")
+    pane_id = tmux.get_current_pane_id() or ""
+    if not pane_id:
+        _fail("no current tmux pane id")
+    _, t = _resolve_scoped_team(None, required=True)
+    assert t is not None
+    ws = _resolve_workspace(t, required=True)
+    blackboard = Path(ws) / BLACKBOARD_FILENAME
+    _ensure_blackboard(blackboard)
+    _tag_pane_as_board(pane_id, t.name, name)
+    vim_args = ["vim"]
+    for cmd in _BOARD_VIM_SETUP:
+        vim_args.extend(["-c", cmd])
+    vim_args.append(str(blackboard))
+    os.execvp(vim_args[0], vim_args)
+
+
+_BOARD_DIFF_INLINE_MAX_LINES = 40
+
+
+def _compute_board_diff(ws_path: Path, blackboard: Path) -> tuple[str, str, Path | None]:
+    """Compute unified diff since last snapshot; update snapshot; write full artifact.
+
+    Returns (ts, diff_text, artifact_path).
+    diff_text == "" means no diff (snapshot unchanged); artifact_path is None then.
+    """
+    snapshot = ws_path / ".board-snapshot.md"
+    new_text = blackboard.read_text()
+    old_text = snapshot.read_text() if snapshot.is_file() else ""
+    diff_lines = list(difflib.unified_diff(
+        old_text.splitlines(keepends=True),
+        new_text.splitlines(keepends=True),
+        fromfile="before",
+        tofile="after",
+        n=3,
+    ))
+    snapshot.write_text(new_text)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    if not diff_lines:
+        return ts, "", None
+    diff_text = "".join(diff_lines)
+    ping_dir = ws_path / "artifacts" / "board-pings"
+    ping_dir.mkdir(parents=True, exist_ok=True)
+    artifact_path = ping_dir / f"{ts}.md"
+    artifact_path.write_text(
+        f"# Board ping {ts}\n\n```diff\n{diff_text}```\n\n---\n\n# Current full BLACKBOARD.md\n\n{new_text}"
+    )
+    return ts, diff_text, artifact_path
+
+
+def _inject_board_diff_block(orch_pane: str, block: str) -> None:
+    """Inject a BOARD-DIFF block into orch pane via bracketed paste + Enter."""
+    buffer_name = f"hive-board-{secrets.token_hex(4)}"
+    tmux.load_buffer(buffer_name, block + "\n")
+    try:
+        tmux.paste_buffer(buffer_name, orch_pane, bracketed=True)
+        tmux.send_key(orch_pane, "Enter")
+    finally:
+        tmux.delete_buffer(buffer_name)
+
+
+@board_cmd.command("ping")
+def board_ping_cmd():
+    """Inject a BOARD-DIFF block into the orch pane.
+
+    - No diff since last ping → skip injection (still seeds snapshot on first call).
+    - Small diff (≤40 lines) → diff is embedded inline in the block.
+    - Large diff → block carries `artifact=<path>`; full diff + current content
+      are at `artifacts/board-pings/<ts>.md`.
+    """
+    _, t = _resolve_scoped_team(None, required=True)
+    assert t is not None
+    ws = _resolve_workspace(t, required=True)
+    ws_path = Path(ws)
+    blackboard = ws_path / BLACKBOARD_FILENAME
+    if not blackboard.is_file():
+        _fail(f"no BLACKBOARD.md at {blackboard}")
+    ts, diff_text, artifact_path = _compute_board_diff(ws_path, blackboard)
+    if not diff_text:
+        click.echo(json.dumps({"status": "no-diff", "ts": ts}, ensure_ascii=False))
+        return
+    orch_pane = t.lead_pane_id
+    if not orch_pane:
+        lead_name = t.lead_name or LEAD_AGENT_NAME
+        lead_agent = t.agents.get(lead_name)
+        if lead_agent:
+            orch_pane = lead_agent.pane_id
+    if not orch_pane:
+        # Gang teams tag orch as role=agent with name "gang.orch", so no
+        # lead is ever resolved above. Fall through to the gang canonical name.
+        gang_orch = t.agents.get("gang.orch")
+        if gang_orch:
+            orch_pane = gang_orch.pane_id
+    if not orch_pane:
+        _fail("no orch/lead pane bound in this team")
+    diff_line_count = diff_text.count("\n") + (0 if diff_text.endswith("\n") else 1)
+    inline = diff_line_count <= _BOARD_DIFF_INLINE_MAX_LINES
+    if inline:
+        body = diff_text.rstrip()
+    else:
+        body = f"(diff too large: {diff_line_count} lines)\nartifact={artifact_path}"
+    block = f"<BOARD-DIFF at={ts}>\n{body}\n</BOARD-DIFF>"
+    _inject_board_diff_block(orch_pane, block)
+    click.echo(json.dumps({
+        "status": "ok",
+        "ts": ts,
+        "diffLines": diff_line_count,
+        "inline": inline,
+        "artifact": str(artifact_path) if artifact_path else None,
+        "orchPane": orch_pane,
+    }, ensure_ascii=False))
+
+
+@cli.group("gang")
+def gang_cmd():
+    """GANG squad (orch + board + on-demand peers) management."""
+
+
+def _wait_for_peer_ready(
+    workspace: str,
+    *,
+    team_name: str,
+    agents: set[str],
+    timeout_seconds: float = 30.0,
+    poll_interval: float = 0.5,
+) -> set[str]:
+    """Poll sidecar team-runtime until every agent's first skill turn completes.
+
+    An agent is considered ready when ``inputState == 'ready'`` — i.e. the
+    sidecar's input gate sees the transcript in a "clear" state, which
+    happens after the dispatched skill has finished its bootstrap turn (the
+    `hive team` self-identification call returns + assistant replies + CLI
+    waits for next input). Returns the set of agents still not ready when
+    the deadline expires (empty set = all ready).
+    """
+    from .sidecar import request_team_runtime
+
+    deadline = time.monotonic() + timeout_seconds
+    waiting = set(agents)
+    while waiting and time.monotonic() < deadline:
+        runtime_payload = request_team_runtime(workspace, team=team_name) or {}
+        members = runtime_payload.get("members") if isinstance(runtime_payload, dict) else None
+        if isinstance(members, dict):
+            still: set[str] = set()
+            for name in waiting:
+                member = members.get(name) or {}
+                if isinstance(member, dict) and member.get("inputState") == "ready":
+                    continue
+                still.add(name)
+            waiting = still
+        if waiting:
+            time.sleep(poll_interval)
+    return waiting
+
+
+def _pick_gang_orientation(window_target: str) -> str:
+    """Return 'horizontal' or 'vertical' based on window aspect ratio."""
+    w, h = tmux.window_size(window_target)
+    if w and h and w > h * 1.5:
+        return "horizontal"
+    return "vertical"
+
+
+def _apply_gang_layout(window_target: str) -> str:
+    """Apply the canonical GANG layout (auto-picked by aspect ratio).
+
+    - horizontal window → tmux `main-vertical` with main-pane-width=67%
+      (orch main on left; board + skeptic stacked right)
+    - vertical window → tmux `even-vertical` (all 3 stacked equally)
+    """
+    orientation = _pick_gang_orientation(window_target)
+    if orientation == "horizontal":
+        tmux.set_window_option(window_target, "main-pane-width", "50%")
+        tmux.select_layout(window_target, "main-vertical")
+    else:
+        tmux.select_layout(window_target, "even-vertical")
+    return orientation
+
+
+def _auto_init_team_for_gang() -> Team:
+    """Return a team bound to current pane, auto-creating one if missing.
+
+    Lightweight version of `hive init` so `hive gang init` can be run
+    standalone. Reuses existing team if the pane is already bound; otherwise
+    creates a fresh team + workspace + sidecar and tags current pane as lead.
+    """
+    _gc_dead_teams()
+    binding = _discover_tmux_binding()
+    if binding.get("team"):
+        return _load_team(binding["team"])
+
+    session_name = tmux.get_current_session_name() or "hive"
+    window_index = tmux.get_current_window_index() or "0"
+    window_id = tmux.get_current_window_id() or ""
+    window_target = tmux.get_current_window_target() or ""
+
+    # Clear stale window options so Team.create can re-bind cleanly.
+    if window_target and tmux.get_window_option(window_target, "hive-team"):
+        for key in ("hive-team", "hive-workspace", "hive-desc", "hive-created", "hive-peers"):
+            tmux.clear_window_option(window_target, f"@{key}")
+
+    team_name = f"{session_name}-{window_index}"
+    ws_path = _default_auto_workspace_path(session_name, window_id or window_index)
+
+    from .sidecar import stop_sidecar
+    stop_sidecar(str(ws_path))
+    bus.reset_workspace(ws_path)
+
+    try:
+        t = Team.create(
+            team_name,
+            description=f"auto-init from gang init ({session_name}:{window_index})",
+            workspace=str(ws_path),
+        )
+    except ValueError as e:
+        _fail(str(e))
+        raise AssertionError("unreachable")
+
+    _remember_context(team=team_name, workspace=str(ws_path), agent=LEAD_AGENT_NAME)
+    _ensure_team_sidecar(t, ws_path)
+    return t
+
+
+def _start_board_vim(board_pane: str, blackboard: Path) -> None:
+    """Replace board pane's shell with vim on BLACKBOARD.md."""
+    vim_args = ["vim"]
+    for cmd in _BOARD_VIM_SETUP:
+        vim_args.extend(["-c", cmd])
+    vim_args.append(str(blackboard))
+    tmux.send_keys(board_pane, "exec " + " ".join(shlex.quote(a) for a in vim_args))
+
+
+@gang_cmd.command("init")
+@click.option(
+    "--peer-cli",
+    type=click.Choice(["claude", "codex", "droid"]),
+    default=None,
+    help="CLI for skeptic (default: anti-family of current pane's CLI; override if droid wraps an Anthropic model)",
+)
+def gang_init_cmd(peer_cli: str | None):
+    """Break current pane into a dedicated 'gang' window (orch + skeptic + board).
+
+    Standalone — no need to run `hive init` first. Must run from a pane that's
+    already running an agent CLI (claude / codex / droid); that CLI becomes
+    orch's session. If the pane isn't yet bound to a team, one is auto-created
+    (mirrors `hive init`).
+
+    The current pane is moved (tmux break-pane) into a new window named 'gang'
+    where it becomes the orch pane (CLI keeps running). Two more panes are
+    added:
+      - skeptic: newly spawned same-CLI agent with gang-skeptic skill
+      - board: vim on BLACKBOARD.md (gang.board)
+
+    Layout auto-picks based on window aspect ratio:
+      - horizontal (wide): orch + skeptic stacked left column, board right
+      - vertical (tall): orch / skeptic / board stacked top-to-bottom
+
+    Focus switches to the new gang window after init.
+    """
+    if not tmux.is_inside_tmux():
+        _fail("must run inside tmux")
+
+    current_pane = tmux.get_current_pane_id() or ""
+    if not current_pane:
+        _fail("cannot determine current pane")
+
+    profile = detect_profile_for_pane(current_pane)
+    if profile is None:
+        _fail("current pane must be running claude / codex / droid (this will become orch)")
+
+    # Auto-init team if not yet bound (standalone start; no prior `hive init` needed).
+    t = _auto_init_team_for_gang()
+    ws = _resolve_workspace(t, required=True)
+
+    orch_cli = _resolve_spawn_cli_name(None)
+    peer_cli_name = peer_cli or anti_peer_cli(orch_cli)
+
+    orch_cwd = tmux.display_value(current_pane, "#{pane_current_path}") or ws
+
+    if tmux.get_pane_count(current_pane) <= 1:
+        current_window = tmux.display_value(current_pane, "#{session_name}:#{window_index}")
+        if not current_window:
+            _fail("cannot determine current window")
+        tmux.rename_window(current_window, "gang")
+        gang_window, orch_pane = current_window, current_pane
+    else:
+        gang_window, orch_pane = tmux.break_pane(current_pane, name="gang")
+        if not gang_window:
+            _fail("failed to break-pane into new window")
+
+    tmux.set_window_option(gang_window, "@hive-team", t.name)
+    tmux.set_window_option(gang_window, "@hive-workspace", t.workspace or ws)
+    if t.description:
+        tmux.set_window_option(gang_window, "@hive-desc", t.description)
+    tmux.set_window_option(gang_window, "@hive-created", str(t.created_at or time.time()))
+
+    tmux.set_pane_option(orch_pane, "hive-role", "agent")
+    tmux.set_pane_option(orch_pane, "hive-agent", "gang.orch")
+    tmux.set_pane_option(orch_pane, "hive-team", t.name)
+    tmux.set_pane_option(orch_pane, "hive-group", "gang")
+    tmux.set_pane_option(orch_pane, "hive-cli", orch_cli)
+
+    # Create 3 panes. Sizes here are placeholders — _apply_gang_layout
+    # redistributes via tmux preset (main-vertical / even-vertical / ...).
+    # Use orch's cwd (user's project dir) for children, not Hive's workspace
+    # state dir — skeptic needs to see the same codebase orch sees.
+    board_pane = tmux.split_window(orch_pane, horizontal=True, size="50%", cwd=orch_cwd)
+    skeptic_agent = Agent.spawn(
+        name="gang.skeptic",
+        team_name=t.name,
+        target_pane=orch_pane,
+        cwd=orch_cwd,
+        split_horizontal=False,
+        split_size="50%",
+        skill="gang-skeptic",
+        cli=peer_cli_name,
+    )
+
+    tmux.set_pane_option(skeptic_agent.pane_id, "hive-group", "gang")
+
+    _tag_pane_as_board(board_pane, t.name, "gang.board")
+    tmux.set_pane_option(board_pane, "hive-group", "gang")
+
+    blackboard = Path(ws) / BLACKBOARD_FILENAME
+    _ensure_blackboard(blackboard)
+    _start_board_vim(board_pane, blackboard)
+
+    orientation = _apply_gang_layout(gang_window)
+
+    # Declare the gang.orch ↔ gang.skeptic pair now that both panes are
+    # tagged. Reload the team so set_peer sees both names in peer_member_names.
+    try:
+        reloaded = Team.load(t.name, prefer_pane=orch_pane)
+        reloaded.set_peer("gang.orch", "gang.skeptic")
+    except (FileNotFoundError, KeyError, ValueError):
+        pass
+
+    dispatched: list[str] = ["gang.skeptic"]
+    profile = detect_profile_for_pane(orch_pane)
+    if profile is not None:
+        skill_cmd = profile.skill_cmd.format(name="gang-orch")
+        tmux.send_keys(orch_pane, skill_cmd, enter=False)
+        time.sleep(0.1)
+        for _ in range(2 if profile.name == "codex" else 1):
+            tmux.send_key(orch_pane, "Enter")
+        dispatched.insert(0, "gang.orch")
+
+    tmux.select_window(gang_window)
+
+    click.echo(json.dumps({
+        "team": t.name,
+        "window": gang_window,
+        "group": "gang",
+        "orientation": orientation,
+        "orch": {"pane": orch_pane, "name": "gang.orch"},
+        "skeptic": {"pane": skeptic_agent.pane_id, "name": "gang.skeptic"},
+        "board": {"pane": board_pane, "name": "gang.board", "path": str(blackboard)},
+        "dispatched": dispatched,
+    }, indent=2))
+
+
+def _next_gang_window_index(session: str) -> int:
+    """Next monotonic tmux window index (>= 1000) in *session*.
+
+    Gang peer windows live at explicit indices 1000+ so they never collide
+    with the user's regular windows (typically 0-99). Scans current session
+    window indices, filters for >= 1000, returns max+1 (or 1000 if none).
+    The peer business id (worker/validator/team suffix) reuses this same
+    index so a single number threads tmux → team → agent naming.
+    """
+    ge_1000 = [i for i in tmux.list_window_indices(session) if i >= 1000]
+    return (max(ge_1000) + 1) if ge_1000 else 1000
+
+
+# Default tmux window name for a freshly-spawned gang peer. Orch renames
+# via `tmux rename-window` as the peer progresses: `pending` →
+# `<feature>-running` → `<feature>-done` / `<feature>-fail`. Tmux index
+# 1000+ already disambiguates peers, so the name carries no index noise.
+_GANG_PEER_WINDOW_NAME_INITIAL = "pending"
+
+
+@gang_cmd.command("spawn-peer")
+def gang_spawn_peer_cmd():
+    """Spawn a fresh peer pair (worker + validator) for one feature.
+
+    Auto-places the peer at tmux window index 1000+ (monotonic, never
+    reusing an existing index) so the peer window never collides with the
+    user's regular low-index windows. The same number threads through tmux
+    window, team name, and agent names — `$session:1000` pairs with team
+    `<main>-peer-1000` / `gang.worker-1000` / `gang.validator-1000`.
+
+    Initial window name is `pending`; orch renames via `tmux rename-window`
+    as the lifecycle advances (`<feature>-running/done/fail`).
+
+    Worker runs claude, validator runs codex. Both tagged `@hive-group=gang`
+    and `@hive-owner=gang.orch` for owner-bypass routing.
+    """
+    if not tmux.is_inside_tmux():
+        _fail("must run inside tmux")
+
+    current_pane = tmux.get_current_pane_id() or ""
+    if not current_pane:
+        _fail("cannot determine current pane")
+
+    caller_group = tmux.get_pane_option(current_pane, "hive-group") or ""
+    if caller_group != "gang":
+        _fail("current pane is not part of a GANG; run from the orch pane after `hive gang init`")
+
+    _, main_team = _resolve_scoped_team(None, required=True)
+    if main_team is None:
+        _fail("no team bound to current window")
+
+    session = main_team.tmux_session or tmux.get_current_session_name() or ""
+    if not session:
+        _fail("cannot determine tmux session")
+
+    n = _next_gang_window_index(session)
+    worker_name = f"gang.worker-{n}"
+    validator_name = f"gang.validator-{n}"
+    clashes = [
+        p for p in tmux.list_panes_all()
+        if p.agent in {worker_name, validator_name}
+    ]
+    if clashes:
+        _fail(
+            f"auto-picked index={n} but panes already use {sorted({p.agent for p in clashes})}; "
+            "stale pane naming — kill them manually"
+        )
+
+    workspace = main_team.workspace or ""
+    # Ensure shared artifact dirs exist so orch/worker/validator can drop files
+    # without stat'ing first. Idempotent; safe to call on every spawn-peer.
+    if workspace:
+        artifacts_root = Path(workspace) / "artifacts"
+        for sub in ("tasks", "handoffs", "verdicts"):
+            (artifacts_root / sub).mkdir(parents=True, exist_ok=True)
+    peer_team_name = f"{main_team.name}-peer-{n}"
+    window_name = _GANG_PEER_WINDOW_NAME_INITIAL
+    # Prefer orch pane's cwd (user's project dir) over Hive workspace state dir.
+    cwd = tmux.display_value(current_pane, "#{pane_current_path}") or workspace or os.getcwd()
+
+    peer_window, shell_pane = tmux.new_window(session, name=window_name, cwd=cwd, index=n)
+    if not shell_pane:
+        _fail(f"failed to create window {session}:{n}")
+
+    tmux.set_window_option(peer_window, "@hive-team", peer_team_name)
+    tmux.set_window_option(peer_window, "@hive-workspace", workspace)
+    tmux.set_window_option(peer_window, "@hive-created", str(time.time()))
+
+    peer_team = Team(
+        name=peer_team_name,
+        workspace=workspace,
+        tmux_session=session,
+        tmux_window=peer_window,
+        tmux_window_id=tmux.get_window_id(peer_window) or "",
+    )
+
+    orientation = _pick_gang_orientation(peer_window)
+    split_horizontal = orientation == "horizontal"
+
+    worker_agent = Agent.spawn(
+        name=worker_name,
+        team_name=peer_team_name,
+        target_pane=shell_pane,
+        cwd=cwd,
+        split_window=False,
+        skill="gang-worker",
+        cli="claude",
+    )
+    tmux.set_pane_option(worker_agent.pane_id, "hive-group", "gang")
+    tmux.set_pane_option(worker_agent.pane_id, "hive-owner", "gang.orch")
+    peer_team.agents[worker_name] = worker_agent
+
+    validator_agent = Agent.spawn(
+        name=validator_name,
+        team_name=peer_team_name,
+        target_pane=worker_agent.pane_id,
+        cwd=cwd,
+        split_horizontal=split_horizontal,
+        split_size="50%",
+        skill="gang-validator",
+        cli="codex",
+    )
+    tmux.set_pane_option(validator_agent.pane_id, "hive-group", "gang")
+    tmux.set_pane_option(validator_agent.pane_id, "hive-owner", "gang.orch")
+    peer_team.agents[validator_name] = validator_agent
+
+    # Declare the worker ↔ validator pair so `hive team` reflects it explicitly.
+    try:
+        peer_team.set_peer(worker_name, validator_name)
+    except (KeyError, ValueError):
+        pass
+
+    # Block until both peer agents settle into a quiescent phase before
+    # returning success. A fresh CLI pane emits the prompt (inputState=ready)
+    # before the skill file has finished loading, so an immediate send after
+    # spawn-peer would race the skill. Poll sidecar team-runtime until both
+    # worker and validator report ready + task_closed/turn_closed.
+    _ensure_team_sidecar(peer_team, workspace)
+    not_ready = _wait_for_peer_ready(
+        workspace,
+        team_name=peer_team_name,
+        agents={worker_name, validator_name},
+    )
+    if not_ready:
+        click.echo(json.dumps({
+            "status": "spawn_ready_timeout",
+            "window": peer_window,
+            "notReady": sorted(not_ready),
+            "hint": "panes spawned but skill did not reach ready within 30s; inspect manually",
+        }, indent=2))
+        sys.exit(1)
+
+    click.echo(json.dumps({
+        "group": "gang",
+        "peerTeam": peer_team_name,
+        "window": peer_window,
+        "windowName": window_name,
+        "workspace": workspace,
+        "orientation": orientation,
+        "panes": {
+            worker_name: worker_agent.pane_id,
+            validator_name: validator_agent.pane_id,
+        },
+    }, indent=2))
+
+
+@gang_cmd.command("layout")
+def gang_layout_cmd():
+    """Re-apply the canonical GANG layout to the current gang window.
+
+    Auto-picks by aspect ratio:
+      - horizontal window → orch main left (67%), board + skeptic stacked right
+      - vertical window   → 3 panes stacked equally
+
+    Useful after manually dragging panes or switching between monitors.
+    """
+    if not tmux.is_inside_tmux():
+        _fail("must run inside tmux")
+    current_pane = tmux.get_current_pane_id() or ""
+    window_target = tmux.get_pane_window_target(current_pane) if current_pane else ""
+    if not window_target:
+        _fail("cannot determine current window target")
+    orientation = _apply_gang_layout(window_target)
+    click.echo(json.dumps({"orientation": orientation, "window": window_target}, indent=2))
+
+
+def _is_peer_team_name(name: str) -> bool:
+    """True if *name* matches the `<main>-peer-<N>` pattern used by spawn-peer."""
+    idx = name.rfind("-peer-")
+    if idx < 0:
+        return False
+    suffix = name[idx + len("-peer-"):]
+    return bool(suffix) and suffix.isdigit()
+
+
+@gang_cmd.command("cleanup")
+def gang_cleanup_cmd():
+    """Kill all peer-N windows of the current gang.
+
+    Run this only after every feature is DONE and the human has signed off —
+    timing is enforced by the gang-orch skill, not the CLI. No flags, no
+    `[OPEN]` safety checks. The main gang window (orch / skeptic / board)
+    is never touched.
+    """
+    if not tmux.is_inside_tmux():
+        _fail("must run inside tmux")
+
+    current_pane = tmux.get_current_pane_id() or ""
+    if not current_pane:
+        _fail("cannot determine current pane")
+
+    caller_group = tmux.get_pane_option(current_pane, "hive-group") or ""
+    if caller_group != "gang":
+        _fail("current pane is not part of a GANG; run from the orch pane")
+
+    _, main_team = _resolve_scoped_team(None, required=True)
+    assert main_team is not None
+
+    if _is_peer_team_name(main_team.name):
+        _fail(
+            f"current pane is bound to peer team {main_team.name!r}; "
+            "run cleanup from the main gang window (orch / skeptic / board)"
+        )
+
+    from .team import list_teams
+
+    prefix = f"{main_team.name}-peer-"
+    peer_entries = [t for t in list_teams() if t.get("name", "").startswith(prefix)]
+
+    killed_windows: list[str] = []
+    killed_teams: list[str] = []
+    for entry in peer_entries:
+        peer_name = entry.get("name", "")
+        window_target = entry.get("tmuxWindow", "")
+        if window_target:
+            tmux.kill_window(window_target)
+            for key in ("hive-team", "hive-workspace", "hive-desc", "hive-created", "hive-peers"):
+                tmux.clear_window_option(window_target, f"@{key}")
+            killed_windows.append(window_target)
+        killed_teams.append(peer_name)
+
+    click.echo(json.dumps({
+        "killedWindows": killed_windows,
+        "killedTeams": killed_teams,
+    }, indent=2))
 
 
 @cli.command("status-set", hidden=True, context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
@@ -1781,8 +2739,7 @@ def send(
       - `failed`: submit errored OR target pane never rendered msgId before timeout. Retry.
     """
     _reject_legacy_recipient_options(to_option, msg_option, command="send", to_agent=to_agent)
-    team_name, t = _resolve_scoped_team(None, required=True)
-    assert team_name is not None and t is not None
+    team_name, t = _resolve_send_target_team(to_agent)
     sender = _resolve_sender(None)
     ws = _resolve_workspace(t, required=True)
     _validate_root_send_protocol(body, artifact)
@@ -1790,6 +2747,7 @@ def send(
         t=t,
         workspace=ws,
         target_agent=to_agent,
+        sender_agent=sender,
     )
     resolved_artifact = _resolve_artifact_path(artifact, workspace=ws)
     try:
@@ -1847,8 +2805,7 @@ def reply(
     competing threads.
     """
     _reject_legacy_recipient_options(to_option, msg_option, command="reply", to_agent=to_agent)
-    team_name, t = _resolve_scoped_team(None, required=True)
-    assert team_name is not None and t is not None
+    team_name, t = _resolve_send_target_team(to_agent)
     sender = _resolve_sender(None)
     ws = _resolve_workspace(t, required=True)
 
@@ -2015,10 +2972,18 @@ def interrupt(agent_name: str):
 @cli.command()
 @click.argument("agent_name")
 def kill(agent_name: str):
-    """Kill an agent pane and remove it from the team."""
-    _, t = _resolve_scoped_team(None, required=True)
-    assert t is not None
-    agent = t.get(agent_name)
+    """Kill an agent pane and remove it from the team.
+
+    Qualified names (`<group>.<name>`) resolve across teams so you can
+    kill a peer-team agent from the main group pane. Bare names resolve
+    against the caller's scoped team.
+    """
+    _, t = _resolve_send_target_team(agent_name)
+    try:
+        agent = t.get(agent_name)
+    except KeyError:
+        _fail(f"agent '{agent_name}' not found")
+        return
     agent.kill()
     if agent_name in t.agents:
         del t.agents[agent_name]

@@ -281,6 +281,9 @@ def test_send_busy_unknown_root_forks_target_and_primes_clone_context(runner, co
         def get(self, name: str):
             return self.members[name]
 
+        def resolve_peer(self, _name):
+            return None
+
     team = _FakeTeam()
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
@@ -374,6 +377,9 @@ def test_send_busy_safe_root_does_not_fork_and_direct_sends_to_target(runner, co
         def get(self, name: str):
             return self.members[name]
 
+        def resolve_peer(self, _name):
+            return None
+
     team = _FakeTeam()
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
@@ -417,6 +423,89 @@ def test_send_busy_safe_root_does_not_fork_and_direct_sends_to_target(runner, co
     assert events[0]["to"] == "gpt"
 
 
+def test_send_peer_bypass_skips_fork_when_sender_is_target_peer(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    _patch_ack(monkeypatch)
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    artifact = _write_artifact(tmp_path, "peer-bypass.md", "peer detail")
+
+    class _FakeAgent:
+        def __init__(self, name: str, pane_id: str, *, cli: str = "claude") -> None:
+            self.name = name
+            self.pane_id = pane_id
+            self.cli = cli
+            self.sent: list[str] = []
+
+        def is_alive(self) -> bool:
+            return True
+
+        def send(self, text: str) -> None:
+            self.sent.append(text)
+
+    class _FakeTeam:
+        def __init__(self) -> None:
+            self.workspace = str(workspace)
+            self.name = "team-x"
+            self.tmux_session = "dev"
+            self.tmux_window = "dev:0"
+            self.lead_name = "orch"
+            self.members = {"gpt": _FakeAgent("gpt", "%99")}
+
+        def get(self, name: str):
+            return self.members[name]
+
+        def resolve_peer(self, name: str):
+            return "claude" if name == "gpt" else None
+
+    team = _FakeTeam()
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
+    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
+    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="claude"))
+    monkeypatch.setattr("hive.cli.resolve_session_id_for_pane", lambda _pane_id, profile=None: "sess-1")
+    _patch_sidecar_requests(monkeypatch, team)
+
+    def _runtime_payload(pane_id: str):
+        if pane_id == "%99":
+            return {
+                "alive": True,
+                "busy": True,
+                "inputState": "ready",
+                "turnPhase": "assistant_text_idle",
+            }
+        return {
+            "alive": True,
+            "busy": False,
+            "inputState": "ready",
+            "turnPhase": "task_closed",
+        }
+
+    monkeypatch.setattr("hive.sidecar._agent_runtime_payload", _runtime_payload)
+
+    def _fork_registered_agent(*_args, **_kwargs):
+        raise AssertionError("peer_bypass should prevent fork when sender is target's peer")
+
+    monkeypatch.setattr("hive.cli._fork_registered_agent", _fork_registered_agent)
+
+    result = runner.invoke(cli, ["send", "gpt", "ack online", "--artifact", artifact])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["to"] == "gpt"
+    assert "routingMode" not in payload
+    assert "routingReason" not in payload
+    assert "effectiveTarget" not in payload
+
+    original = team.members["gpt"]
+    assert "gpt-c1" not in team.members
+    assert len(original.sent) == 1
+    assert original.sent[0] == f"<HIVE from=claude to=gpt msgId={FIXED_ID} artifact={artifact}>\nack online\n</HIVE>"
+
+    events = bus.read_all_events(workspace)
+    assert len(events) == 1
+    assert events[0]["to"] == "gpt"
+
+
 def test_send_busy_root_forks_even_when_turn_phase_is_unsafe(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     _patch_ack(monkeypatch)
@@ -448,6 +537,9 @@ def test_send_busy_root_forks_even_when_turn_phase_is_unsafe(runner, configure_h
 
         def get(self, name: str):
             return self.members[name]
+
+        def resolve_peer(self, _name):
+            return None
 
     team = _FakeTeam()
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
@@ -524,6 +616,9 @@ def test_send_false_busy_with_active_turn_reason_forks(runner, configure_hive_ho
         def get(self, name: str):
             return self.members[name]
 
+        def resolve_peer(self, _name):
+            return None
+
     team = _FakeTeam()
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
@@ -598,6 +693,9 @@ def test_send_false_busy_with_non_active_turn_reason_does_not_fork(runner, confi
         def get(self, name: str):
             return self.members[name]
 
+        def resolve_peer(self, _name):
+            return None
+
     team = _FakeTeam()
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
@@ -661,6 +759,9 @@ def test_send_busy_root_falls_back_to_direct_send_when_fork_is_unavailable(runne
 
         def get(self, name: str):
             return self.members[name]
+
+        def resolve_peer(self, _name):
+            return None
 
     team = _FakeTeam()
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
