@@ -35,6 +35,20 @@ def test_find_qualified_finds_unique_match(monkeypatch):
     )
 
 
+def test_find_qualified_supports_public_gang_name_namespace(monkeypatch):
+    panes = [
+        _pane("peaky.worker-1000", "dev-0-peer-1000", "peaky", "%1"),
+        _pane("shelby.worker-1000", "dev-1-peer-1000", "shelby", "%2"),
+        _pane("peaky.orch", "dev-0", "peaky", "%3"),
+    ]
+    monkeypatch.setattr("hive.cli.tmux.list_panes_all", lambda: panes)
+
+    assert cli_module._find_qualified_agent_target("peaky.worker-1000") == (
+        "dev-0-peer-1000",
+        "peaky.worker-1000",
+    )
+
+
 def test_find_qualified_returns_none_when_agent_missing(monkeypatch):
     panes = [_pane("gang.worker-1", "peer-1", "gang", "%1")]
     monkeypatch.setattr("hive.cli.tmux.list_panes_all", lambda: panes)
@@ -58,6 +72,15 @@ def test_find_qualified_ignores_mismatched_group(monkeypatch):
     monkeypatch.setattr("hive.cli.tmux.list_panes_all", lambda: panes)
 
     assert cli_module._find_qualified_agent_target("gang.worker-1") is None
+
+
+def test_find_qualified_ignores_same_suffix_in_other_public_gang(monkeypatch):
+    panes = [
+        _pane("shelby.worker-1000", "dev-1-peer-1000", "shelby", "%2"),
+    ]
+    monkeypatch.setattr("hive.cli.tmux.list_panes_all", lambda: panes)
+
+    assert cli_module._find_qualified_agent_target("peaky.worker-1000") is None
 
 
 def test_find_qualified_requires_non_empty_group_prefix():
@@ -84,3 +107,25 @@ def test_resolve_send_target_team_loads_target_team_for_qualified_name(monkeypat
     assert team_name == "peer-1"
     assert loaded == ["peer-1"]
     assert t.name == "peer-1"
+
+
+def test_resolve_send_target_team_loads_target_team_for_public_gang_name(monkeypatch):
+    """Qualified public gang names should resolve exactly like legacy `gang.x`."""
+    from types import SimpleNamespace
+
+    panes = [_pane("peaky.worker-1000", "dev-0-peer-1000", "peaky", "%1")]
+    monkeypatch.setattr("hive.cli.tmux.list_panes_all", lambda: panes)
+
+    loaded: list[str] = []
+
+    def fake_load(name: str):
+        loaded.append(name)
+        return SimpleNamespace(name=name)
+
+    monkeypatch.setattr("hive.cli._load_team", fake_load)
+
+    team_name, t = cli_module._resolve_send_target_team("peaky.worker-1000")
+
+    assert team_name == "dev-0-peer-1000"
+    assert loaded == ["dev-0-peer-1000"]
+    assert t.name == "dev-0-peer-1000"

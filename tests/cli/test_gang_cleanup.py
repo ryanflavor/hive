@@ -73,8 +73,9 @@ def _prep_gang_with_peers(configure_hive_home, monkeypatch, peer_indices):
     configure_hive_home(current_pane="%100", session_name="dev")
     import hive.cli as cli_mod
 
-    # Tag current pane as orch of main gang team.
-    cli_mod.tmux.tag_pane("%100", "agent", "gang.orch", "dev-0", group="gang")
+    # Tag current pane as orch of main gang team (using a real gang instance
+    # name from the canonical pool; legacy literal "gang" is rejected).
+    cli_mod.tmux.tag_pane("%100", "agent", "peaky.orch", "dev-0", group="peaky")
     # Main team window is dev:0 (configured by the fixture's get_current_window_target).
     cli_mod.tmux.set_window_option("dev:0", "@hive-team", "dev-0")
     cli_mod.tmux.set_window_option("dev:0", "@hive-workspace", "/tmp/ws")
@@ -141,8 +142,8 @@ def test_cleanup_rejected_from_peer_pane(runner, configure_hive_home, monkeypatc
     configure_hive_home(current_pane="%512", session_name="dev")
     import hive.cli as cli_mod
 
-    # Simulate peer pane: group=gang but team name is <main>-peer-<N>.
-    cli_mod.tmux.tag_pane("%512", "agent", "gang.worker-1000", "dev-0-peer-1000", group="gang")
+    # Simulate peer pane: group=<gang> but team name is <main>-peer-<N>.
+    cli_mod.tmux.tag_pane("%512", "agent", "peaky.worker-1000", "dev-0-peer-1000", group="peaky")
     # Current pane's window is dev:0 per fixture; bind it to the peer team so
     # _resolve_scoped_team picks the peer name up.
     cli_mod.tmux.set_window_option("dev:0", "@hive-team", "dev-0-peer-1000")

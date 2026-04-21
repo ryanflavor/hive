@@ -19,6 +19,7 @@ import click
 
 from . import bus
 from . import context as hive_context
+from . import gang_names
 from . import notify_hook
 from . import notify_ui
 from . import plugin_manager
@@ -1253,9 +1254,9 @@ def _attach_peer_to_team(
     """`hive init` peer-group attach: discover or spawn an anti-family peer.
 
     Tags both the lead pane and the peer pane with ``@hive-group=peer`` so
-    the pair is identifiable cross-window (mirrors how gang uses
-    ``@hive-group=gang``).  Returns a descriptor, or ``None`` when the
-    current pane has no detectable agent CLI.
+    the pair is identifiable cross-window (mirrors how gang tags panes with
+    its instance name, e.g. ``@hive-group=peaky``).  Returns a descriptor,
+    or ``None`` when the current pane has no detectable agent CLI.
     """
     if not current_pane:
         return None
@@ -2151,11 +2152,13 @@ def board_ping_cmd():
         if lead_agent:
             orch_pane = lead_agent.pane_id
     if not orch_pane:
-        # Gang teams tag orch as role=agent with name "gang.orch", so no
-        # lead is ever resolved above. Fall through to the gang canonical name.
-        gang_orch = t.agents.get("gang.orch")
-        if gang_orch:
-            orch_pane = gang_orch.pane_id
+        # Gang teams tag orch as role=agent with name "<gang>.orch", so no
+        # lead is ever resolved above. Scan for an agent whose name ends in
+        # ".orch" — unique per team under the gang naming scheme.
+        for agent in t.agents.values():
+            if agent.name.endswith(".orch"):
+                orch_pane = agent.pane_id
+                break
     if not orch_pane:
         _fail("no orch/lead pane bound in this team")
     diff_line_count = diff_text.count("\n") + (0 if diff_text.endswith("\n") else 1)
@@ -2302,19 +2305,29 @@ def _start_board_vim(board_pane: str, blackboard: Path) -> None:
     default=None,
     help="CLI for skeptic (default: anti-family of current pane's CLI; override if droid wraps an Anthropic model)",
 )
-def gang_init_cmd(peer_cli: str | None):
-    """Break current pane into a dedicated 'gang' window (orch + skeptic + board).
+@click.option(
+    "--name",
+    "gang_name",
+    default=None,
+    help=(
+        "Gang instance name (public namespace for this squad). Picks an "
+        "unused name from the canonical pool (peaky/krays/crips/jesse/triad/"
+        "shelby/yakuza/bloods/dalton/bratva) when omitted."
+    ),
+)
+def gang_init_cmd(peer_cli: str | None, gang_name: str | None):
+    """Break current pane into a dedicated gang window (orch + skeptic + board).
 
     Standalone — no need to run `hive init` first. Must run from a pane that's
     already running an agent CLI (claude / codex / droid); that CLI becomes
     orch's session. If the pane isn't yet bound to a team, one is auto-created
     (mirrors `hive init`).
 
-    The current pane is moved (tmux break-pane) into a new window named 'gang'
-    where it becomes the orch pane (CLI keeps running). Two more panes are
-    added:
-      - skeptic: newly spawned same-CLI agent with gang-skeptic skill
-      - board: vim on BLACKBOARD.md (gang.board)
+    Each gang gets a public namespace name (picked from the canonical pool
+    unless overridden via --name). The window is renamed to the gang name;
+    agents inside are addressed as ``<gang>.orch``, ``<gang>.skeptic``,
+    ``<gang>.board``. This lets multiple gangs coexist in the same tmux
+    session without qualified-name collision.
 
     Layout auto-picks based on window aspect ratio:
       - horizontal (wide): orch + skeptic stacked left column, board right
@@ -2333,6 +2346,16 @@ def gang_init_cmd(peer_cli: str | None):
     if profile is None:
         _fail("current pane must be running claude / codex / droid (this will become orch)")
 
+    if gang_name:
+        ok, reason = gang_names.validate_name(gang_name)
+        if not ok:
+            _fail(reason)
+        if gang_name in gang_names.claimed_names():
+            _fail(f"gang name '{gang_name}' already in use on this tmux server")
+    else:
+        window_id_for_fallback = tmux.get_current_window_id() or ""
+        gang_name = gang_names.pick_available_name(window_id_for_fallback)
+
     # Auto-init team if not yet bound (standalone start; no prior `hive init` needed).
     t = _auto_init_team_for_gang()
     ws = _resolve_workspace(t, required=True)
@@ -2342,27 +2365,33 @@ def gang_init_cmd(peer_cli: str | None):
 
     orch_cwd = tmux.display_value(current_pane, "#{pane_current_path}") or ws
 
+    orch_agent_name = f"{gang_name}.orch"
+    skeptic_agent_name = f"{gang_name}.skeptic"
+    board_agent_name = f"{gang_name}.board"
+
+    window_display_name = f"gang {gang_name}"
     if tmux.get_pane_count(current_pane) <= 1:
         current_window = tmux.display_value(current_pane, "#{session_name}:#{window_index}")
         if not current_window:
             _fail("cannot determine current window")
-        tmux.rename_window(current_window, "gang")
+        tmux.rename_window(current_window, window_display_name)
         gang_window, orch_pane = current_window, current_pane
     else:
-        gang_window, orch_pane = tmux.break_pane(current_pane, name="gang")
+        gang_window, orch_pane = tmux.break_pane(current_pane, name=window_display_name)
         if not gang_window:
             _fail("failed to break-pane into new window")
 
     tmux.set_window_option(gang_window, "@hive-team", t.name)
     tmux.set_window_option(gang_window, "@hive-workspace", t.workspace or ws)
+    tmux.set_window_option(gang_window, "@hive-gang-name", gang_name)
     if t.description:
         tmux.set_window_option(gang_window, "@hive-desc", t.description)
     tmux.set_window_option(gang_window, "@hive-created", str(t.created_at or time.time()))
 
     tmux.set_pane_option(orch_pane, "hive-role", "agent")
-    tmux.set_pane_option(orch_pane, "hive-agent", "gang.orch")
+    tmux.set_pane_option(orch_pane, "hive-agent", orch_agent_name)
     tmux.set_pane_option(orch_pane, "hive-team", t.name)
-    tmux.set_pane_option(orch_pane, "hive-group", "gang")
+    tmux.set_pane_option(orch_pane, "hive-group", gang_name)
     tmux.set_pane_option(orch_pane, "hive-cli", orch_cli)
 
     # Create 3 panes. Sizes here are placeholders — _apply_gang_layout
@@ -2371,7 +2400,7 @@ def gang_init_cmd(peer_cli: str | None):
     # state dir — skeptic needs to see the same codebase orch sees.
     board_pane = tmux.split_window(orch_pane, horizontal=True, size="50%", cwd=orch_cwd)
     skeptic_agent = Agent.spawn(
-        name="gang.skeptic",
+        name=skeptic_agent_name,
         team_name=t.name,
         target_pane=orch_pane,
         cwd=orch_cwd,
@@ -2381,10 +2410,10 @@ def gang_init_cmd(peer_cli: str | None):
         cli=peer_cli_name,
     )
 
-    tmux.set_pane_option(skeptic_agent.pane_id, "hive-group", "gang")
+    tmux.set_pane_option(skeptic_agent.pane_id, "hive-group", gang_name)
 
-    _tag_pane_as_board(board_pane, t.name, "gang.board")
-    tmux.set_pane_option(board_pane, "hive-group", "gang")
+    _tag_pane_as_board(board_pane, t.name, board_agent_name)
+    tmux.set_pane_option(board_pane, "hive-group", gang_name)
 
     blackboard = Path(ws) / BLACKBOARD_FILENAME
     _ensure_blackboard(blackboard)
@@ -2392,15 +2421,15 @@ def gang_init_cmd(peer_cli: str | None):
 
     orientation = _apply_gang_layout(gang_window)
 
-    # Declare the gang.orch ↔ gang.skeptic pair now that both panes are
-    # tagged. Reload the team so set_peer sees both names in peer_member_names.
+    # Declare the orch ↔ skeptic pair now that both panes are tagged. Reload
+    # the team so set_peer sees both names in peer_member_names.
     try:
         reloaded = Team.load(t.name, prefer_pane=orch_pane)
-        reloaded.set_peer("gang.orch", "gang.skeptic")
+        reloaded.set_peer(orch_agent_name, skeptic_agent_name)
     except (FileNotFoundError, KeyError, ValueError):
         pass
 
-    dispatched: list[str] = ["gang.skeptic"]
+    dispatched: list[str] = [skeptic_agent_name]
     profile = detect_profile_for_pane(orch_pane)
     if profile is not None:
         skill_cmd = profile.skill_cmd.format(name="gang-orch")
@@ -2408,18 +2437,19 @@ def gang_init_cmd(peer_cli: str | None):
         time.sleep(0.1)
         for _ in range(2 if profile.name == "codex" else 1):
             tmux.send_key(orch_pane, "Enter")
-        dispatched.insert(0, "gang.orch")
+        dispatched.insert(0, orch_agent_name)
 
     tmux.select_window(gang_window)
 
     click.echo(json.dumps({
         "team": t.name,
         "window": gang_window,
-        "group": "gang",
+        "gangName": gang_name,
+        "group": gang_name,
         "orientation": orientation,
-        "orch": {"pane": orch_pane, "name": "gang.orch"},
-        "skeptic": {"pane": skeptic_agent.pane_id, "name": "gang.skeptic"},
-        "board": {"pane": board_pane, "name": "gang.board", "path": str(blackboard)},
+        "orch": {"pane": orch_pane, "name": orch_agent_name},
+        "skeptic": {"pane": skeptic_agent.pane_id, "name": skeptic_agent_name},
+        "board": {"pane": board_pane, "name": board_agent_name, "path": str(blackboard)},
         "dispatched": dispatched,
     }, indent=2))
 
@@ -2448,17 +2478,23 @@ _GANG_PEER_WINDOW_NAME_INITIAL = "pending"
 def gang_spawn_peer_cmd():
     """Spawn a fresh peer pair (worker + validator) for one feature.
 
+    Must run from an orch pane inside a gang window — inherits the gang
+    instance name from the caller's ``@hive-group`` tag so worker/validator
+    names carry the same prefix (e.g. ``peaky.worker-1000`` when orch is
+    ``peaky.orch``).
+
     Auto-places the peer at tmux window index 1000+ (monotonic, never
     reusing an existing index) so the peer window never collides with the
     user's regular low-index windows. The same number threads through tmux
     window, team name, and agent names — `$session:1000` pairs with team
-    `<main>-peer-1000` / `gang.worker-1000` / `gang.validator-1000`.
+    `<main>-peer-1000` / `<gang>.worker-1000` / `<gang>.validator-1000`.
 
     Initial window name is `pending`; orch renames via `tmux rename-window`
     as the lifecycle advances (`<feature>-running/done/fail`).
 
-    Worker runs claude, validator runs codex. Both tagged `@hive-group=gang`
-    and `@hive-owner=gang.orch` for owner-bypass routing.
+    Worker runs claude, validator runs codex. Both tagged
+    ``@hive-group=<gang>`` and ``@hive-owner=<gang>.orch`` for owner-bypass
+    routing.
     """
     if not tmux.is_inside_tmux():
         _fail("must run inside tmux")
@@ -2468,8 +2504,13 @@ def gang_spawn_peer_cmd():
         _fail("cannot determine current pane")
 
     caller_group = tmux.get_pane_option(current_pane, "hive-group") or ""
-    if caller_group != "gang":
+    if not caller_group or caller_group == "gang":
         _fail("current pane is not part of a GANG; run from the orch pane after `hive gang init`")
+
+    gang_name = caller_group
+    ok, reason = gang_names.validate_name(gang_name)
+    if not ok:
+        _fail(f"current pane's @hive-group '{gang_name}' is not a valid gang name: {reason}")
 
     _, main_team = _resolve_scoped_team(None, required=True)
     if main_team is None:
@@ -2480,8 +2521,9 @@ def gang_spawn_peer_cmd():
         _fail("cannot determine tmux session")
 
     n = _next_gang_window_index(session)
-    worker_name = f"gang.worker-{n}"
-    validator_name = f"gang.validator-{n}"
+    worker_name = f"{gang_name}.worker-{n}"
+    validator_name = f"{gang_name}.validator-{n}"
+    owner_name = f"{gang_name}.orch"
     clashes = [
         p for p in tmux.list_panes_all()
         if p.agent in {worker_name, validator_name}
@@ -2510,6 +2552,7 @@ def gang_spawn_peer_cmd():
 
     tmux.set_window_option(peer_window, "@hive-team", peer_team_name)
     tmux.set_window_option(peer_window, "@hive-workspace", workspace)
+    tmux.set_window_option(peer_window, "@hive-gang-name", gang_name)
     tmux.set_window_option(peer_window, "@hive-created", str(time.time()))
 
     peer_team = Team(
@@ -2532,8 +2575,8 @@ def gang_spawn_peer_cmd():
         skill="gang-worker",
         cli="claude",
     )
-    tmux.set_pane_option(worker_agent.pane_id, "hive-group", "gang")
-    tmux.set_pane_option(worker_agent.pane_id, "hive-owner", "gang.orch")
+    tmux.set_pane_option(worker_agent.pane_id, "hive-group", gang_name)
+    tmux.set_pane_option(worker_agent.pane_id, "hive-owner", owner_name)
     peer_team.agents[worker_name] = worker_agent
 
     validator_agent = Agent.spawn(
@@ -2546,8 +2589,8 @@ def gang_spawn_peer_cmd():
         skill="gang-validator",
         cli="codex",
     )
-    tmux.set_pane_option(validator_agent.pane_id, "hive-group", "gang")
-    tmux.set_pane_option(validator_agent.pane_id, "hive-owner", "gang.orch")
+    tmux.set_pane_option(validator_agent.pane_id, "hive-group", gang_name)
+    tmux.set_pane_option(validator_agent.pane_id, "hive-owner", owner_name)
     peer_team.agents[validator_name] = validator_agent
 
     # Declare the worker ↔ validator pair so `hive team` reflects it explicitly.
@@ -2636,8 +2679,11 @@ def gang_cleanup_cmd():
         _fail("cannot determine current pane")
 
     caller_group = tmux.get_pane_option(current_pane, "hive-group") or ""
-    if caller_group != "gang":
-        _fail("current pane is not part of a GANG; run from the orch pane")
+    if not caller_group or caller_group == "gang":
+        _fail("current pane is not part of a GANG; run from the orch pane after `hive gang init`")
+    ok, reason = gang_names.validate_name(caller_group)
+    if not ok:
+        _fail(f"current pane's @hive-group '{caller_group}' is not a valid gang name: {reason}")
 
     _, main_team = _resolve_scoped_team(None, required=True)
     assert main_team is not None

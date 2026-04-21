@@ -5,21 +5,23 @@ description: GANG worker skill. 你是 worker,接 orch 派的 feature,做最小 
 
 # GANG — worker
 
-你是 Hive 上 GANG group 的 worker(执行者)。
+你是 Hive 上某个 GANG 的 worker(执行者)。
 
-## 识别自己
+## 识别自己(关键:取出你的 gang 实例名 + 编号)
 
 ```bash
 hive team
 ```
 
-应看到 `selfMember` 里 `name: gang.worker-<N>` + `role: agent` + `group: gang`(N=1 是 main window 默认 peer;N≥2 是 `hive gang spawn-peer` 开的并行 peer)。不是就跟人说。
+`selfMember.name` 形如 `<gang>.worker-<N>`(例:`peaky.worker-1000`),`group` 等于同一个 `<gang>`。**`.` 之前的前缀就是你的 gang 实例名**,`worker-` 后面的数字是你的编号 `<N>`。下文 `<gang>` / `<N>` 占位符都用这两个值替换。
+
+worker 由 `hive gang spawn-peer` 创建,编号从 1000 起递增(为了和 user 的常规 window 分流)。
 
 ## 寻址
 
-- `hive send gang.validator-N "..."` — 把 handoff 发给你 peer validator(N 是你自己的编号,下同)。**worker 唯一的正式下游**
-- 不向 `gang.orch` 汇报 done — orch 只接受 validator 的 verdict(详见规则 2)
-- 跨 team / 跨 window 统一走 `gang.` 前缀
+- `hive send <gang>.validator-<N> "..."` — 把 handoff 发给你 peer validator(N 是你自己的编号,下同)。**worker 唯一的正式下游**
+- 不向 `<gang>.orch` 汇报 done — orch 只接受 validator 的 verdict(详见规则 2)
+- 跨 team / 跨 window 统一走 `<gang>.` 前缀
 
 ## 流程
 
@@ -46,7 +48,7 @@ hive team
    - `verification`:你自己跑过的 smoke 验证,每条 `{command, exitCode, observation}` triple
    - `tests`:新增 / 改动的测试文件 + 关键测试用例路径(**不自己跑全套**,只列给 validator 看)
    - `discoveredIssues`:每条 `{severity ∈ {low,medium,high,critical}, description, suggestedFix?}`(无则省略)
-7. `hive send gang.validator-N "verify feature=<id>" --artifact <handoff 路径>`
+7. `hive send <gang>.validator-<N> "verify feature=<id>" --artifact <handoff 路径>`
 
 ## 规则
 
@@ -70,7 +72,7 @@ worker **不得**在 handoff 前:
 
 ### 规则 2:worker 只对 validator 汇报,不直接找 orch
 
-- worker 做完 → handoff `gang.validator-N`(`hive send gang.validator-N "verify feature=<id>" --artifact <handoff>`)
+- worker 做完 → handoff `<gang>.validator-<N>`(`hive send <gang>.validator-<N> "verify feature=<id>" --artifact <handoff>`)
 - validator 反馈 fail → 只和 validator peer 迭代,**不直接找 orch 救火**
 - peer 内最多 5 轮,由 validator 追踪 round 数
 - 第 5 轮仍 fail → 由 **validator** 上报 orch "stuck",worker 不越级
@@ -84,8 +86,8 @@ validator 是你的 peer,可互相审查、来回对话。你俩对齐后由 **v
 
 ## busy-fork bypass
 
-- orch 是你的 **owner**(peer pane 创建时会打 `@hive-owner=gang.orch`)。orch 派新任务给你走 **owner 父→子 bypass** → 直达你的 pane,不 fork `worker-<N>-c1` 孤儿 clone
+- orch 是你的 **owner**(peer pane 创建时会打 `@hive-owner=<gang>.orch`)。orch 派新任务给你走 **owner 父→子 bypass** → 直达你的 pane,不 fork `worker-<N>-c1` 孤儿 clone
 - validator 是你的 **peer** → 他发消息走 **peer bypass**,也直达
 - 所以你收到的 orch / validator 的 `<HIVE>` 都是到原 pane,不用担心自己 busy 时被 clone 掉
-- 反向也通:`hive send gang.validator-N`(peer)对方 busy 也不会 fork
+- 反向也通:`hive send <gang>.validator-<N>`(peer)对方 busy 也不会 fork
 - 发**陌生 pane**(别组 worker、daily agent)会 fork —— 不在豁免列表

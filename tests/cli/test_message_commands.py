@@ -506,6 +506,186 @@ def test_send_peer_bypass_skips_fork_when_sender_is_target_peer(runner, configur
     assert events[0]["to"] == "gpt"
 
 
+def test_send_owner_parent_to_child_bypass_skips_fork_for_public_gang_name(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    configure_hive_home()
+    _patch_ack(monkeypatch)
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    artifact = _write_artifact(tmp_path, "owner-parent-child.md", "owner detail")
+
+    class _FakeAgent:
+        def __init__(self, name: str, pane_id: str, *, cli: str = "claude") -> None:
+            self.name = name
+            self.pane_id = pane_id
+            self.cli = cli
+            self.sent: list[str] = []
+
+        def is_alive(self) -> bool:
+            return True
+
+        def send(self, text: str) -> None:
+            self.sent.append(text)
+
+    class _FakeTeam:
+        def __init__(self) -> None:
+            self.workspace = str(workspace)
+            self.name = "peaky-main"
+            self.tmux_session = "dev"
+            self.tmux_window = "dev:0"
+            self.lead_name = "peaky.orch"
+            self.members = {
+                "peaky.validator-1000": _FakeAgent("peaky.validator-1000", "%99")
+            }
+
+        def get(self, name: str):
+            return self.members[name]
+
+        def resolve_peer(self, _name):
+            return None
+
+    team = _FakeTeam()
+    monkeypatch.setattr(
+        "hive.cli._resolve_send_target_team",
+        lambda _agent: ("peaky-main", team),
+    )
+    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "peaky.orch")
+    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="claude"))
+    monkeypatch.setattr("hive.cli.resolve_session_id_for_pane", lambda _pane_id, profile=None: "sess-1")
+    _patch_sidecar_requests(monkeypatch, team)
+
+    def _runtime_payload(pane_id: str):
+        if pane_id == "%99":
+            return {
+                "alive": True,
+                "busy": True,
+                "inputState": "ready",
+                "turnPhase": "tool_open",
+            }
+        return {"alive": True, "busy": False, "turnPhase": "turn_closed"}
+
+    monkeypatch.setattr("hive.sidecar._agent_runtime_payload", _runtime_payload)
+    monkeypatch.setattr(
+        "hive.cli.tmux.get_pane_option",
+        lambda pane_id, key: "peaky.orch" if (pane_id, key) == ("%99", "hive-owner") else "",
+    )
+
+    def _fork_registered_agent(*_args, **_kwargs):
+        raise AssertionError("owner parent->child bypass should prevent fork")
+
+    monkeypatch.setattr("hive.cli._fork_registered_agent", _fork_registered_agent)
+
+    result = runner.invoke(
+        cli,
+        ["send", "peaky.validator-1000", "verify this", "--artifact", artifact],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["to"] == "peaky.validator-1000"
+    assert "routingMode" not in payload
+    assert "routingReason" not in payload
+    assert "effectiveTarget" not in payload
+
+    original = team.members["peaky.validator-1000"]
+    assert len(original.sent) == 1
+    assert (
+        original.sent[0]
+        == f"<HIVE from=peaky.orch to=peaky.validator-1000 msgId={FIXED_ID} artifact={artifact}>\nverify this\n</HIVE>"
+    )
+
+
+def test_send_owner_child_to_parent_bypass_skips_fork_for_public_gang_name(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    configure_hive_home()
+    _patch_ack(monkeypatch)
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    artifact = _write_artifact(tmp_path, "owner-child-parent.md", "owner detail")
+
+    class _FakeAgent:
+        def __init__(self, name: str, pane_id: str, *, cli: str = "claude") -> None:
+            self.name = name
+            self.pane_id = pane_id
+            self.cli = cli
+            self.sent: list[str] = []
+
+        def is_alive(self) -> bool:
+            return True
+
+        def send(self, text: str) -> None:
+            self.sent.append(text)
+
+    class _FakeTeam:
+        def __init__(self) -> None:
+            self.workspace = str(workspace)
+            self.name = "peaky-main"
+            self.tmux_session = "dev"
+            self.tmux_window = "dev:0"
+            self.lead_name = "peaky.orch"
+            self.members = {
+                "peaky.orch": _FakeAgent("peaky.orch", "%99")
+            }
+
+        def get(self, name: str):
+            return self.members[name]
+
+        def resolve_peer(self, _name):
+            return None
+
+    team = _FakeTeam()
+    monkeypatch.setattr(
+        "hive.cli._resolve_send_target_team",
+        lambda _agent: ("peaky-main", team),
+    )
+    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "peaky.validator-1000")
+    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="claude"))
+    monkeypatch.setattr("hive.cli.resolve_session_id_for_pane", lambda _pane_id, profile=None: "sess-1")
+    _patch_sidecar_requests(monkeypatch, team)
+
+    def _runtime_payload(pane_id: str):
+        if pane_id == "%99":
+            return {
+                "alive": True,
+                "busy": True,
+                "inputState": "ready",
+                "turnPhase": "tool_open",
+            }
+        return {"alive": True, "busy": False, "turnPhase": "turn_closed"}
+
+    monkeypatch.setattr("hive.sidecar._agent_runtime_payload", _runtime_payload)
+    monkeypatch.setattr(
+        "hive.cli.tmux.get_pane_option",
+        lambda pane_id, key: "peaky.orch" if (pane_id, key) == ("%0", "hive-owner") else "",
+    )
+
+    def _fork_registered_agent(*_args, **_kwargs):
+        raise AssertionError("owner child->parent bypass should prevent fork")
+
+    monkeypatch.setattr("hive.cli._fork_registered_agent", _fork_registered_agent)
+
+    result = runner.invoke(
+        cli,
+        ["send", "peaky.orch", "need a decision", "--artifact", artifact],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["to"] == "peaky.orch"
+    assert "routingMode" not in payload
+    assert "routingReason" not in payload
+    assert "effectiveTarget" not in payload
+
+    original = team.members["peaky.orch"]
+    assert len(original.sent) == 1
+    assert (
+        original.sent[0]
+        == f"<HIVE from=peaky.validator-1000 to=peaky.orch msgId={FIXED_ID} artifact={artifact}>\nneed a decision\n</HIVE>"
+    )
+
+
 def test_send_busy_root_forks_even_when_turn_phase_is_unsafe(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     _patch_ack(monkeypatch)

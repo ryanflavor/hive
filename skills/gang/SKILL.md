@@ -13,11 +13,13 @@ hive gang init
 
 完事。剩下全部由 `hive gang init` 内部负责:
 
-- `tmux break-pane` 把当前 pane 搬到新 window `gang`(orch 身份随当前 CLI 带过去)
+- `tmux break-pane` 把当前 pane 搬到新 window(orch 身份随当前 CLI 带过去)
 - 按屏幕宽高 auto-pick 横 / 竖屏 layout
 - spawn **skeptic**(anti-orch 家族 CLI,claude↔codex;droid 默认 claude)
 - spawn **board**(vim 打开 BLACKBOARD.md)
 - dispatch `/gang-orch` 给 orch pane → 你之后的 duty 由 `gang-orch` skill 接管,本 skill 退场
+
+用户想显式指定 gang 实例名可传 `--name <name>`;不传就由 CLI 自动分配。
 
 ## 前置
 
@@ -44,3 +46,7 @@ hive gang init
 ```bash
 hive gang init --peer-cli codex
 ```
+
+## 多 gang 共存
+
+多个 gang 可以同时存在,彼此寻址天然隔离。你不用关心 CLI 怎么分配 / 去重 gang 名 —— `hive gang init` 自己搞定。
