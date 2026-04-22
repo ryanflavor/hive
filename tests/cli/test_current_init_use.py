@@ -767,7 +767,7 @@ def test_root_help_groups_commands_by_area(runner):
     assert result.exit_code == 0
     output = result.output
     assert "Hive - tmux-first multi-agent collaboration runtime." in output
-    for section in ("Daily:", "Handoff:", "Debug:", "Plugin Helpers:", "Extensions:", "Examples:"):
+    for section in ("Daily:", "Handoff:", "Debug:", "Human Helpers:", "Extensions:", "Examples:"):
         assert section in output
 
     for short_help in (

@@ -62,19 +62,6 @@ def _skill_install_dirs() -> list[Path]:
     ]
 
 
-def find_installed_command(plugin_name: str, command_name: str) -> Path | None:
-    """Return the installed plugin command script path, or None if not present.
-
-    Used by the top-level `hive cvim` / `hive vim` / `hive vfork` / `hive hfork`
-    CLI subcommands to forward execution into the plugin-materialized bash
-    helper without depending on Factory's slash command path.
-    """
-    path = _installed_root() / plugin_name / "commands" / command_name
-    if path.is_file():
-        return path
-    return None
-
-
 def _load_state() -> dict[str, Any]:
     path = _state_path()
     if not path.exists():
@@ -345,7 +332,32 @@ def disable_plugin(name: str, *, missing_ok: bool = False) -> dict[str, object]:
     return {"name": name, "enabled": False}
 
 
+RETIRED_PLUGINS = frozenset({"cvim", "fork"})
+
+
+def cleanup_retired_plugins() -> list[str]:
+    """Disable any plugin whose capability was promoted into core hive.
+
+    Called during `hive init` so users who previously ran
+    `hive plugin enable cvim` / `... fork` have their Factory shims,
+    install root and state entries cleaned up automatically.
+    """
+    state = _load_state()
+    plugins = state.get("plugins", {})
+    removed: list[str] = []
+    for name in list(plugins):
+        if name in RETIRED_PLUGINS:
+            disable_plugin(name, missing_ok=True)
+            removed.append(name)
+    return removed
+
+
 def enable_plugin(name: str) -> dict[str, object]:
+    if name in RETIRED_PLUGINS:
+        raise ValueError(
+            f"'{name}' is now a core hive capability — no plugin enable needed. "
+            "Run `hive init` to clean up any legacy plugin state."
+        )
     manifest = load_manifest(name)
     disable_plugin(name, missing_ok=True)
 

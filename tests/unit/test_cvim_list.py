@@ -15,8 +15,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-LIST_HELPER = ROOT / "src" / "hive" / "plugins" / "cvim" / "bin" / "cvim-list"
-SHARED_DIR = ROOT / "src" / "hive" / "plugins" / "cvim" / "bin"
+LIST_HELPER = ROOT / "src" / "hive" / "core_assets" / "cvim" / "bin" / "cvim-list"
+SHARED_DIR = ROOT / "src" / "hive" / "core_assets" / "cvim" / "bin"
 
 
 def _import_shared():

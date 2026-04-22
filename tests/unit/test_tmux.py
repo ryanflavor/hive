@@ -135,7 +135,6 @@ def test_client_mode_and_popup_support_helpers(monkeypatch):
     )
     monkeypatch.setenv("TMUX_PANE", "%7")
 
-    assert tmux.supports_popup() is True
     assert tmux.get_client_mode("%7") == "control"
     assert tmux.is_control_mode_client("%7") is True
 

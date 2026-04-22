@@ -609,12 +609,6 @@ def display_value(target: str, fmt: str) -> str | None:
     return r.stdout.strip() or None
 
 
-def supports_popup() -> bool:
-    r = _run(["list-commands"], check=False)
-    commands = r.stdout.strip()
-    return "display-popup" in commands
-
-
 def get_most_recent_client_tty(session_name: str | None = None) -> str | None:
     args = ["list-clients"]
     if session_name:

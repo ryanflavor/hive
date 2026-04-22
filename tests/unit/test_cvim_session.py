@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SESSION_HELPER = ROOT / "src" / "hive" / "plugins" / "cvim" / "bin" / "cvim-session"
+SESSION_HELPER = ROOT / "src" / "hive" / "core_assets" / "cvim" / "bin" / "cvim-session"
 
 
 def _run_session_helper(

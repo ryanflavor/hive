@@ -10,8 +10,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-COMMAND = ROOT / "src" / "hive" / "plugins" / "cvim" / "bin" / "cvim-command"
-SHARED_DIR = ROOT / "src" / "hive" / "plugins" / "cvim" / "bin"
+COMMAND = ROOT / "src" / "hive" / "core_assets" / "cvim" / "bin" / "cvim-command"
+SHARED_DIR = ROOT / "src" / "hive" / "core_assets" / "cvim" / "bin"
 
 
 def _import_shared():
@@ -247,7 +247,7 @@ if append_text:
 
 def _materialize_cvim_bundle(tmp_path: Path) -> Path:
     bundle_root = tmp_path / "cvim-bundle"
-    shutil.copytree(ROOT / "src" / "hive" / "plugins" / "cvim", bundle_root)
+    shutil.copytree(ROOT / "src" / "hive" / "core_assets" / "cvim", bundle_root)
     for file_path in (bundle_root / "bin").iterdir():
         if file_path.is_file():
             file_path.chmod(0o755)
@@ -274,15 +274,14 @@ def _run_command(
     env["PATH"] = f"{tmp_path}:{env.get('PATH', '')}"
     env["TMUX"] = "/tmp/tmux-test"
     env["TMUX_PANE"] = current_pane
-    env["DROID_VIM_TRANSPORT"] = "popup"
-    env["DROID_VIM_SEED_MODE"] = "blank"
-    env["DROID_VIM_EDITOR"] = "sh"
+    env["CVIM_SEED_MODE"] = "blank"
+    env["CVIM_EDITOR"] = "sh"
     env["FAKE_TMUX_STATE"] = json.dumps(state)
     env["FAKE_TMUX_LOG"] = str(log_path)
     if extra_env:
         env.update(extra_env)
 
-    subprocess.run([str(command)], check=True, env=env, cwd=ROOT)
+    subprocess.run(["bash", str(command), "vim"], check=True, env=env, cwd=ROOT)
     return json.loads(log_path.read_text())
 
 
@@ -309,14 +308,13 @@ def _run_command_actions(
     env["PATH"] = f"{tmp_path}:{env.get('PATH', '')}"
     env["TMUX"] = "/tmp/tmux-test"
     env["TMUX_PANE"] = current_pane
-    env["DROID_VIM_TRANSPORT"] = "popup"
-    env["DROID_VIM_SEED_MODE"] = "blank"
-    env["DROID_VIM_OUTPUT_MODE"] = "text"
-    env["DROID_VIM_EDITOR"] = str(editor)
+    env["CVIM_SEED_MODE"] = "blank"
+    env["CVIM_OUTPUT_MODE"] = "text"
+    env["CVIM_EDITOR"] = str(editor)
     if not use_default_delays:
-        env["DROID_VIM_PASTE_DELAY"] = "0"
-        env["DROID_VIM_INTERRUPT_SETTLE_DELAY"] = "0"
-        env["DROID_VIM_SUBMIT_DELAY"] = "0"
+        env["CVIM_PASTE_DELAY"] = "0"
+        env["CVIM_INTERRUPT_SETTLE_DELAY"] = "0"
+        env["CVIM_SUBMIT_DELAY"] = "0"
     env["FAKE_TMUX_STATE"] = json.dumps(state)
     env["FAKE_TMUX_LOG"] = str(log_path)
     env["FAKE_TMUX_ACTIONS"] = str(actions_path)
@@ -324,7 +322,7 @@ def _run_command_actions(
     if extra_env:
         env.update(extra_env)
 
-    subprocess.run([str(command)], check=True, env=env, cwd=ROOT)
+    subprocess.run(["bash", str(command), "vim"], check=True, env=env, cwd=ROOT)
     return [json.loads(line) for line in actions_path.read_text().splitlines() if line.strip()]
 
 
@@ -392,25 +390,6 @@ def test_popup_uses_lower_half_in_top_bottom_layout(tmp_path):
 
     assert _popup_geometry(top) == ("0", "50", "200", "50")
     assert _popup_geometry(bottom) == ("0", "0", "200", "50")
-
-
-def test_popup_respects_optional_size_overrides_within_target_region(tmp_path):
-    panes = [
-        {"id": "%1", "left": 0, "top": 0, "width": 100, "height": 100},
-        {"id": "%2", "left": 100, "top": 0, "width": 100, "height": 100},
-    ]
-
-    record = _run_command(
-        tmp_path,
-        current_pane="%1",
-        panes=panes,
-        extra_env={
-            "DROID_VIM_POPUP_WIDTH": "80",
-            "DROID_VIM_POPUP_HEIGHT": "40",
-        },
-    )
-
-    assert _popup_geometry(record) == ("120", "30", "80", "40")
 
 
 def test_popup_chooses_left_column_when_source_is_middle_right_of_staggered_layout(tmp_path):
@@ -570,7 +549,7 @@ def test_claude_profile_accepts_pasted_placeholder_before_submit(tmp_path):
             },
         ],
         extra_env={
-            "DROID_VIM_OUTPUT_MODE": "diff",
+            "CVIM_OUTPUT_MODE": "diff",
             "FAKE_EDITOR_APPEND_TEXT": "new line added",
             "FAKE_TMUX_CAPTURE_PANE_TEXT": "❯ [Pasted text #1 +10 lines]",
             "XDG_CACHE_HOME": str(cache_dir),
@@ -653,7 +632,7 @@ def test_edited_save_waits_for_structured_input_before_submit(tmp_path):
             {"id": "%1", "left": 0, "top": 0, "width": 200, "height": 100},
         ],
         extra_env={
-            "DROID_VIM_OUTPUT_MODE": "diff",
+            "CVIM_OUTPUT_MODE": "diff",
             "FAKE_EDITOR_APPEND_TEXT": "new line added",
             "FAKE_TMUX_CAPTURE_PANE_SEQUENCE": json.dumps([
                 "ready for input\n> still empty",
@@ -682,7 +661,7 @@ def test_edited_save_skips_submit_when_probe_never_finds_structured_input(tmp_pa
             {"id": "%1", "left": 0, "top": 0, "width": 200, "height": 100},
         ],
         extra_env={
-            "DROID_VIM_OUTPUT_MODE": "diff",
+            "CVIM_OUTPUT_MODE": "diff",
             "FAKE_EDITOR_APPEND_TEXT": "new line added",
             "FAKE_TMUX_CAPTURE_PANE_SEQUENCE": json.dumps([
                 "ready for input\n> still empty",
@@ -720,7 +699,7 @@ def test_popup_debug_log_records_sendback_stages(tmp_path):
             {"id": "%1", "left": 0, "top": 0, "width": 200, "height": 100},
         ],
         extra_env={
-            "DROID_VIM_OUTPUT_MODE": "diff",
+            "CVIM_OUTPUT_MODE": "diff",
             "FAKE_EDITOR_APPEND_TEXT": "new line added",
             "FAKE_TMUX_CAPTURE_PANE_TEXT": "ready for input\n> [<comment on=\"previous_reply\"> pasted diff]",
             "XDG_CACHE_HOME": str(cache_dir),
@@ -786,12 +765,12 @@ def _run_menu_command(
     transcript.write_text("".join(json.dumps(row) + "\n" for row in transcript_rows))
 
     bundle_root = tmp_path / "cvim-bundle"
-    shutil.copytree(ROOT / "src" / "hive" / "plugins" / "cvim", bundle_root)
+    shutil.copytree(ROOT / "src" / "hive" / "core_assets" / "cvim", bundle_root)
     for path in (bundle_root / "bin").iterdir():
         if path.is_file():
             path.chmod(0o755)
     session_helper = bundle_root / "bin" / "cvim-session"
-    session_helper.write_text(f"#!/usr/bin/env bash\nprintf '%s\\n' {subprocess.list2cmdline([str(transcript)])}\n")
+    session_helper.write_text(f"#!/usr/bin/env python3\nprint({json.dumps(str(transcript))})\n")
     session_helper.chmod(0o755)
     command = bundle_root / "bin" / "cvim-command"
 
@@ -811,13 +790,12 @@ def _run_menu_command(
     env["PATH"] = f"{tmp_path}:{env.get('PATH', '')}"
     env["TMUX"] = "/tmp/tmux-test"
     env["TMUX_PANE"] = "%1"
-    env["DROID_VIM_TRANSPORT"] = "popup"
-    env["DROID_VIM_SEED_MODE"] = seed_mode
-    env["DROID_VIM_OUTPUT_MODE"] = "text"
-    env["DROID_VIM_EDITOR"] = str(fake_vim)
-    env["DROID_VIM_PASTE_DELAY"] = "0"
-    env["DROID_VIM_INTERRUPT_SETTLE_DELAY"] = "0"
-    env["DROID_VIM_SUBMIT_DELAY"] = "0"
+    env["CVIM_SEED_MODE"] = seed_mode
+    env["CVIM_OUTPUT_MODE"] = "text"
+    env["CVIM_EDITOR"] = str(fake_vim)
+    env["CVIM_PASTE_DELAY"] = "0"
+    env["CVIM_INTERRUPT_SETTLE_DELAY"] = "0"
+    env["CVIM_SUBMIT_DELAY"] = "0"
     env["FAKE_TMUX_STATE"] = json.dumps(state)
     env["FAKE_TMUX_LOG"] = str(log_path)
     env["FAKE_TMUX_ACTIONS"] = str(actions_path)
@@ -825,7 +803,7 @@ def _run_menu_command(
     if extra_env:
         env.update(extra_env)
 
-    cmd_args = [str(command)]
+    cmd_args = ["bash", str(command), "vim"]
     if vim_args:
         cmd_args.extend(vim_args)
     subprocess.run(cmd_args, check=True, env=env, cwd=ROOT)

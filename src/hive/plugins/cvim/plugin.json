@@ -1,4 +1,0 @@
-{
-  "name": "cvim",
-  "description": "Bundle plugin that exposes /vim and /cvim on top of Hive session resolution."
-}

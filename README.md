@@ -150,20 +150,18 @@ Root sends without `--reply-to` must keep `body` to a short summary and put deta
 ## Plugins
 
 ```bash
-hive plugin enable cvim      # edit previous message as diff
 hive plugin enable notify    # human notification popup
-hive plugin enable fork      # vfork/hfork shortcuts
 hive plugin enable code-review  # multi-agent code review skill
 ```
 
-Plugin helpers (`cvim`, `vim`, `vfork`, `hfork`) are for the **human**, not the model. In Claude Code / Codex, use `!hive cvim` via shell escape. Plugin enable does not install or refresh the base `hive` skill; use `npx skills add <source> -g --all` for that.
+`hive cvim` / `hive vim` / `hive vfork` / `hive hfork` are core commands shipped with the CLI; no plugin enable needed. They are for the **human**, not the model — in Claude Code / Codex use `!hive cvim` via shell escape. `cvim`/`vim` require tmux >= 3.2 (popup support). Plugin enable does not install or refresh the base `hive` skill; use `npx skills add <source> -g --all` for that.
 
 ## Development
 
 ```bash
 python3 -m pip install -e . --break-system-packages
 npx skills add "$PWD" -g --all
-hive plugin enable code-review && hive plugin enable cvim && hive plugin enable fork && hive plugin enable notify
+hive plugin enable code-review && hive plugin enable notify
 
 PYTHONPATH=src python -m pytest tests/ -q
 ```

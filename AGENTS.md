@@ -29,7 +29,7 @@ Tests live under `tests/` and are split by level:
 - `python3 -m pip install -e .` — install Hive in editable mode.
 - **MUST**: after ANY code change, run install + hive skill sync + plugin re-enable BEFORE testing, committing, or manual verification:
   ```
-  python3 -m pip install -e . --break-system-packages && npx skills add "$PWD" -g --all && hive plugin enable code-review && hive plugin enable cvim && hive plugin enable fork && hive plugin enable notify
+  python3 -m pip install -e . --break-system-packages && npx skills add "$PWD" -g --all && hive plugin enable code-review && hive plugin enable notify
   ```
   This is a single mandatory step. Do not skip it. Do not split it. Do not "do it later".
 - Why this matters: plugin commands under `~/.factory/commands/` are materialized copies, not symlinks, so changing plugin code without re-enabling can leave you testing stale command files. The base `hive` skill also lives outside the plugin install path, so repo changes to `skills/hive/SKILL.md` do not reach agents unless you refresh it via `npx skills add`.

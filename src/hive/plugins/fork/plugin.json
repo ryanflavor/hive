@@ -1,4 +1,0 @@
-{
-  "name": "fork",
-  "description": "Fork the current droid session into a new split pane via /fork."
-}

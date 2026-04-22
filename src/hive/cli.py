@@ -58,11 +58,11 @@ _COMMAND_HELP_SECTIONS = {
     "create": "Debug",
     "delete": "Debug",
     "layout": "Debug",
-    # Plugin Helpers (human-only, unchanged).
-    "cvim": "Plugin Helpers",
-    "vim": "Plugin Helpers",
-    "vfork": "Plugin Helpers",
-    "hfork": "Plugin Helpers",
+    # Human Helpers (human-only core commands).
+    "cvim": "Human Helpers",
+    "vim": "Human Helpers",
+    "vfork": "Human Helpers",
+    "hfork": "Human Helpers",
     # Extensions (unchanged).
     "plugin": "Extensions",
 }
@@ -70,7 +70,7 @@ _COMMAND_HELP_SECTION_ORDER = [
     "Daily",
     "Handoff",
     "Debug",
-    "Plugin Helpers",
+    "Human Helpers",
     "Extensions",
     "Other Commands",
 ]
@@ -78,7 +78,7 @@ _COMMAND_HELP_SECTION_DESCRIPTIONS = {
     "Daily": "Daily agent path — inspect context, talk to peers, and pull the human in when necessary.",
     "Handoff": "Spawn or fork a pane, or load a workflow so another agent can pick up the work.",
     "Debug": "Troubleshoot delivery, runtime state, and low-level pane behavior. Not on the happy path.",
-    "Plugin Helpers": "Human-only editor and split helpers backed by enabled plugin scripts. Droid exposes them as native slash commands (`/cvim`, `/vim`, ...); in Claude Code and Codex the human types them inline via the shell escape (e.g. `!hive cvim`). These are NOT meant for the model to call on its own.",
+    "Human Helpers": "Core editor and split helpers for the human (not the model). In Claude Code / Codex, type `!hive cvim` via shell escape. Requires tmux >= 3.2 (popup support).",
     "Extensions": "Manage first-party Hive plugins that materialize commands and skills for Factory, Claude Code, and Codex.",
 }
 _ROOT_HELP_EXAMPLES = '''# Show team members, peers, and runtime input/busy/safety state
@@ -624,21 +624,6 @@ def _gc_dead_teams() -> None:
     ctx = hive_context.load_current_context()
     if ctx.get("team") and ctx["team"] not in live_names:
         hive_context.clear_current_context()
-
-
-def _exec_plugin_helper(plugin_name: str, command_name: str, args: tuple[str, ...]) -> None:
-    """Forward execution to the materialized plugin command script.
-
-    Replaces the current Python process with `bash <script> <args>` so the
-    plugin helper (and any tmux popups it spawns) owns the terminal lifetime.
-    """
-    script = plugin_manager.find_installed_command(plugin_name, command_name)
-    if script is None:
-        _fail(
-            f"plugin '{plugin_name}' is not enabled. Run "
-            f"`hive plugin enable {plugin_name}` first."
-        )
-    os.execvp("bash", ["bash", str(script), *args])
 
 
 _FORK_MIN_COLS = 80
@@ -1345,6 +1330,7 @@ def init_cmd(name: str, workspace: str, notify: bool):
         _fail("hive init requires a tmux session. Run `tmux new-session` or `tmux attach` first, then rerun.")
 
     _gc_dead_teams()
+    plugin_manager.cleanup_retired_plugins()
 
     session_name = tmux.get_current_session_name() or "hive"
     window_index = tmux.get_current_window_index() or "0"
@@ -3132,6 +3118,13 @@ def kill(agent_name: str):
     click.echo(f"Killed {agent_name}.")
 
 
+_CVIM_BINARY = Path(__file__).parent / "core_assets" / "cvim" / "bin" / "cvim-command"
+
+
+def _exec_cvim(mode: str, args: tuple[str, ...]) -> None:
+    os.execvp("bash", ["bash", str(_CVIM_BINARY), mode, *args])
+
+
 @cli.command("cvim", context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
 @click.argument("args", nargs=-1, type=click.UNPROCESSED)
 def cvim_cmd(args: tuple[str, ...]) -> None:
@@ -3140,7 +3133,7 @@ def cvim_cmd(args: tuple[str, ...]) -> None:
     Intended to be typed by the human via the agent's shell escape (e.g. `!hive cvim`)
     in Claude Code or Codex. Not meant for the model to invoke on its own.
     """
-    _exec_plugin_helper("cvim", "cvim", args)
+    _exec_cvim("cvim", args)
 
 
 @cli.command("vim", context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
@@ -3151,7 +3144,23 @@ def vim_cmd(args: tuple[str, ...]) -> None:
     Intended to be typed by the human via the agent's shell escape (e.g. `!hive vim`)
     in Claude Code or Codex. Not meant for the model to invoke on its own.
     """
-    _exec_plugin_helper("cvim", "vim", args)
+    _exec_cvim("vim", args)
+
+
+def _exec_fork_split(split: str, args: tuple[str, ...]) -> None:
+    reply_pane = os.environ.get("TMUX_PANE", "")
+    subprocess.Popen(
+        ["hive", "fork", "-s", split, *args],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    if reply_pane:
+        subprocess.run(
+            ["tmux", "run-shell", "-b", f"sleep 0.2 && tmux send-keys -t {shlex.quote(reply_pane)} Escape"],
+            check=False,
+        )
 
 
 @cli.command("vfork", context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
@@ -3162,7 +3171,7 @@ def vfork_cmd(args: tuple[str, ...]) -> None:
     Intended to be typed by the human via the agent's shell escape (e.g. `!hive vfork`)
     in Claude Code or Codex. Not meant for the model to invoke on its own.
     """
-    _exec_plugin_helper("fork", "vfork", args)
+    _exec_fork_split("v", args)
 
 
 @cli.command("hfork", context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
@@ -3173,7 +3182,7 @@ def hfork_cmd(args: tuple[str, ...]) -> None:
     Intended to be typed by the human via the agent's shell escape (e.g. `!hive hfork`)
     in Claude Code or Codex. Not meant for the model to invoke on its own.
     """
-    _exec_plugin_helper("fork", "hfork", args)
+    _exec_fork_split("h", args)
 
 
 @cli.command("notify")

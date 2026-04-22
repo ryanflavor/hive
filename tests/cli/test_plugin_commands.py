@@ -5,116 +5,22 @@ import pytest
 from hive.cli import cli
 
 
-def test_plugin_list_enable_and_disable_cvim(runner, configure_hive_home):
-    hive_home = configure_hive_home(tmux_inside=False)
-    factory_home = hive_home.parent / ".factory"
-    codex_home = hive_home.parent / ".codex"
-    claude_home = hive_home.parent / ".claude"
-    (factory_home / "settings.json").parent.mkdir(parents=True, exist_ok=True)
-    (factory_home / "settings.json").write_text(json.dumps({
-        "hooks": {
-            "SessionStart": [{"hooks": [{"type": "command", "command": "~/.dotfiles/bin/droid-session-map-hook"}]}],
-            "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "~/.dotfiles/bin/droid-session-map-hook"}]}],
-            "SessionEnd": [{"hooks": [{"type": "command", "command": "~/.dotfiles/bin/droid-session-map-hook"}]}],
-        }
-    }))
-
-    listed = runner.invoke(cli, ["plugin", "list"])
+def test_plugin_list_does_not_offer_retired_cvim_or_fork(runner, configure_hive_home):
+    configure_hive_home(tmux_inside=False)
+    listed = runner.invoke(cli, ["plugin", "list", "--json"])
     assert listed.exit_code == 0
-    assert "Plugins (0/4 enabled)" in listed.output
-    assert "cvim" in listed.output
-    assert "disabled" in listed.output
+    names = {item["name"] for item in json.loads(listed.output)}
+    assert "cvim" not in names
+    assert "fork" not in names
+    assert {"notify", "code-review"}.issubset(names)
 
-    settings = json.loads((factory_home / "settings.json").read_text())
-    for event in ("SessionStart", "UserPromptSubmit", "SessionEnd"):
-        assert settings["hooks"][event][0]["hooks"][0]["command"] == "~/.dotfiles/bin/droid-session-map-hook"
 
-    listed_json = runner.invoke(cli, ["plugin", "list", "--json"])
-    assert listed_json.exit_code == 0
-    names = {item["name"]: item for item in json.loads(listed_json.output)}
-    assert {"cvim", "notify", "code-review", "fork"}.issubset(names)
-    assert names["cvim"]["enabled"] is False
-
-    enabled = runner.invoke(cli, ["plugin", "enable", "cvim"])
-    assert enabled.exit_code == 0
-    assert "Plugin 'cvim' enabled." in enabled.output
-    assert "commands: cvim, vim" in enabled.output
-    # cvim is a pure command plugin; it must not register any Claude or Codex
-    # wrapper (the CLI now exposes `hive cvim` / `hive vim` instead).
-    assert "skills:" not in enabled.output
-
-    enabled_json = runner.invoke(cli, ["plugin", "enable", "cvim", "--json"])
-    assert enabled_json.exit_code == 0
-    enable_payload = json.loads(enabled_json.output)
-    assert enable_payload["enabled"] is True
-    assert enable_payload["skills"] == []
-    factory_commands_root = factory_home / "commands"
-    assert (factory_commands_root / "vim").exists()
-    assert not (factory_commands_root / "vim").is_symlink()
-    assert (factory_commands_root / "cvim").exists()
-    assert not (factory_commands_root / "cvim").is_symlink()
-    # Claude and Codex should NOT receive command wrappers for cvim/vim anymore.
-    assert not (claude_home / "commands" / "cvim.md").exists()
-    assert not (claude_home / "commands" / "vim.md").exists()
-    assert not (codex_home / "skills" / "cvim").exists()
-    assert not (codex_home / "skills" / "vim").exists()
-    install_root = hive_home / "plugins" / "installed" / "cvim"
-    installed_runner = install_root / "bin" / "cvim-command"
-    installed_payload_builder = install_root / "bin" / "cvim-payload"
-    installed_seed_helper = install_root / "bin" / "cvim-seed"
-    installed_session_helper = install_root / "bin" / "cvim-session"
-    installed_protocol = install_root / "resources" / "cvim_edit_protocol.json"
-    assert installed_runner.exists()
-    assert installed_payload_builder.exists()
-    assert installed_seed_helper.exists()
-    assert installed_session_helper.exists()
-    assert installed_protocol.exists()
-    installed_runner_text = installed_runner.read_text()
-    assert "from hive." not in installed_runner_text
-    assert 'src_pane_pid="$(tmux display-message -p -t "$src_pane" \'#{pane_pid}\')"' in installed_runner_text
-    assert 'src_pane_tty="$(tmux display-message -p -t "$src_pane" \'#{pane_tty}\')"' in installed_runner_text
-    assert 'seed_helper="$script_dir/cvim-seed"' in installed_runner_text
-    assert 'session_helper="$script_dir/cvim-session"' in installed_runner_text
-    assert "session_map_file=" not in installed_runner_text
-    assert 'transcript_path="$("$session_helper" "$src_cwd" "" "$src_pane" 2>/dev/null || true)"' in installed_runner_text
-    assert 'transcript_path="$("$session_helper" "$src_cwd" "$droid_args" "$src_pane" 2>/dev/null || true)"' in installed_runner_text
-    assert '"$seed_helper" "$src_cwd" "$msg_file" "$transcript_path"' in installed_runner_text
-    assert '"$helper_file" "$reply_pane" "$editor_bin" "$msg_file" "$orig_file" "$tmpdir" "$output_mode"' in installed_runner_text
-    assert '"$submit_delay_default" "$clear_input_before_paste_default" "$cursor_mode" "$payload_builder"' in installed_runner_text
-    assert 'payload_builder="${14}"' in installed_runner_text
-    assert "\"$payload_builder\" \"$orig_file\" \"$msg_file\" \"$send_file\" \"$send_mode\"" in installed_runner_text
-    installed_session_text = installed_session_helper.read_text()
-    assert "usage: cvim-session <cwd> <droid_args> [pane_id]" in installed_session_text
-    payload_builder_text = installed_payload_builder.read_text()
-    assert "cvim_edit_protocol.json" in payload_builder_text
-    protocol_text = installed_protocol.read_text()
-    assert '"tag": "comment"' in protocol_text
-    assert '"defaultTarget": "previous_reply"' in protocol_text
-    installed_cvim_text = (factory_commands_root / "cvim").read_text()
-    installed_vim_text = (factory_commands_root / "vim").read_text()
-    assert 'exec hive cvim "$@"' in installed_cvim_text
-    assert 'exec hive vim "$@"' in installed_vim_text
-    assert "# DROID:" not in installed_cvim_text
-    assert "# DROID:" not in installed_vim_text
-
-    settings = json.loads((factory_home / "settings.json").read_text())
-    for event in ("SessionStart", "UserPromptSubmit", "SessionEnd"):
-        assert settings["hooks"][event][0]["hooks"][0]["command"] == "~/.dotfiles/bin/droid-session-map-hook"
-
-    relisted = runner.invoke(cli, ["plugin", "list", "--json"])
-    assert relisted.exit_code == 0
-    relisted_payload = {item["name"]: item for item in json.loads(relisted.output)}
-    assert relisted_payload["cvim"]["enabled"] is True
-
-    disabled = runner.invoke(cli, ["plugin", "disable", "cvim"])
-    assert disabled.exit_code == 0
-    assert "Plugin 'cvim' disabled." in disabled.output
-    assert not (factory_commands_root / "vim").exists()
-    assert not (factory_commands_root / "cvim").exists()
-    assert not (claude_home / "commands" / "vim.md").exists()
-    assert not (claude_home / "commands" / "cvim.md").exists()
-    assert not (codex_home / "skills" / "vim").exists()
-    assert not (codex_home / "skills" / "cvim").exists()
+@pytest.mark.parametrize("retired", ["cvim", "fork"])
+def test_plugin_enable_rejects_retired_plugins(runner, configure_hive_home, retired):
+    configure_hive_home(tmux_inside=False)
+    result = runner.invoke(cli, ["plugin", "enable", retired])
+    assert result.exit_code != 0
+    assert "core hive capability" in result.output
 
 
 def test_plugin_enable_code_review_materializes_skill(runner, configure_hive_home):
@@ -295,27 +201,15 @@ def capture_exec(monkeypatch):
     return calls
 
 
-@pytest.mark.parametrize(
-    "hive_command, plugin_name, plugin_command",
-    [
-        ("cvim", "cvim", "cvim"),
-        ("vim", "cvim", "vim"),
-        ("vfork", "fork", "vfork"),
-        ("hfork", "fork", "hfork"),
-    ],
-)
-def test_plugin_helper_commands_forward_to_installed_plugin_script(
+@pytest.mark.parametrize("hive_command, expected_mode", [("cvim", "cvim"), ("vim", "vim")])
+def test_cvim_cli_exec_core_binary_with_mode(
     runner,
     configure_hive_home,
     capture_exec,
     hive_command,
-    plugin_name,
-    plugin_command,
+    expected_mode,
 ):
-    hive_home = configure_hive_home(tmux_inside=True)
-
-    enable_result = runner.invoke(cli, ["plugin", "enable", plugin_name])
-    assert enable_result.exit_code == 0, enable_result.output
+    configure_hive_home(tmux_inside=True)
 
     result = runner.invoke(cli, [hive_command, "--", "--extra", "arg1"])
     assert result.exit_code == 0, result.output
@@ -323,23 +217,61 @@ def test_plugin_helper_commands_forward_to_installed_plugin_script(
     assert len(capture_exec) == 1
     command_name, argv = capture_exec[0]
     assert command_name == "bash"
-    expected_script = str(
-        hive_home / "plugins" / "installed" / plugin_name / "commands" / plugin_command
-    )
     assert argv[0] == "bash"
-    assert argv[1] == expected_script
-    # Extra args from the hive command line should be forwarded verbatim.
-    assert argv[2:] == ["--extra", "arg1"]
+    assert argv[1].endswith("core_assets/cvim/bin/cvim-command")
+    assert argv[2] == expected_mode
+    assert argv[3:] == ["--extra", "arg1"]
 
 
-def test_plugin_helper_command_errors_when_plugin_not_enabled(
-    runner,
-    configure_hive_home,
-    capture_exec,
+@pytest.fixture
+def capture_fork_subprocess(monkeypatch):
+    popen_calls: list[list[str]] = []
+    run_calls: list[list[str]] = []
+
+    class _FakePopen:
+        def __init__(self, argv, **kwargs):
+            popen_calls.append(list(argv))
+
+    def _fake_run(argv, **kwargs):
+        run_calls.append(list(argv))
+
+        class _R:
+            returncode = 0
+        return _R()
+
+    monkeypatch.setattr("hive.cli.subprocess.Popen", _FakePopen)
+    monkeypatch.setattr("hive.cli.subprocess.run", _fake_run)
+    return popen_calls, run_calls
+
+
+@pytest.mark.parametrize("hive_command, expected_split", [("vfork", "v"), ("hfork", "h")])
+def test_fork_split_spawns_background_hive_fork(
+    runner, configure_hive_home, capture_fork_subprocess, monkeypatch, hive_command, expected_split
 ):
     configure_hive_home(tmux_inside=True)
+    monkeypatch.setenv("TMUX_PANE", "%42")
 
-    result = runner.invoke(cli, ["cvim"])
-    assert result.exit_code != 0
-    assert "plugin 'cvim' is not enabled" in result.output
-    assert capture_exec == []
+    popen_calls, run_calls = capture_fork_subprocess
+    result = runner.invoke(cli, [hive_command, "--", "--extra", "arg1"])
+    assert result.exit_code == 0, result.output
+
+    assert popen_calls == [["hive", "fork", "-s", expected_split, "--extra", "arg1"]]
+    assert len(run_calls) == 1
+    escape_argv = run_calls[0]
+    assert escape_argv[:3] == ["tmux", "run-shell", "-b"]
+    assert "%42" in escape_argv[3]
+    assert "Escape" in escape_argv[3]
+
+
+def test_fork_split_without_tmux_pane_skips_escape(
+    runner, configure_hive_home, capture_fork_subprocess, monkeypatch
+):
+    configure_hive_home(tmux_inside=True)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+
+    popen_calls, run_calls = capture_fork_subprocess
+    result = runner.invoke(cli, ["vfork"])
+    assert result.exit_code == 0, result.output
+
+    assert popen_calls == [["hive", "fork", "-s", "v"]]
+    assert run_calls == []

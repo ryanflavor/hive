@@ -1,8 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
-export DROID_VIM_SEED_MODE=session
-export DROID_VIM_OUTPUT_MODE=diff
-export DROID_VIM_CURSOR_MODE=start
-export DROID_VIM_TRANSPORT=popup
-exec "${HIVE_PLUGIN_ROOT}/bin/cvim-command" "$@"
