@@ -1,6 +1,7 @@
 ---
 name: gang-orch
 description: GANG orchestrator skill. 你是 orch,编排 gang 闭环 — 拆 feature / 派 peer / 收 verdict / 翻 board / 集成验 / 向 human 汇报。
+disable-model-invocation: true
 ---
 
 # GANG — orch

@@ -1,6 +1,7 @@
 ---
 name: gang-worker
 description: GANG worker skill. 你是 worker,接 orch 派的 feature,做最小 self-check,把 handoff 交给 validator-N,由 validator 向上游出 verdict。
+disable-model-invocation: true
 ---
 
 # GANG — worker

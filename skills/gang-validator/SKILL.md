@@ -1,6 +1,7 @@
 ---
 name: gang-validator
 description: GANG validator skill. 你是 validator,rule-based 核实 worker 的 handoff 是否满足 val 标准,出 verdict。
+disable-model-invocation: true
 ---
 
 # GANG — validator

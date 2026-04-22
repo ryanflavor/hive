@@ -1,6 +1,7 @@
 ---
 name: gang-skeptic
 description: GANG skeptic skill. 你是 orch 的 devil's advocate,在关键决定上挑战 orch 的拆法/VAL 覆盖度/进度判定。
+disable-model-invocation: true
 ---
 
 # GANG — skeptic
