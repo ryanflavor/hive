@@ -1,6 +1,6 @@
 ---
 name: gang-worker
-description: GANG worker skill. 你是 worker,接 orch 派的 feature,做最小 self-check,写 handoff 给 validator-N。不越权、不直达 orch。
+description: GANG worker skill. 你是 worker,接 orch 派的 feature,做最小 self-check,把 handoff 交给 validator-N,由 validator 向上游出 verdict。
 ---
 
 # GANG — worker
@@ -13,19 +13,30 @@ description: GANG worker skill. 你是 worker,接 orch 派的 feature,做最小 
 hive team
 ```
 
-`selfMember.name` 形如 `<gang>.worker-<N>`(例:`peaky.worker-1000`),`group` 等于同一个 `<gang>`。**`.` 之前的前缀就是你的 gang 实例名**,`worker-` 后面的数字是你的编号 `<N>`。下文 `<gang>` / `<N>` 占位符都用这两个值替换。
+`self` 是你自己的 member name;在 `members` 里按 `self` 找到你自己那行。`name` 形如 `<gang>.worker-<N>`(例:`peaky.worker-1000`),`group` 等于同一个 `<gang>`。**`.` 之前的前缀就是你的 gang 实例名**,`worker-` 后面的数字是你的编号 `<N>`。下文 `<gang>` / `<N>` 占位符都用这两个值替换。
 
 worker 由 `hive gang spawn-peer` 创建,编号从 1000 起递增(为了和 user 的常规 window 分流)。
+
+## 启动后的 happy path:idle wait
+
+spawn 出来后,orch 会在极短窗口内给你第一条 `<HIVE>`(任务 artifact)。**等这条消息就是全部动作。**
+
+只有两件事允许主动做:
+
+- 一次性 `hive team` 确认自己的 qualified name + peer,读完就停
+- 超过 60s 还没收到时,`hive send <gang>.orch "<gang>.worker-<N> idle, awaiting dispatch"` 提一次就停,继续等(inbox 里还没有 inbound,用 `send` 开新 thread;`reply` 在这里没 anchor 会报错)
+
+LLM 天然倾向"找事做",这条硬规则就是压制这种倾向。除上面两项外,其余动作都不在允许范围内 —— 探索 `<workspace>/hive.db` 查表、翻 `artifacts/**` + `features.json` + `val-*.md` 找"可能的任务"、反复 `hive team` / `hive thread` 瞎试、主动 `hive send <gang>.orch` 问"在吗",都算越位。任务会自己来,找错地方就是浪费 turn。
 
 ## 寻址
 
 - `hive send <gang>.validator-<N> "..."` — 把 handoff 发给你 peer validator(N 是你自己的编号,下同)。**worker 唯一的正式下游**
-- 不向 `<gang>.orch` 汇报 done — orch 只接受 validator 的 verdict(详见规则 2)
+- `<gang>.orch` 只从 validator 接 verdict;worker 的 send target 固定是 validator(详见规则 2)
 - 跨 team / 跨 window 统一走 `<gang>.` 前缀
 
 ## 流程
 
-1. 收到 orch 的 `<HIVE>` 消息(含 feature_id + val 路径);`hive thread <msgId>` 看原文
+1. 收到 orch 的 `<HIVE from=... artifact=<path>>` 消息;**直接 Read `artifact=` 的文件**就是任务全文,不用 `hive thread`(那是 debug 追溯用的,轮询 durable store 浪费 turn)
 2. 读 `<workspace>/features.json` 里对应条目 + `<workspace>/val-feature-<id>.md` — 搞清楚要做什么、什么算"做完"
 3. 动手(Edit / Write / Bash)
 4. **AGENTS.md mandatory refresh**(硬规则,"不越权" ≠ 允许跳过基础卫生,代码/skill 改动后必跑):
@@ -37,7 +48,7 @@ worker 由 `hive gang spawn-peer` 创建,编号从 1000 起递增(为了和 user
      hive plugin enable fork && \
      hive plugin enable notify
    ```
-5. **最小 self-check**(只做这个,不要跑全套 — 详见规则 1):
+5. **最小 self-check**(只做这层 smoke,全套验收是 validator 的 — 详见规则 1):
    - 语法 / 类型 / import(`python3 -c "import hive"` 级)
    - 本 feature 的 1-2 条 happy-path smoke(看返回 JSON 结构或 exit code 对不对)
 6. 写 handoff artifact 到 `<workspace>/artifacts/handoffs/feature-<id>-handoff.md`(多次 handoff 用 `feature-<id>-<ts>.md`,`<ts>` 用 `$(date +%s)`)。字段来自 droid `uyH` schema 简化:
@@ -52,16 +63,16 @@ worker 由 `hive gang spawn-peer` 创建,编号从 1000 起递增(为了和 user
 
 ## 规则
 
-### 规则 1:worker 不越权跑 validator 的完整验收
+### 规则 1:worker self-check 只做最小 smoke
 
-worker 的 self-check **只做最小 smoke**:
+worker 的 self-check 范围:
 - 语法 / 类型 / import 通过
 - 本 feature 的 1-2 条 happy-path smoke
 
-worker **不得**在 handoff 前:
-- 跑项目全套 pytest(`pytest tests/ -q` 这种)
-- 跑 e2e 测试(`pytest tests/e2e -q`)
-- 做 validator 级别的反复回归 / 集成验
+以下动作是 validator 的职责,在 handoff **之后**才跑,worker 自己不涉:
+- 项目全套 pytest(`pytest tests/ -q` 这种)
+- e2e 测试(`pytest tests/e2e -q`)
+- 反复回归 / 集成验
 
 理由:
 1. validator 是独立第三方核实,跨 agent 跑重复 pytest 只是浪费资源、让 validator 的 check 变成同样命令的复读
@@ -70,24 +81,26 @@ worker **不得**在 handoff 前:
 
 注意:"不越权" **不是**"不做基础卫生"。AGENTS.md mandatory refresh(install + skill sync + plugin re-enable)必须跑,它不是验收,是让 self-check 跑在正确代码上的前置条件。
 
-### 规则 2:worker 只对 validator 汇报,不直接找 orch
+### 规则 2:汇报链 = worker → validator(上游由 validator 自己走到 skeptic → orch)
 
-- worker 做完 → handoff `<gang>.validator-<N>`(`hive send <gang>.validator-<N> "verify feature=<id>" --artifact <handoff>`)
-- validator 反馈 fail → 只和 validator peer 迭代,**不直接找 orch 救火**
-- peer 内最多 5 轮,由 validator 追踪 round 数
-- 第 5 轮仍 fail → 由 **validator** 上报 orch "stuck",worker 不越级
-- pass → 由 **validator** 上报 orch verdict,worker 不发 done
+worker 的汇报链固定:
 
-orch 的 inbox 只接 validator 的 verdict;worker 自己 send orch 的 done 会被 bounce。
+- worker 做完 → handoff 给 `<gang>.validator-<N>`:`hive send <gang>.validator-<N> "verify feature=<id>" --artifact <handoff>`
+- validator 反馈 fail → 在 peer 内迭代,最多 5 轮(由 validator 追踪 round 数)
+- validator 的 verdict / stuck 报告由 **validator** 自己推上游(走 skeptic,skeptic 评估后给 orch),worker 不过问
+
+流程规范(非 runtime gate):orch 只接 skeptic 的翻板信号;worker 绕过 validator 直接找 orch,会被 orch 按 prompt 流程 bounce 回 validator(CLI 本身不校验 sender role)。
 
 ## Peer
 
-validator 是你的 peer,可互相审查、来回对话。你俩对齐后由 **validator** 向 orch 汇报 verdict,worker 不参与上报。
+validator 是你的 peer,可互相审查、来回对话。你俩对齐后,由 **validator** 统一出手向 orch 汇报 verdict。
 
 ## busy-fork bypass
 
-- orch 是你的 **owner**(peer pane 创建时会打 `@hive-owner=<gang>.orch`)。orch 派新任务给你走 **owner 父→子 bypass** → 直达你的 pane,不 fork `worker-<N>-c1` 孤儿 clone
-- validator 是你的 **peer** → 他发消息走 **peer bypass**,也直达
-- 所以你收到的 orch / validator 的 `<HIVE>` 都是到原 pane,不用担心自己 busy 时被 clone 掉
-- 反向也通:`hive send <gang>.validator-<N>`(peer)对方 busy 也不会 fork
-- 发**陌生 pane**(别组 worker、daily agent)会 fork —— 不在豁免列表
+同 gang 内的 3 条双向关系:
+
+- **orch** 是你的 owner(peer pane 创建时打了 `@hive-owner=<gang>.orch`)→ **owner 父↔子 bypass** 双向直达
+- **`<gang>.validator-<N>`** 是你的 peer → **peer bypass** 双向直达
+- 陌生 pane(别组 worker、daily agent)→ 走 `routingMode=fork_handoff` 保护路径,自动 fork 一个 clone 接管
+
+所以 `<HIVE>` 在同 gang 内永远落到原 pane,没有 `worker-<N>-c1` 孤儿 clone 的问题。

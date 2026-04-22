@@ -260,7 +260,7 @@ def test_team_runtime_keeps_distinct_claude_sessions_for_same_window(
     assert bobo["sessionId"] == "sess-new"
 
 
-def test_team_exposes_self_member(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_team_sets_self_pointer_and_member_runtime(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"
     assert runner.invoke(cli, ["create", "team-sm", "--workspace", str(workspace)]).exit_code == 0
@@ -286,23 +286,45 @@ def test_team_exposes_self_member(runner, configure_hive_home, monkeypatch, tmp_
 
     assert payload["self"] == "orch"
     assert isinstance(payload["self"], str)
-    self_member = payload["selfMember"]
-    assert self_member["name"] == "orch"
-    assert self_member["role"] == "agent"
-    assert self_member["pane"].startswith("%")
-    assert "group" in self_member
-    assert self_member["model"] == "gpt-5.4"
-    assert self_member["busy"] is False
-    assert self_member["sessionId"] == "orch-session-1"
+    assert "selfMember" not in payload
+    orch = next(m for m in payload["members"] if m["name"] == "orch")
+    assert orch["role"] == "agent"
+    assert orch["pane"].startswith("%")
+    assert orch["model"] == "gpt-5.4"
+    assert orch["busy"] is False
+    assert orch["sessionId"] == "orch-session-1"
+    # Pane has no @hive-group tag here; group should be absent, not empty.
+    assert "group" not in orch
     assert "group" not in payload
 
 
-def test_team_self_member_projects_only_available_fields(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_team_member_group_surfaces_from_pane_tag(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    assert runner.invoke(cli, ["create", "team-g", "--workspace", str(workspace)]).exit_code == 0
+
+    # Re-tag the already-created lead pane, adding `group=peer`. FakeTmuxState
+    # merges opts, so role/agent/team stay intact.
+    tmux.tag_pane("%0", "agent", "orch", "team-g", group="peer")
+
+    _patch_runtime(
+        monkeypatch,
+        {"members": {"orch": {"alive": True, "busy": False}}},
+    )
+
+    result = runner.invoke(cli, ["team"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+
+    orch = next(m for m in payload["members"] if m["name"] == "orch")
+    assert orch["group"] == "peer"
+
+
+def test_team_board_member_has_no_runtime_fields(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home(current_pane="%11", session_name="dev")
     workspace = tmp_path / "ws"
     assert runner.invoke(cli, ["create", "team-b", "--workspace", str(workspace)]).exit_code == 0
 
-    from hive import tmux
     tmux.tag_pane("%11", "board", "myboard", "team-b")
 
     _patch_runtime(
@@ -321,15 +343,16 @@ def test_team_self_member_projects_only_available_fields(runner, configure_hive_
     assert result.exit_code == 0
     payload = json.loads(result.output)
 
-    self_member = payload["selfMember"]
-    assert self_member["name"] == "myboard"
-    assert self_member["role"] == "board"
-    assert self_member["pane"].startswith("%")
-    assert "group" in self_member
-    assert "model" not in self_member
-    assert "sessionId" not in self_member
-    assert "turnPhase" not in self_member
-    assert "inputState" not in self_member
+    assert payload["self"] == "myboard"
+    assert "selfMember" not in payload
+    myboard = next(m for m in payload["members"] if m["name"] == "myboard")
+    assert myboard["role"] == "board"
+    assert myboard["pane"].startswith("%")
+    assert "model" not in myboard
+    assert "sessionId" not in myboard
+    assert "turnPhase" not in myboard
+    assert "inputState" not in myboard
+    assert "group" not in myboard
 
 
 def test_team_unbound_returns_bootstrap(runner, configure_hive_home, monkeypatch):

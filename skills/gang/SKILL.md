@@ -11,33 +11,32 @@ description: GANG entry skill. 用户打 /gang 表示要把当前 pane 升级成
 hive gang init
 ```
 
-完事。剩下全部由 `hive gang init` 内部负责:
+完事。执行后你会看到:
 
-- `tmux break-pane` 把当前 pane 搬到新 window(orch 身份随当前 CLI 带过去)
-- 按屏幕宽高 auto-pick 横 / 竖屏 layout
-- spawn **skeptic**(anti-orch 家族 CLI,claude↔codex;droid 默认 claude)
-- spawn **board**(vim 打开 BLACKBOARD.md)
-- dispatch `/gang-orch` 给 orch pane → 你之后的 duty 由 `gang-orch` skill 接管,本 skill 退场
+- 当前 pane 切到新的 gang window,orch 身份带过去
+- 同 window 出现 skeptic(异族 CLI,claude↔codex;droid 默认 claude)和 board(vim 打开 BLACKBOARD.md)
+- `/gang-orch` 自动接管 orch pane,本 skill 退场
 
 用户想显式指定 gang 实例名可传 `--name <name>`;不传就由 CLI 自动分配。
 
 ## 前置
 
 - **当前 pane 正在跑 agent CLI**(claude / codex / droid),不是光秃秃 shell
-- **workspace 已经 `hive init`**(未 init 时 `hive gang init` 会报错提示)
+- workspace 不需要先 `hive init` —— `hive gang init` 可独立运行,未 init 时自动建 team / workspace
 
-## 不做什么
+## 边界(本 skill 只做一件事)
 
-- 不要自己 `tmux new-window` / `split-window` —— `hive gang init` 负责
-- 不要手工 spawn skeptic / board —— 同上
-- 不要在这个 skill 里做 planning / 拆 feature —— planning 由 `gang-orch` 接管后再做
-- 不要问用户要 workspace 路径 / agent name —— 都从当前 pane 上下文推断
+本 skill 只负责跑 `hive gang init`。其余职责在 CLI 和下游 skill 里已经归位:
+
+- **tmux 窗口 / 分栏布局** — `hive gang init` 自己做
+- **skeptic / board spawn** — `hive gang init` 内部负责
+- **workspace 路径 / agent name** — 从当前 pane 上下文自动推断,直接用
+- **planning / 拆 feature** — 是 `/gang-orch` 接管之后的 duty,本 skill 不涉
 
 ## 报错兜底
 
 - `hive: command not found` → 告诉用户 `pipx install git+https://github.com/notdp/hive.git`
 - 报 "not an agent pane" → 当前 pane 不是 agent CLI,换到跑着 claude/codex/droid 的 pane 再 `/gang`
-- 报 "workspace not initialized" → 提示用户先 `hive init`
 
 ## 模型异质
 

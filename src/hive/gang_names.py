@@ -93,3 +93,22 @@ def pick_available_name(fallback_suffix: str = "") -> str:
         counter += 1
         fallback = f"gang-{suffix}-{counter}"
     return fallback
+
+
+def pick_range_base(gang_name: str, claimed_bases: set[int]) -> int:
+    """Pick a 1000-step tmux window-index base for *gang_name*.
+
+    Each gang owns a 1000-wide slice of peer window indices so peer
+    windows sort visually by gang (peaky 1000-1999, krays 2000-2999,
+    crips 3000-3999, ...). Pool names get deterministic bases by pool
+    position (peaky → 1000, krays → 2000, ...); anything else falls
+    back to the first unused 1000-multiple.
+    """
+    if gang_name in GANG_NAME_POOL:
+        preferred = (GANG_NAME_POOL.index(gang_name) + 1) * 1000
+        if preferred not in claimed_bases:
+            return preferred
+    base = 1000
+    while base in claimed_bases:
+        base += 1000
+    return base

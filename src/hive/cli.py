@@ -424,44 +424,6 @@ def _augment_team_payload_with_runtime(t: Team, payload: dict[str, object]) -> d
     return payload
 
 
-_SELF_MEMBER_PROJECTION_KEYS = (
-    "peer",
-    "alive",
-    "busy",
-    "model",
-    "sessionId",
-    "inputState",
-    "inputReason",
-    "pendingQuestion",
-    "turnPhase",
-)
-
-
-def _build_self_member(payload: dict[str, object], self_name: str) -> dict[str, object] | None:
-    members = payload.get("members")
-    if not isinstance(members, list):
-        return None
-    self_row: dict[str, object] | None = None
-    for member in members:
-        if isinstance(member, dict) and member.get("name") == self_name:
-            self_row = member
-            break
-    if self_row is None:
-        return None
-    current_pane = tmux.get_current_pane_id() if tmux.is_inside_tmux() else ""
-    group = tmux.get_pane_option(current_pane, "hive-group") if current_pane else ""
-    self_member: dict[str, object] = {
-        "name": self_name,
-        "role": self_row.get("role", ""),
-        "pane": self_row.get("pane", ""),
-        "group": group or "",
-    }
-    for key in _SELF_MEMBER_PROJECTION_KEYS:
-        if key in self_row:
-            self_member[key] = self_row[key]
-    return self_member
-
-
 def _should_show_description(desc: object) -> bool:
     if not isinstance(desc, str) or not desc:
         return False
@@ -481,12 +443,6 @@ def _team_status_payload(t: Team) -> dict[str, object]:
         ctx = hive_context.load_current_context()
         if ctx.get("team") == t.name and ctx.get("agent"):
             payload["self"] = str(ctx["agent"])
-
-    self_name = payload.get("self")
-    if isinstance(self_name, str) and self_name:
-        self_member = _build_self_member(payload, self_name)
-        if self_member is not None:
-            payload["selfMember"] = self_member
 
     return _add_runtime_location_fields(payload)
 
@@ -2381,9 +2337,16 @@ def gang_init_cmd(peer_cli: str | None, gang_name: str | None):
         if not gang_window:
             _fail("failed to break-pane into new window")
 
+    session_for_base = tmux.get_current_session_name() or ""
+    range_base = gang_names.pick_range_base(
+        gang_name,
+        _claimed_gang_bases(session_for_base) if session_for_base else set(),
+    )
+
     tmux.set_window_option(gang_window, "@hive-team", t.name)
     tmux.set_window_option(gang_window, "@hive-workspace", t.workspace or ws)
     tmux.set_window_option(gang_window, "@hive-gang-name", gang_name)
+    tmux.set_window_option(gang_window, "@hive-gang-base", str(range_base))
     if t.description:
         tmux.set_window_option(gang_window, "@hive-desc", t.description)
     tmux.set_window_option(gang_window, "@hive-created", str(t.created_at or time.time()))
@@ -2446,6 +2409,7 @@ def gang_init_cmd(peer_cli: str | None, gang_name: str | None):
         "window": gang_window,
         "gangName": gang_name,
         "group": gang_name,
+        "peerIndexRange": [range_base, range_base + 999],
         "orientation": orientation,
         "orch": {"pane": orch_pane, "name": orch_agent_name},
         "skeptic": {"pane": skeptic_agent.pane_id, "name": skeptic_agent_name},
@@ -2454,43 +2418,99 @@ def gang_init_cmd(peer_cli: str | None, gang_name: str | None):
     }, indent=2))
 
 
-def _next_gang_window_index(session: str) -> int:
-    """Next monotonic tmux window index (>= 1000) in *session*.
+def _claimed_gang_bases(session: str) -> set[int]:
+    """Return every ``@hive-gang-base`` index currently claimed in *session*.
 
-    Gang peer windows live at explicit indices 1000+ so they never collide
-    with the user's regular windows (typically 0-99). Scans current session
-    window indices, filters for >= 1000, returns max+1 (or 1000 if none).
-    The peer business id (worker/validator/team suffix) reuses this same
-    index so a single number threads tmux → team → agent naming.
+    Scans live windows for the ``@hive-gang-base`` option (set at
+    ``hive gang init`` time). Used by ``pick_range_base`` to avoid
+    colliding ranges across gangs coexisting in the same session.
     """
-    ge_1000 = [i for i in tmux.list_window_indices(session) if i >= 1000]
-    return (max(ge_1000) + 1) if ge_1000 else 1000
+    claimed: set[int] = set()
+    for idx in tmux.list_window_indices(session):
+        target = f"{session}:{idx}"
+        base_val = tmux.get_window_option(target, "hive-gang-base")
+        if not base_val:
+            continue
+        try:
+            claimed.add(int(base_val))
+        except ValueError:
+            continue
+    return claimed
 
 
-# Default tmux window name for a freshly-spawned gang peer. Orch renames
-# via `tmux rename-window` as the peer progresses: `pending` →
-# `<feature>-running` → `<feature>-done` / `<feature>-fail`. Tmux index
-# 1000+ already disambiguates peers, so the name carries no index noise.
+def _next_peer_index_in_range(session: str, base: int) -> int:
+    """Next unused tmux window index inside *gang*'s range ``[base, base+999]``.
+
+    Each gang owns a 1000-wide slice of peer indices (peaky 1000-1999,
+    krays 2000-2999, ...). Peer windows are placed strictly monotonically
+    within the range; we never reuse a retired slot to keep the
+    index-as-identity invariant stable across the peer's lifetime.
+
+    Fails loudly when the range is exhausted — user must cleanup / retire
+    before spawning more.
+    """
+    range_end = base + 999
+    used = [i for i in tmux.list_window_indices(session) if base <= i <= range_end]
+    if not used:
+        return base
+    nxt = max(used) + 1
+    if nxt > range_end:
+        _fail(
+            f"gang peer index range {base}-{range_end} exhausted in session '{session}'; "
+            "retire old peers or run `hive gang cleanup` before spawning more"
+        )
+    return nxt
+
+
+# Default tmux window name for a freshly-spawned gang peer before the
+# atomic dispatch rename kicks in. Full lifecycle per gang:
+# ``<gang>-pending`` → ``<gang>-<feature>-running`` → ``<gang>-<feature>-done``
+# / ``<gang>-<feature>-fail``. The gang-name prefix groups peer windows
+# visually under their owning gang in the tmux status bar.
 _GANG_PEER_WINDOW_NAME_INITIAL = "pending"
 
 
 @gang_cmd.command("spawn-peer")
-def gang_spawn_peer_cmd():
-    """Spawn a fresh peer pair (worker + validator) for one feature.
+@click.option(
+    "--feature-id",
+    "feature_id",
+    required=True,
+    help="Feature id (e.g. F1) — used for window name and dispatch body",
+)
+@click.option(
+    "--task",
+    "task_artifact",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Task artifact path for worker dispatch (required so worker never boots into an empty inbox)",
+)
+@click.option(
+    "--val",
+    "val_artifact",
+    default="",
+    type=click.Path(dir_okay=False),
+    help="VAL artifact path for validator bootstrap (defaults to <workspace>/val-feature-<feature-id>.md if it exists)",
+)
+def gang_spawn_peer_cmd(feature_id: str, task_artifact: str, val_artifact: str):
+    """Spawn a fresh peer pair (worker + validator) and dispatch the task atomically.
 
     Must run from an orch pane inside a gang window — inherits the gang
     instance name from the caller's ``@hive-group`` tag so worker/validator
     names carry the same prefix (e.g. ``peaky.worker-1000`` when orch is
     ``peaky.orch``).
 
-    Auto-places the peer at tmux window index 1000+ (monotonic, never
-    reusing an existing index) so the peer window never collides with the
-    user's regular low-index windows. The same number threads through tmux
-    window, team name, and agent names — `$session:1000` pairs with team
-    `<main>-peer-1000` / `<gang>.worker-1000` / `<gang>.validator-1000`.
+    Atomic dispatch: once both peers are ready, the command renames the
+    window to ``<gang>-<feature>-running`` and sends the task artifact to
+    worker + a bootstrap message to validator. This closes the window
+    between spawn and first task, stopping the peer from boot-exploring
+    sqlite / artifacts on its own while waiting.
 
-    Initial window name is `pending`; orch renames via `tmux rename-window`
-    as the lifecycle advances (`<feature>-running/done/fail`).
+    Per-gang index range: each gang owns a 1000-wide slice of tmux peer
+    window indices — peaky 1000-1999, krays 2000-2999, crips 3000-3999
+    (canonical pool positions), non-pool fallbacks get the next unused
+    1000-block. Peers within a gang are monotonic inside that slice, so
+    `$session:1000` pairs with team `<main>-peer-1000` / `<gang>.worker-1000`
+    / `<gang>.validator-1000`, visually grouping by gang in the status bar.
 
     Worker runs claude, validator runs codex. Both tagged
     ``@hive-group=<gang>`` and ``@hive-owner=<gang>.orch`` for owner-bypass
@@ -2520,7 +2540,21 @@ def gang_spawn_peer_cmd():
     if not session:
         _fail("cannot determine tmux session")
 
-    n = _next_gang_window_index(session)
+    # Read the gang's index-range base from the gang window. For gang
+    # windows that pre-date the range scheme (or were tagged manually),
+    # auto-compute + stamp now so future spawns are consistent.
+    gang_window_target = main_team.tmux_window or ""
+    range_base_val = tmux.get_window_option(gang_window_target, "hive-gang-base") if gang_window_target else None
+    try:
+        range_base = int(range_base_val) if range_base_val else 0
+    except ValueError:
+        range_base = 0
+    if not range_base:
+        range_base = gang_names.pick_range_base(gang_name, _claimed_gang_bases(session))
+        if gang_window_target:
+            tmux.set_window_option(gang_window_target, "@hive-gang-base", str(range_base))
+
+    n = _next_peer_index_in_range(session, range_base)
     worker_name = f"{gang_name}.worker-{n}"
     validator_name = f"{gang_name}.validator-{n}"
     owner_name = f"{gang_name}.orch"
@@ -2542,7 +2576,11 @@ def gang_spawn_peer_cmd():
         for sub in ("tasks", "handoffs", "verdicts"):
             (artifacts_root / sub).mkdir(parents=True, exist_ok=True)
     peer_team_name = f"{main_team.name}-peer-{n}"
-    window_name = _GANG_PEER_WINDOW_NAME_INITIAL
+    # Window name carries the gang prefix so peer windows group visually
+    # under their owning gang in tmux status bars. The `-pending` suffix
+    # is momentary — the atomic dispatch block below renames to
+    # `<gang>-<feature>-running` once both peers are ready.
+    window_name = f"{gang_name}-{_GANG_PEER_WINDOW_NAME_INITIAL}"
     # Prefer orch pane's cwd (user's project dir) over Hive workspace state dir.
     cwd = tmux.display_value(current_pane, "#{pane_current_path}") or workspace or os.getcwd()
 
@@ -2619,18 +2657,76 @@ def gang_spawn_peer_cmd():
         }, indent=2))
         sys.exit(1)
 
-    click.echo(json.dumps({
+    # Atomic dispatch: rename the window to the running lifecycle state and
+    # immediately hand task + val bootstrap to worker and validator. Without
+    # this, the peer boots into an empty inbox and LLM-style agents tend to
+    # wander off exploring sqlite / artifacts on their own (that's the
+    # "spawn-without-task" anti-pattern).
+    running_window_name = f"{gang_name}-{feature_id}-running"
+    tmux.rename_window(peer_window, running_window_name)
+
+    task_path = str(Path(task_artifact).resolve())
+    if val_artifact:
+        val_path = str(Path(val_artifact).resolve())
+    else:
+        val_default = Path(workspace) / f"val-feature-{feature_id}.md" if workspace else None
+        val_path = str(val_default.resolve()) if val_default and val_default.is_file() else ""
+
+    dispatch_errors: list[dict[str, str]] = []
+    try:
+        _request_send_payload(
+            workspace=workspace,
+            team=peer_team,
+            sender_agent=owner_name,
+            target_agent=worker_name,
+            body=f"execute feature={feature_id}",
+            artifact=task_path,
+            command_name="gang-spawn-dispatch",
+            warn_on_long_body=False,
+        )
+    except RuntimeError as exc:
+        dispatch_errors.append({"target": worker_name, "error": str(exc)})
+
+    try:
+        _request_send_payload(
+            workspace=workspace,
+            team=peer_team,
+            sender_agent=owner_name,
+            target_agent=validator_name,
+            body=f"standby for feature={feature_id} handoff",
+            artifact=val_path,
+            command_name="gang-spawn-dispatch",
+            warn_on_long_body=False,
+        )
+    except RuntimeError as exc:
+        dispatch_errors.append({"target": validator_name, "error": str(exc)})
+
+    result = {
         "group": "gang",
         "peerTeam": peer_team_name,
         "window": peer_window,
-        "windowName": window_name,
+        "windowName": running_window_name,
         "workspace": workspace,
         "orientation": orientation,
+        "featureId": feature_id,
+        "dispatch": {
+            "worker": {"target": worker_name, "artifact": task_path},
+            "validator": {"target": validator_name, "artifact": val_path},
+        },
         "panes": {
             worker_name: worker_agent.pane_id,
             validator_name: validator_agent.pane_id,
         },
-    }, indent=2))
+    }
+    if dispatch_errors:
+        result["dispatchErrors"] = dispatch_errors
+        result["hint"] = (
+            "peer spawned and ready, but dispatch send failed. "
+            "Retry manually via `hive send <agent> ... --artifact <path>`."
+        )
+        click.echo(json.dumps(result, indent=2))
+        sys.exit(1)
+    click.echo(json.dumps(result, indent=2))
 
 
 @gang_cmd.command("layout")

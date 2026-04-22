@@ -17,7 +17,7 @@ def test_current_reads_persisted_context(runner, configure_hive_home, tmp_path):
     assert payload["name"] == "team-d"
     assert payload["runtimeWorkspace"] == str(workspace)
     assert payload["cwd"] == os.getcwd()
-    assert payload["selfMember"]["name"] == "orch"
+    assert payload["self"] == "orch"
 
 
 def test_current_discovers_tmux_when_no_team(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -107,8 +107,8 @@ def test_current_discovers_registered_agent_from_tmux_pane(runner, configure_hiv
     assert payload["name"] == "dev"
     assert payload["runtimeWorkspace"] == str(tmp_path / "ws")
     assert payload["self"] == "alpha"
-    assert payload["selfMember"]["name"] == "alpha"
-    assert payload["selfMember"]["pane"] == "%9"
+    alpha = next(m for m in payload["members"] if m["name"] == "alpha")
+    assert alpha["pane"] == "%9"
     assert payload["tmuxSession"] == "dev"
     assert payload["tmuxWindow"] == "dev:0"
     assert payload["cwd"] == os.getcwd()
@@ -124,15 +124,15 @@ def test_current_shows_tagged_role_for_lead_pane(runner, configure_hive_home, mo
     tmux.set_window_option("dev:0", "@hive-created", "0")
     tmux.tag_pane("%0", "lead", "orch", "dev")
 
-    # Even when the pane command is a shell, selfMember discovery still works off the tmux tag.
+    # Even when the pane command is a shell, self discovery still works off the tmux tag.
     monkeypatch.setattr("hive.cli.tmux.get_pane_current_command", lambda _pane: "python3.12")
 
     result = runner.invoke(cli, ["team"])
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["self"] == "orch"
-    assert payload["selfMember"]["name"] == "orch"
-    assert payload["selfMember"]["pane"] == "%0"
+    orch = next(m for m in payload["members"] if m["name"] == "orch")
+    assert orch["pane"] == "%0"
 
 
 def test_current_returns_tagged_role_regardless_of_tty(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -145,7 +145,7 @@ def test_current_returns_tagged_role_regardless_of_tty(runner, configure_hive_ho
     tmux.set_window_option("dev:0", "@hive-created", "0")
     tmux.tag_pane("%0", "lead", "orch", "dev")
 
-    # These overrides don't break selfMember discovery (self is taken from the pane tag).
+    # These overrides don't break self discovery (self is taken from the pane tag).
     monkeypatch.setattr("hive.cli.tmux.get_pane_current_command", lambda _pane: "2.1.88")
     monkeypatch.setattr("hive.cli.tmux.get_pane_title", lambda _pane: "✳ Claude Code")
     monkeypatch.setattr("hive.cli.tmux.get_pane_tty", lambda _pane: "/dev/ttys012")
@@ -155,8 +155,8 @@ def test_current_returns_tagged_role_regardless_of_tty(runner, configure_hive_ho
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["self"] == "orch"
-    assert payload["selfMember"]["name"] == "orch"
-    assert payload["selfMember"]["pane"] == "%0"
+    orch = next(m for m in payload["members"] if m["name"] == "orch")
+    assert orch["pane"] == "%0"
 
 
 def test_init_returns_existing_team_for_registered_member(runner, configure_hive_home, monkeypatch, tmp_path):

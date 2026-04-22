@@ -23,7 +23,7 @@ import pytest
 
 from hive.cli import (
     _GANG_PEER_WINDOW_NAME_INITIAL,
-    _next_gang_window_index,
+    _next_peer_index_in_range,
     _wait_for_peer_ready,
     cli,
 )
@@ -145,63 +145,95 @@ def test_wait_for_peer_ready_times_out_and_returns_not_ready(monkeypatch):
     assert not_ready == {"gang.worker-1", "gang.validator-1"}
 
 
-# --- G7: tmux window index auto-placement ---
+# --- gang range: tmux window index allocation per gang ---
 #
-# Peer windows live at explicit tmux indices >= 1000 so they never collide
-# with the user's regular windows (typically 0-99). `_next_gang_window_index`
-# scans the session's current indices, filters for >= 1000, returns max+1
-# (or 1000 if none). Legacy indices < 1000 don't count toward the counter.
+# Each gang owns a 1000-wide slice of peer indices (peaky 1000-1999, krays
+# 2000-2999, ...). `_next_peer_index_in_range(session, base)` picks the
+# next unused index strictly inside [base, base+999]. Retired slots are
+# NOT refilled — peer indices are stable for their lifetime.
 
 
-def test_spawn_peer_uses_tmux_window_index_ge_1000(monkeypatch):
-    """No peer windows yet (only user's low-index windows) → start at 1000.
+def test_peer_index_starts_at_range_base_when_empty(monkeypatch):
+    """No peer windows in the gang's range yet → start at base.
 
-    Mirrors the VAL's "first spawn" scenario: session has windows 1, 2, 7
-    (user-created), so the first gang peer lands at index 1000.
+    peaky base=1000; session has user windows 1,2,7 + another gang's peer
+    at 2500 (out of peaky's range). First peaky peer lands at 1000.
     """
-    monkeypatch.setattr("hive.tmux.list_window_indices", lambda session: [1, 2, 7])
-    assert _next_gang_window_index("613") == 1000
+    monkeypatch.setattr("hive.tmux.list_window_indices", lambda session: [1, 2, 7, 2500])
+    assert _next_peer_index_in_range("613", 1000) == 1000
 
 
-def test_spawn_peer_monotonic_after_1000(monkeypatch):
-    """With peer windows at 1000/1001 already, next is 1002 (monotonic).
-
-    Legacy low indices and unrelated high numbers in the same session must
-    not disturb the counter — only the max of the >= 1000 set matters.
-    """
+def test_peer_index_monotonic_within_range(monkeypatch):
+    """Peer at base / base+1 already → next is base+2 (monotonic)."""
     monkeypatch.setattr(
         "hive.tmux.list_window_indices", lambda session: [1, 2, 1000, 1001]
     )
-    assert _next_gang_window_index("613") == 1002
+    assert _next_peer_index_in_range("613", 1000) == 1002
 
 
-def test_spawn_peer_monotonic_skips_gaps(monkeypatch):
-    """If peer windows are 1000, 1001, 1003 (1002 retired), next is 1004
-    (strict monotonic — we don't refill gaps, to keep indices stable
-    across the peer's lifetime).
-    """
+def test_peer_index_skips_gaps(monkeypatch):
+    """Retired slot 1002 stays empty; next is 1004 (strict monotonic)."""
     monkeypatch.setattr(
         "hive.tmux.list_window_indices", lambda session: [1000, 1001, 1003]
     )
-    assert _next_gang_window_index("613") == 1004
+    assert _next_peer_index_in_range("613", 1000) == 1004
+
+
+def test_peer_index_isolates_ranges(monkeypatch):
+    """krays peers (2000-2999) don't touch peaky's counter (1000-1999).
+
+    Even if krays has peers up to 2500, peaky with no peers still starts
+    its first peer at 1000 — the range scheme guarantees per-gang slots.
+    """
+    monkeypatch.setattr(
+        "hive.tmux.list_window_indices",
+        lambda session: [1, 2, 2000, 2001, 2500],
+    )
+    assert _next_peer_index_in_range("613", 1000) == 1000
+    assert _next_peer_index_in_range("613", 2000) == 2501
+
+
+def test_peer_index_fails_when_range_exhausted(runner, monkeypatch):
+    """Range [1000, 1999] fully used → _fail is called (SystemExit)."""
+    monkeypatch.setattr(
+        "hive.tmux.list_window_indices",
+        lambda session: list(range(1000, 2000)),
+    )
+    with pytest.raises(SystemExit):
+        _next_peer_index_in_range("613", 1000)
 
 
 def test_spawn_peer_default_window_name_is_pending():
-    """Initial window name is `pending` — no feature/state suffix.
+    """Initial window name is `pending` — caller prefixes with gang name.
 
-    Orch renames via `tmux rename-window` as the peer progresses:
-    `pending` → `<feature>-running` → `<feature>-done` / `<feature>-fail`.
-    Spawn-peer itself stays dumb about feature ids.
+    Spawn-peer uses `<gang>-pending` as placeholder before the atomic
+    dispatch renames to `<gang>-<feature>-running`.
     """
     assert _GANG_PEER_WINDOW_NAME_INITIAL == "pending"
 
 
 def test_gang_spawn_peer_cmd_rejects_positional_arg(runner):
-    """CLI no longer takes an N argument. Old invocation (`spawn-peer 1`) must
-    fail with click's unexpected-argument error before reaching any runtime
-    code (no tmux / sidecar needed).
+    """CLI doesn't accept a positional N. Old invocation (`spawn-peer 1`) must
+    fail before reaching any runtime code. Now that `--feature-id` + `--task`
+    are required, the first failure click surfaces is a missing-option error,
+    which equally proves the positional wasn't consumed.
     """
     result = runner.invoke(cli, ["gang", "spawn-peer", "1"])
     assert result.exit_code != 0
-    # click surfaces extra positional args as "Got unexpected extra argument".
-    assert "unexpected" in result.output.lower() or "got" in result.output.lower()
+    out = result.output.lower()
+    assert (
+        "missing option" in out      # new required options short-circuit first
+        or "unexpected" in out       # legacy: extra positional error
+        or "got" in out
+    )
+
+
+def test_gang_spawn_peer_cmd_requires_feature_id_and_task(runner):
+    """Bare `hive gang spawn-peer` (no flags) must fail fast — the atomic
+    dispatch contract requires feature-id + task artifact so the peer never
+    boots into an empty inbox.
+    """
+    result = runner.invoke(cli, ["gang", "spawn-peer"])
+    assert result.exit_code != 0
+    assert "missing option" in result.output.lower()
+    assert "--feature-id" in result.output.lower() or "--task" in result.output.lower()

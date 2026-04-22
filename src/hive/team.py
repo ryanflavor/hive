@@ -48,6 +48,7 @@ class Team:
     tmux_window: str = ""
     tmux_window_id: str = ""
     peer_map: dict[str, str] = field(default_factory=dict)
+    member_groups: dict[str, str] = field(default_factory=dict)
 
     # --- Window-level tmux options ---
 
@@ -135,6 +136,8 @@ class Team:
             if pane.team != name:
                 continue
             if pane.role in ("lead", "orchestrator", "agent", "terminal", "board"):
+                if pane.agent and pane.group:
+                    team.member_groups[pane.agent] = pane.group
                 if pane.role in ("lead", "orchestrator"):
                     team.lead_pane_id = pane.pane_id
                     team.lead_name = pane.agent or LEAD_AGENT_NAME
@@ -274,6 +277,9 @@ class Team:
                 "role": member_role_for_pane(lead.pane_id),
                 "pane": lead.pane_id,
             }
+            group = self.member_groups.get(lead.name, "")
+            if group:
+                row["group"] = group
             if render_peer:
                 peer_name = self.resolve_peer(lead.name)
                 if peer_name:
@@ -285,6 +291,9 @@ class Team:
                 "role": "agent",
                 "pane": self.agents[name].pane_id,
             }
+            group = self.member_groups.get(name, "")
+            if group:
+                row["group"] = group
             if render_peer:
                 peer_name = self.resolve_peer(name)
                 if peer_name:
@@ -292,11 +301,15 @@ class Team:
             members.append(row)
         for name in sorted(self.terminals):
             terminal = self.terminals[name]
-            members.append({
+            row = {
                 "name": name,
                 "role": terminal.role,
                 "pane": terminal.pane_id,
-            })
+            }
+            group = self.member_groups.get(name, "")
+            if group:
+                row["group"] = group
+            members.append(row)
         return {
             "name": self.name,
             "description": self.description,
