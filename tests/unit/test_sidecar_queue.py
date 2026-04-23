@@ -154,3 +154,60 @@ def test_handle_request_ping_returns_sidecar_identity():
             "code_hash": sidecar.SIDECAR_BUILD_HASH,
         },
     }
+
+
+def test_start_sidecar_spawns_fresh_python_process(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _FakeProcess:
+        pid = 4321
+
+    def _fake_popen(command, **kwargs):
+        captured["command"] = command
+        captured["stdin_name"] = getattr(kwargs.get("stdin"), "name", "")
+        captured["stdout_name"] = getattr(kwargs.get("stdout"), "name", "")
+        captured["stderr_name"] = getattr(kwargs.get("stderr"), "name", "")
+        captured["start_new_session"] = kwargs.get("start_new_session")
+        captured["close_fds"] = kwargs.get("close_fds")
+        return _FakeProcess()
+
+    monkeypatch.setattr(sidecar.sys, "executable", "/tmp/fake-python")
+    monkeypatch.setattr(sidecar.subprocess, "Popen", _fake_popen)
+
+    pid = sidecar._start_sidecar("/tmp/ws", "team-a", "dev:3", "@99")
+
+    assert pid == 4321
+    assert captured["command"] == [
+        "/tmp/fake-python",
+        "-m",
+        "hive.sidecar",
+        "--sidecar",
+        "/tmp/ws",
+        "team-a",
+        "dev:3",
+        "@99",
+    ]
+    assert captured["stdin_name"] == sidecar.os.devnull
+    assert captured["stdout_name"] == sidecar.os.devnull
+    assert captured["stderr_name"] == sidecar.os.devnull
+    assert captured["start_new_session"] is True
+    assert captured["close_fds"] is True
+
+
+def test_run_spawned_sidecar_ignores_sigint_and_runs_loop(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _fake_signal(sig, handler):
+        captured["signal"] = (sig, handler)
+
+    def _fake_loop(workspace, team, tmux_window, tmux_window_id):
+        captured["loop_args"] = (workspace, team, tmux_window, tmux_window_id)
+
+    monkeypatch.setattr(sidecar.signal, "signal", _fake_signal)
+    monkeypatch.setattr(sidecar, "_sidecar_loop", _fake_loop)
+
+    exit_code = sidecar._run_spawned_sidecar(["--sidecar", "/tmp/ws", "team-a", "dev:3", "@99"])
+
+    assert exit_code == 0
+    assert captured["signal"] == (sidecar.signal.SIGINT, sidecar.signal.SIG_IGN)
+    assert captured["loop_args"] == ("/tmp/ws", "team-a", "dev:3", "@99")

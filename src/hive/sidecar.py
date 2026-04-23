@@ -12,6 +12,8 @@ import json
 import os
 import signal
 import socket
+import subprocess
+import sys
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -1162,23 +1164,35 @@ def ensure_sidecar(workspace: str, team: str, tmux_window: str, tmux_window_id: 
 
 
 def _start_sidecar(workspace: str, team: str, tmux_window: str, tmux_window_id: str) -> int:
-    pid = os.fork()
-    if pid == 0:
-        try:
-            os.setsid()
-            devnull = os.open(os.devnull, os.O_RDWR)
-            os.dup2(devnull, 0)
-            os.dup2(devnull, 1)
-            os.dup2(devnull, 2)
-            os.close(devnull)
-            signal.signal(signal.SIGINT, signal.SIG_IGN)
-            _sidecar_loop(workspace, team, tmux_window, tmux_window_id)
-        except Exception:
-            pass
-        finally:
-            _cleanup_socket(workspace)
-            os._exit(0)
-    return pid
+    command = [
+        sys.executable,
+        "-m",
+        "hive.sidecar",
+        "--sidecar",
+        workspace,
+        team,
+        tmux_window,
+        tmux_window_id,
+    ]
+    with open(os.devnull, "rb") as stdin_devnull, open(os.devnull, "ab") as output_devnull:
+        process = subprocess.Popen(
+            command,
+            stdin=stdin_devnull,
+            stdout=output_devnull,
+            stderr=output_devnull,
+            start_new_session=True,
+            close_fds=True,
+        )
+    return int(process.pid)
+
+
+def _run_spawned_sidecar(argv: list[str]) -> int:
+    if len(argv) != 5 or argv[0] != "--sidecar":
+        raise SystemExit("usage: python -m hive.sidecar --sidecar <workspace> <team> <tmux_window> <tmux_window_id>")
+    _, workspace, team, tmux_window, tmux_window_id = argv
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    _sidecar_loop(workspace, team, tmux_window, tmux_window_id)
+    return 0
 
 
 def _open_server_socket(workspace: str) -> socket.socket:
@@ -1479,3 +1493,7 @@ def stop_sidecar(workspace: str) -> None:
             return
         time.sleep(SOCKET_RETRY_INTERVAL)
     _cleanup_socket(workspace)
+
+
+if __name__ == "__main__":
+    raise SystemExit(_run_spawned_sidecar(sys.argv[1:]))
