@@ -646,18 +646,19 @@ def _send_payload(
             _add_to_pending()
             turn_observed = "pending"
 
-    payload = {
+    payload: dict[str, Any] = {
         "ok": True,
-        "from": sender_agent,
         "to": target_agent,
         "msgId": message_id,
-        "artifact": artifact,
-        "gate": gate_status,
         "delivery": present_send_state(
             inject_status=inject_status,
             turn_observed=turn_observed,
         ),
     }
+    if artifact:
+        payload["artifact"] = artifact
+    if gate_status and gate_status != "clear":
+        payload["gate"] = gate_status
     if confirmation_source and payload["delivery"] == "success":
         payload["confirmationSource"] = confirmation_source
     guidance = send_guidance(payload["delivery"])
@@ -708,14 +709,10 @@ def _answer_payload(
 
     payload: dict[str, Any] = {
         "ok": True,
-        "from": sender_agent,
-        "to": target_agent,
         "ack": ack_status,
     }
     if pending_question:
         payload["question"] = pending_question
-    if text.strip():
-        payload["answer"] = text.strip()
     return payload
 
 

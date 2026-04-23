@@ -178,7 +178,7 @@ def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["from"] == "claude"
+    assert "from" not in payload
     assert payload["to"] == "gpt"
     assert payload["artifact"] == artifact
     assert "summary" not in payload
@@ -1005,7 +1005,7 @@ def test_reply_auto_fills_reply_to_from_latest_inbound(runner, configure_hive_ho
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert payload["from"] == "orch"
+    assert "from" not in payload
     assert payload["to"] == "dodo"
     assert payload["autoReplyTo"] == inbound.msg_id
     events = bus.read_all_events(workspace)
@@ -1841,7 +1841,8 @@ def test_gate_clear_appears_in_send_output(runner, configure_hive_home, monkeypa
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["gate"] == "clear"
+    # gate=clear is the default noise-free case and is omitted from output.
+    assert "gate" not in payload
 
 
 # --- Answer command tests ---
@@ -1947,8 +1948,10 @@ def test_answer_when_waiting_injects_text(runner, configure_hive_home, monkeypat
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["ack"] == "confirmed"
-    assert payload["answer"] == "yes"
     assert payload["question"] == "proceed?"
+    assert "from" not in payload
+    assert "to" not in payload
+    assert "answer" not in payload
     assert len(injected) == 1
     assert injected[0] == ("%99", "yes")
     # Event was written
@@ -1978,10 +1981,8 @@ def _patch_send_failed(monkeypatch, workspace):
     monkeypatch.setattr(
         "hive.cli._request_send_payload",
         lambda **_kw: {
-            "from": "claude",
             "to": "gpt",
             "msgId": FIXED_ID,
-            "gate": "clear",
             "delivery": "failed",
         },
     )
@@ -2036,7 +2037,6 @@ def test_send_exits_zero_on_delivery_pending(runner, configure_hive_home, monkey
     monkeypatch.setattr(
         "hive.cli._request_send_payload",
         lambda **_kw: {
-            "from": "claude",
             "to": "gpt",
             "msgId": FIXED_ID,
             "delivery": "pending",
