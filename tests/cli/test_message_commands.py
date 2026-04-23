@@ -1199,6 +1199,8 @@ def test_inject_delegates_to_agent(runner, configure_hive_home, monkeypatch):
     sent: list[str] = []
 
     class _FakeAgent:
+        pane_id = "%11"
+
         def send(self, text: str) -> None:
             sent.append(text)
 
@@ -1214,7 +1216,13 @@ def test_inject_delegates_to_agent(runner, configure_hive_home, monkeypatch):
     result = runner.invoke(cli, ["inject", "claude", "plain prompt"])
     assert result.exit_code == 0
     assert sent == ["plain prompt"]
-    assert "Injected raw input into claude." in result.output
+    payload = json.loads(result.output)
+    assert payload == {
+        "member": "claude",
+        "action": "inject",
+        "pane": "%11",
+        "success": True,
+    }
 
 
 def test_capture_reads_agent_output(runner, configure_hive_home, monkeypatch):
@@ -1243,6 +1251,8 @@ def test_interrupt_delegates_to_agent(runner, configure_hive_home, monkeypatch):
     calls: list[str] = []
 
     class _FakeAgent:
+        pane_id = "%12"
+
         def interrupt(self) -> None:
             calls.append("interrupt")
 
@@ -1258,6 +1268,13 @@ def test_interrupt_delegates_to_agent(runner, configure_hive_home, monkeypatch):
     result = runner.invoke(cli, ["interrupt", "claude"])
     assert result.exit_code == 0
     assert calls == ["interrupt"]
+    payload = json.loads(result.output)
+    assert payload == {
+        "member": "claude",
+        "action": "interrupt",
+        "pane": "%12",
+        "success": True,
+    }
 
 
 def test_kill_removes_agent(runner, configure_hive_home, monkeypatch):
@@ -1265,6 +1282,8 @@ def test_kill_removes_agent(runner, configure_hive_home, monkeypatch):
     killed: list[str] = []
 
     class _FakeAgent:
+        pane_id = "%13"
+
         def kill(self) -> None:
             killed.append("killed")
 
@@ -1281,7 +1300,14 @@ def test_kill_removes_agent(runner, configure_hive_home, monkeypatch):
     result = runner.invoke(cli, ["kill", "opus"])
     assert result.exit_code == 0
     assert killed == ["killed"]
-    assert "Killed opus." in result.output
+    payload = json.loads(result.output)
+    assert payload == {
+        "member": "opus",
+        "action": "kill",
+        "pane": "%13",
+        "removedFromTeam": True,
+        "success": True,
+    }
     assert "opus" not in _FakeTeam.agents
 
 

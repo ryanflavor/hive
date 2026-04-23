@@ -1851,8 +1851,14 @@ def inject_cmd(agent_name: str, text: str):
     """Debug: inject raw input into an agent pane."""
     team_name, t = _resolve_scoped_team(None, required=True)
     assert team_name is not None and t is not None
-    t.get(agent_name).send(text)
-    click.echo(f"Injected raw input into {agent_name}.")
+    agent = t.get(agent_name)
+    agent.send(text)
+    click.echo(json.dumps({
+        "member": agent_name,
+        "action": "inject",
+        "pane": getattr(agent, "pane_id", "") or "",
+        "success": True,
+    }, indent=2, ensure_ascii=False))
 
 
 @cli.command("team")
@@ -3093,8 +3099,14 @@ def interrupt(agent_name: str):
     """Interrupt an agent pane."""
     _, t = _resolve_scoped_team(None, required=True)
     assert t is not None
-    t.get(agent_name).interrupt()
-    click.echo(f"Interrupted {agent_name}.")
+    agent = t.get(agent_name)
+    agent.interrupt()
+    click.echo(json.dumps({
+        "member": agent_name,
+        "action": "interrupt",
+        "pane": getattr(agent, "pane_id", "") or "",
+        "success": True,
+    }, indent=2, ensure_ascii=False))
 
 
 @cli.command()
@@ -3113,9 +3125,16 @@ def kill(agent_name: str):
         _fail(f"agent '{agent_name}' not found")
         return
     agent.kill()
-    if agent_name in t.agents:
+    removed_from_team = agent_name in t.agents
+    if removed_from_team:
         del t.agents[agent_name]
-    click.echo(f"Killed {agent_name}.")
+    click.echo(json.dumps({
+        "member": agent_name,
+        "action": "kill",
+        "pane": getattr(agent, "pane_id", "") or "",
+        "removedFromTeam": removed_from_team,
+        "success": True,
+    }, indent=2, ensure_ascii=False))
 
 
 _CVIM_BINARY = Path(__file__).parent / "core_assets" / "cvim" / "bin" / "cvim-command"

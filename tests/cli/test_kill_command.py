@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +9,7 @@ from hive.cli import cli
 class _FakeAgent:
     def __init__(self) -> None:
         self.killed = False
+        self.pane_id = "%99"
 
     def kill(self) -> None:
         self.killed = True
@@ -47,7 +49,14 @@ def test_kill_qualified_crosses_team(runner, configure_hive_home, monkeypatch):
     assert result.exit_code == 0, result.output
     assert target_agent.killed is True
     assert "gang.worker-1" not in peer_team.agents  # removed from target team
-    assert "Killed gang.worker-1." in result.output
+    payload = json.loads(result.output)
+    assert payload == {
+        "member": "gang.worker-1",
+        "action": "kill",
+        "pane": "%99",
+        "removedFromTeam": True,
+        "success": True,
+    }
 
 
 @pytest.mark.cli
@@ -72,7 +81,14 @@ def test_kill_bare_name_uses_scoped_team(runner, configure_hive_home, monkeypatc
     assert result.exit_code == 0, result.output
     assert agent.killed is True
     assert "opus" not in scoped_team.agents
-    assert "Killed opus." in result.output
+    payload = json.loads(result.output)
+    assert payload == {
+        "member": "opus",
+        "action": "kill",
+        "pane": "%99",
+        "removedFromTeam": True,
+        "success": True,
+    }
 
 
 @pytest.mark.cli
