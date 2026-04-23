@@ -209,6 +209,8 @@ class Agent:
 
         bin_path = CLI_BINS[cli]
         cmd_parts = ["exec", _shell_escape(bin_path)]
+        if cli == "codex":
+            cmd_parts.extend(["-c", "check_for_update_on_startup=false"])
         pre_cmd_parts: list[str] = []
 
         if model and not session_id:
@@ -232,7 +234,7 @@ class Agent:
             elif cli == "claude":
                 cmd_parts.extend(["-r", _shell_escape(session_id), "--fork-session"])
             elif cli == "codex":
-                cmd_parts = ["exec", _shell_escape(bin_path), "fork", _shell_escape(session_id)]
+                cmd_parts = ["exec", _shell_escape(bin_path), "-c", "check_for_update_on_startup=false", "fork", _shell_escape(session_id)]
 
         env_parts: list[str] = []
         if extra_env:
