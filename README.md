@@ -42,7 +42,7 @@ The skill loads, the agent runs `hive init` to bind the current tmux window as a
 
 ## Operator commands
 
-A small set of commands is designed for humans, not agents:
+Commands commonly run by humans:
 
 ```bash
 # Plugins
@@ -56,11 +56,26 @@ hive doctor --skills              # check for hive skill drift after upgrades
 # Popup editor (tmux 3.2+)
 hive cvim                         # tmux popup editor
 hive vim                          # single-pane variant
+
+# Fork the current agent session into a split pane
+hive fork                         # auto-detect split direction
+hive vfork                        # vertical split
+hive hfork                        # horizontal split
 ```
 
-Inside Claude Code / Codex, invoke these via shell escape: `!hive cvim`.
+Inside Claude Code / Codex, invoke these via shell escape: `!hive cvim`, `!hive vfork`, `!hive fork`, etc.
 
-Everything else — `hive send`, `hive reply`, `hive team`, `hive doctor <agent>`, `hive handoff`, `hive fork`, etc. — is designed for the agent to invoke. Running them yourself works, but that is the debugging / advanced path, not the happy path.
+Binding `hive fork` to a keyboard shortcut pairs well with tmux. Example (Ghostty + tmux on macOS) — Cmd+Shift+F forks the current pane; change the key to match your terminal:
+
+```
+# ~/.config/ghostty/config
+keybind = cmd+shift+f=text:\x1bf
+
+# ~/.tmux.conf
+bind -n M-f run-shell -b 'hive fork --pane "#{pane_id}"'
+```
+
+Everything else — `hive send`, `hive reply`, `hive team`, `hive doctor <agent>`, `hive handoff`, etc. — is designed for the agent to invoke. Running them yourself works, but that is the debugging / advanced path, not the happy path.
 
 ## Upgrade
 
