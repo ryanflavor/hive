@@ -1,6 +1,62 @@
 import sqlite3
 
+import pytest
+
 from hive import bus
+
+
+def test_connect_closes_sqlite_connection_on_context_exit(tmp_path):
+    """Regression: `_connect` must close the sqlite connection when the
+    `with` block exits. Python's default `sqlite3.Connection.__enter__`
+    only manages transactions; without an explicit close, long-running
+    processes leak FDs until hitting ulimit (SQLITE_CANTOPEN) or having
+    inherited-across-fork sqlite state corrupted (SQLITE_IOERR).
+    """
+    bus.init_workspace(tmp_path / "ws")
+
+    with bus._connect(tmp_path / "ws") as conn:
+        held = conn
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        held.execute("SELECT 1")
+
+
+def test_bus_operations_do_not_leak_sqlite_connections(tmp_path, monkeypatch):
+    """Write + read operations must close every connection they open.
+
+    Before this fix, every `with _connect(ws) as conn:` left the connection
+    open (Python's sqlite3 `__exit__` only commits/rolls back, doesn't close).
+    Long-running sidecar accumulated FDs and eventually hit SQLITE_CANTOPEN
+    or SQLITE_IOERR in fork-inherited state.
+    """
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+
+    opened = []
+    original_connect = sqlite3.connect
+
+    def tracking_connect(*args, **kwargs):
+        conn = original_connect(*args, **kwargs)
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr("hive.bus.sqlite3.connect", tracking_connect)
+
+    for i in range(5):
+        bus.write_event(
+            workspace,
+            from_agent="a",
+            to_agent="b",
+            intent="send",
+            body=f"msg{i}",
+        )
+    bus.read_all_events(workspace)
+    bus.count_events(workspace)
+
+    assert len(opened) >= 5, "expected bus ops to open at least 5 sqlite connections"
+    for conn in opened:
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn.execute("SELECT 1")
 
 
 def test_init_workspace_creates_expected_directories(tmp_path):
@@ -66,6 +122,12 @@ def test_reset_workspace_removes_sqlite_trio_before_reconnect(tmp_path, monkeypa
     shm_path.write_text("shm")
 
     class _DummyConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc) -> None:
+            self.close()
+
         def close(self) -> None:
             return None
 

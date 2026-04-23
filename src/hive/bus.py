@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
 from pathlib import Path
 import shutil
 import sqlite3
+from typing import Iterator
 
 
 WORKSPACE_DIRS = (
@@ -63,15 +65,29 @@ def format_msg_id(event_seq: int) -> str:
     return _encode_base62(event_seq)
 
 
-def _connect(workspace: str | Path) -> sqlite3.Connection:
+@contextmanager
+def _connect(workspace: str | Path) -> Iterator[sqlite3.Connection]:
+    """Open a sqlite connection and guarantee it is closed on exit.
+
+    Python's default `with sqlite3.Connection` is a transaction context
+    manager — it commits/rolls back but does NOT close the connection.
+    Long-running processes (sidecar) therefore leak FDs, eventually
+    triggering SQLITE_CANTOPEN under ulimit pressure and SQLITE_IOERR
+    when an unclosed connection is inherited across os.fork().
+    Using an explicit contextmanager here closes on exit without
+    changing call sites.
+    """
     ws = Path(workspace).expanduser()
     ws.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(_db_path(ws), timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    _init_schema(conn)
-    return conn
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        _init_schema(conn)
+        yield conn
+    finally:
+        conn.close()
 
 
 @dataclass(frozen=True)
@@ -185,8 +201,8 @@ def init_workspace(workspace: str | Path) -> Path:
     ws = Path(workspace).expanduser()
     for name in WORKSPACE_DIRS:
         (ws / name).mkdir(parents=True, exist_ok=True)
-    conn = _connect(ws)
-    conn.close()
+    with _connect(ws):
+        pass
     return ws
 
 
@@ -207,8 +223,8 @@ def reset_workspace(workspace: str | Path) -> Path:
     ):
         if path.exists():
             path.unlink()
-    conn = _connect(ws)
-    conn.close()
+    with _connect(ws):
+        pass
     return ws
 
 
