@@ -1829,8 +1829,8 @@ def test_gate_fail_open_no_transcript(runner, configure_hive_home, monkeypatch, 
     assert "injectStatus" not in payload
 
 
-def test_gate_clear_appears_in_send_output(runner, configure_hive_home, monkeypatch, tmp_path):
-    """When transcript resolves successfully and gate is clear, output contains gate=clear."""
+def test_gate_clear_is_omitted_from_send_output(runner, configure_hive_home, monkeypatch, tmp_path):
+    """When transcript resolves and gate is clear, the gate field is omitted (default is noise)."""
     configure_hive_home()
     artifact = _write_artifact(tmp_path, "gate-clear.md")
     workspace, transcript, sent = _gate_test_setup(monkeypatch, tmp_path, transcript_records=[
