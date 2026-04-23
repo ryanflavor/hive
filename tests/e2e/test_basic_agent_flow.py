@@ -52,7 +52,10 @@ def test_e2e_create_spawn_send_capture_and_status(tmp_path: Path):
 
         inject_result = run_in_pane(["inject", "claude", "plain ping"])
         assert inject_result.returncode == 0, inject_result.stdout
-        assert "Injected raw input into claude." in inject_result.stdout
+        inject_payload = json.loads(inject_result.stdout)
+        assert inject_payload["member"] == "claude"
+        assert inject_payload["action"] == "inject"
+        assert inject_payload["success"] is True
         send_result = run_in_pane(["send", "claude", "hello envelope", "--artifact", str(artifact)])
         assert send_result.returncode == 0, send_result.stdout
         send_payload = json.loads(send_result.stdout)
