@@ -143,7 +143,7 @@ def test_reply_warns_for_fenced_block_body_but_still_replies(runner, configure_h
     payload = json.loads(result.stdout)
     assert payload["autoReplyTo"] == inbound.msg_id
     assert "warning: body looks long or structured" in result.stderr
-    assert 'hive reply <agent> "<short summary>" --artifact -' in result.stderr
+    assert 'hive reply <agent> "<short summary>" --artifact - <<\'EOF\'' in result.stderr
 
 
 def test_send_accepts_short_root_without_artifact(runner, configure_hive_home, monkeypatch, tmp_path):

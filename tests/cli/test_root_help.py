@@ -27,6 +27,7 @@ def test_root_help_layers_daily_handoff_debug_sections(runner):
         assert command_name in handoff_block
     for command_name in ("doctor", "delivery", "thread"):
         assert command_name in debug_block
+    assert 'hive send dodo "see report" --artifact - <<\'EOF\'' in result.output
 
 
 def test_root_cli_fails_when_current_agent_pane_skill_is_stale(runner, monkeypatch):

@@ -47,7 +47,7 @@ hive init
 hive team
 
 # Send a root message: short summary in body, details in artifact
-cat <<'EOF' | hive send dodo "review the staged diff" --artifact -
+hive send dodo "review the staged diff" --artifact - <<'EOF'
 diff summary and review context
 EOF
 
@@ -57,8 +57,8 @@ hive send orch "done" --artifact /tmp/review.md
 # Hand off the latest unanswered inbound thread to another agent
 hive handoff dodo --artifact /tmp/task.md
 
-# Pipe stdin as artifact (preferred for large content)
-cat <<'EOF' | hive send orch "see report" --artifact -
+# Send stdin as artifact (preferred for large content)
+hive send orch "see report" --artifact - <<'EOF'
 # Findings
 - item
 EOF
@@ -144,6 +144,8 @@ Root sends without `--reply-to` must keep `body` to a short summary and put deta
 - `success`: target pane rendered msgId; delivery confirmed
 - `pending`: submit completed; background tracking continues (up to 60s)
 - `failed`: submit errored OR target pane never rendered msgId before timeout
+
+CLI exit code follows the delivery contract: `delivery=failed` exits `2`, `delivery=pending` stays `0`, and hard CLI/sidecar errors routed through `_fail(...)` exit `1`.
 
 **Shell quoting footgun (applies to both `hive send` and `hive reply`)**: double-quoted `body` strings with backticks get pre-processed by zsh/bash as command substitution, and the message is silently rewritten before Hive sees it. For anything containing markdown inline code, prefer heredoc + `--artifact -`, or wrap the body in single quotes.
 

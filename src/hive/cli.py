@@ -94,7 +94,7 @@ hive handoff dodo --artifact /tmp/task.md
 hive answer dodo "yes"
 
 # Send detailed context via stdin artifact (preferred for long content)
-cat <<'EOF' | hive send dodo "see report" --artifact -
+hive send dodo "see report" --artifact - <<'EOF'
 # Findings
 - item
 EOF'''
@@ -3143,8 +3143,8 @@ def kill(agent_name: str):
     except KeyError:
         _fail(f"agent '{agent_name}' not found")
         return
-    agent.kill()
     removed_from_team = agent_name in t.agents
+    agent.kill()
     if removed_from_team:
         del t.agents[agent_name]
     click.echo(json.dumps({
