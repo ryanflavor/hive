@@ -79,7 +79,6 @@ def test_delivery_reports_tracking_lost_without_writing_observation(configure_hi
 
     assert payload["delivery"] == "failed"
     assert payload["reason"] == "tracking_lost"
-    assert payload["recommendedAction"] == "retry"
 
     observations = [e for e in bus.read_all_events(workspace) if e.get("intent") == "observation"]
     assert observations == []
@@ -190,7 +189,7 @@ def test_delivery_prefers_observation_result(runner, configure_hive_home, monkey
 
 
 
-def test_delivery_failed_reports_retry_guidance(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_delivery_failed_from_observation_retains_failure_projection(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
@@ -224,11 +223,11 @@ def test_delivery_failed_reports_retry_guidance(runner, configure_hive_home, mon
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["delivery"] == "failed"
-    assert payload["recommendedAction"] == "retry"
-    assert "Delivery failed" in payload["meaning"]
+    assert payload["injectStatus"] == "failed"
+    assert payload["turnObserved"] == "unavailable"
 
 
-def test_delivery_unconfirmed_reports_cautious_retry_guidance(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_delivery_unconfirmed_from_observation_retains_failure_projection(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
@@ -262,11 +261,11 @@ def test_delivery_unconfirmed_reports_cautious_retry_guidance(runner, configure_
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["delivery"] == "failed"
-    assert payload["recommendedAction"] == "retry"
-    assert "Delivery failed" in payload["meaning"]
+    assert payload["injectStatus"] == "submitted"
+    assert payload["turnObserved"] == "unconfirmed"
 
 
-def test_delivery_pending_record_retains_unconfirmed_state_during_followup(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_delivery_pending_record_retains_failed_delivery_during_followup(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
@@ -301,7 +300,8 @@ def test_delivery_pending_record_retains_unconfirmed_state_during_followup(runne
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["delivery"] == "failed"
-    assert payload["recommendedAction"] == "retry"
+    assert payload["injectStatus"] == "submitted"
+    assert payload["turnObserved"] == "pending"
 
 
 # --- doctor ---
@@ -522,4 +522,3 @@ def test_thread_command_outputs_thread_projection(runner, configure_hive_home, m
     assert payload["rootMsgId"] == "a001"
     assert payload["focusMsgId"] == "a002"
     assert payload["messages"][1]["focus"] is True
-

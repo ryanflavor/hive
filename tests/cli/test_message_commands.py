@@ -183,8 +183,6 @@ def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home
     assert payload["artifact"] == artifact
     assert "summary" not in payload
     assert payload["delivery"] == "pending"
-    assert payload["meaning"] == "Submit completed and background delivery tracking continues."
-    assert payload["recommendedAction"] == "continue"
     assert "injectStatus" not in payload
     assert "turnObserved" not in payload
     assert "followUp" not in payload
@@ -1406,8 +1404,6 @@ def test_send_ack_confirmed(runner, configure_hive_home, monkeypatch, tmp_path):
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["delivery"] == "success"
-    assert payload["meaning"] == "Target pane rendered the message id; delivery confirmed."
-    assert payload["recommendedAction"] == "continue"
     assert "followUp" not in payload
 
 
@@ -1456,8 +1452,6 @@ def test_send_ack_unconfirmed_on_timeout(runner, configure_hive_home, monkeypatc
     assert result.exit_code == 2
     payload = json.loads(result.output)
     assert payload["delivery"] == "failed"
-    assert payload["meaning"] == "Delivery failed: either submit errored or the target pane never rendered the message id."
-    assert payload["recommendedAction"] == "retry"
     assert "followUp" not in payload
 
 
@@ -1613,8 +1607,6 @@ def test_send_ack_skipped_when_transcript_unresolvable(runner, configure_hive_ho
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["delivery"] == "pending"
-    assert payload["meaning"] == "Submit completed and background delivery tracking continues."
-    assert payload["recommendedAction"] == "continue"
     assert "injectStatus" not in payload
     assert "followUp" not in payload
 
@@ -1661,8 +1653,6 @@ def test_send_async_pending_enqueues_sidecar(runner, configure_hive_home, monkey
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["delivery"] == "pending"
-    assert payload["meaning"] == "Submit completed and background delivery tracking continues."
-    assert payload["recommendedAction"] == "continue"
     assert "followUp" not in payload
     assert len(pending) == 1
 
@@ -1707,8 +1697,6 @@ def test_send_inject_failure_no_sidecar(runner, configure_hive_home, monkeypatch
     assert result.exit_code == 2
     payload = json.loads(result.output)
     assert payload["delivery"] == "failed"
-    assert payload["meaning"] == "Delivery failed: either submit errored or the target pane never rendered the message id."
-    assert payload["recommendedAction"] == "retry"
     assert "injectStatus" not in payload
     assert "turnObserved" not in payload
     assert "observerPid" not in payload
@@ -1838,7 +1826,6 @@ def test_gate_fail_open_no_transcript(runner, configure_hive_home, monkeypatch, 
     payload = json.loads(result.output)
     assert payload["delivery"] == "pending"
     assert payload["gate"] == "skipped"
-    assert "gateNote" in payload
     assert "injectStatus" not in payload
 
 
@@ -1855,7 +1842,6 @@ def test_gate_clear_appears_in_send_output(runner, configure_hive_home, monkeypa
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["gate"] == "clear"
-    assert "gateNote" not in payload
 
 
 # --- Answer command tests ---
@@ -1997,8 +1983,6 @@ def _patch_send_failed(monkeypatch, workspace):
             "msgId": FIXED_ID,
             "gate": "clear",
             "delivery": "failed",
-            "meaning": "Target pane never rendered msgId before timeout.",
-            "recommendedAction": "retry",
         },
     )
 

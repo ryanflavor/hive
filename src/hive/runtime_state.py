@@ -83,39 +83,14 @@ def present_delivery_state(
 
 
 def gate_guidance(gate_status: str) -> dict[str, str] | None:
-    if gate_status == "skipped":
-        return {
-            "gateNote": "Send gate was bypassed (transcript/session resolution failed). "
-                        "Submit was attempted but input-gate safety was not checked.",
-        }
     return None
 
 
 def send_guidance(delivery: str) -> dict[str, str] | None:
-    if delivery == "success":
-        return {
-            "meaning": "Target pane rendered the message id; delivery confirmed.",
-            "recommendedAction": "continue",
-        }
-    if delivery == "pending":
-        return {
-            "meaning": "Submit completed and background delivery tracking continues.",
-            "recommendedAction": "continue",
-        }
-    if delivery == "failed":
-        return {
-            "meaning": "Delivery failed: either submit errored or the target pane never rendered the message id.",
-            "recommendedAction": "retry",
-        }
     return None
 
 
 def delivery_guidance(delivery: str) -> dict[str, str] | None:
-    if delivery == "failed":
-        return {
-            "meaning": "Delivery failed: either submit errored or the target pane never rendered the message id.",
-            "recommendedAction": "retry",
-        }
     return None
 
 
