@@ -53,3 +53,32 @@ def test_resolve_artifact_dash_reads_stdin_when_not_a_tty(monkeypatch, tmp_path)
     written = [p for p in (workspace / "artifacts").iterdir() if p.is_file()]
     assert len(written) == 1
     assert written[0].read_text() == payload
+
+
+def test_resolve_artifact_dash_fails_on_non_tty_empty_stdin(monkeypatch, tmp_path):
+    """Agent shells are non-TTY with closed/empty stdin; we must not silently write empty artifacts.
+
+    Regression guard: an agent forgetting the heredoc under a non-TTY shell would
+    otherwise read an empty string, land in `write_text("")`, and produce a zero-byte
+    artifact that masks the real failure.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    class _EmptyPipedStdin:
+        def isatty(self) -> bool:
+            return False
+
+        def read(self) -> str:
+            return ""
+
+    monkeypatch.setattr(sys, "stdin", _EmptyPipedStdin())
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli_module._resolve_artifact_path("-", workspace=str(workspace))
+
+    assert excinfo.value.code == 1
+    # no artifact must be written on failure
+    artifacts_dir = workspace / "artifacts"
+    if artifacts_dir.exists():
+        assert list(artifacts_dir.iterdir()) == []

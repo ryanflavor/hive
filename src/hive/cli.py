@@ -475,15 +475,22 @@ def _resolve_artifact_path(artifact: str, workspace: str | Path = "") -> str:
         # Read from stdin, save to workspace artifacts
         if not workspace:
             _fail("--artifact - requires a workspace (run inside a team)")
+        _heredoc_recipe = (
+            "  hive <cmd> <args> --artifact - <<'EOF'\n"
+            "  # details\n"
+            "  EOF"
+        )
         if sys.stdin.isatty():
             _fail(
                 "--artifact - expects piped stdin but a terminal is attached; "
-                "use a heredoc instead:\n"
-                "  hive <cmd> <args> --artifact - <<'EOF'\n"
-                "  # details\n"
-                "  EOF"
+                "use a heredoc instead:\n" + _heredoc_recipe
             )
         content = sys.stdin.read()
+        if not content:
+            _fail(
+                "--artifact - received empty stdin; pipe content in or use a heredoc:\n"
+                + _heredoc_recipe
+            )
         ws_artifacts = Path(workspace) / "artifacts"
         ws_artifacts.mkdir(parents=True, exist_ok=True)
         filename = f"{time.time_ns()}-{secrets.token_hex(2)}.md"
