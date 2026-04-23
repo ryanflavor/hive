@@ -493,7 +493,9 @@ def _resolve_artifact_path(artifact: str, workspace: str | Path = "") -> str:
             )
         ws_artifacts = Path(workspace) / "artifacts"
         ws_artifacts.mkdir(parents=True, exist_ok=True)
-        filename = f"{time.time_ns()}-{secrets.token_hex(2)}.md"
+        # Short random id — file name is never parsed by downstream code,
+        # so no timestamp / sortable prefix is needed.
+        filename = f"{secrets.token_urlsafe(4)}.md"
         path = ws_artifacts / filename
         path.write_text(content)
         return str(path)
