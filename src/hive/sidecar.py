@@ -23,7 +23,6 @@ from .runtime_state import (
     delivery_exception_body,
     delivery_guidance,
     format_hive_envelope,
-    gate_guidance,
     present_delivery_state,
     present_send_state,
     project_thread_event,
@@ -538,7 +537,8 @@ def _send_payload(
     except Exception:
         transcript_path = None
 
-    gate_status = _check_send_gate(transcript_path)
+    # Side effect only: raises if target is waiting for a user answer. Return value unused.
+    _check_send_gate(transcript_path)
 
     event = bus.write_send_event(
         workspace,
@@ -657,16 +657,11 @@ def _send_payload(
     }
     if artifact:
         payload["artifact"] = artifact
-    if gate_status and gate_status != "clear":
-        payload["gate"] = gate_status
     if confirmation_source and payload["delivery"] == "success":
         payload["confirmationSource"] = confirmation_source
     guidance = send_guidance(payload["delivery"])
     if guidance is not None:
         payload.update(guidance)
-    gate_info = gate_guidance(gate_status)
-    if gate_info is not None:
-        payload.update(gate_info)
     return payload
 
 
@@ -854,8 +849,6 @@ def _doctor_payload(
         diag["busy"] = bool(runtime["busy"])
     if runtime.get("turnPhase"):
         diag["turnPhase"] = runtime["turnPhase"]
-    if "_gate" in runtime:
-        diag["gate"] = runtime["_gate"]
     if verbose:
         diag["pane"] = target.pane_id
         diag["teamMembers"] = len(list(team.agents.values()))

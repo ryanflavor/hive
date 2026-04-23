@@ -1825,7 +1825,8 @@ def test_gate_fail_open_no_transcript(runner, configure_hive_home, monkeypatch, 
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["delivery"] == "pending"
-    assert payload["gate"] == "skipped"
+    # gate field was removed — send still succeeds fail-open without a transcript.
+    assert "gate" not in payload
     assert "injectStatus" not in payload
 
 

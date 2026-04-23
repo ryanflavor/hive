@@ -82,10 +82,6 @@ def present_delivery_state(
     return "pending"
 
 
-def gate_guidance(gate_status: str) -> dict[str, str] | None:
-    return None
-
-
 def send_guidance(delivery: str) -> dict[str, str] | None:
     return None
 

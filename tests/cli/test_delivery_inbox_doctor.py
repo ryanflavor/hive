@@ -323,10 +323,8 @@ def test_doctor_self(runner, configure_hive_home, monkeypatch, tmp_path):
             "model": "gpt-5.4",
             "inputState": "ready",
             "turnPhase": "assistant_text_idle",
-            "gate": "clear",
             "transcript": "/tmp/session.jsonl",
             "transcriptSize": 1234,
-            "gateReason": "",
         },
     )
     monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
@@ -341,7 +339,7 @@ def test_doctor_self(runner, configure_hive_home, monkeypatch, tmp_path):
     assert payload["model"] == "gpt-5.4"
     assert payload["inputState"] == "ready"
     assert payload["turnPhase"] == "assistant_text_idle"
-    assert payload["gate"] == "clear"
+    assert "gate" not in payload
     assert payload["transcript"] == "/tmp/session.jsonl"
     assert payload["transcriptSize"] == 1234
 
@@ -389,10 +387,8 @@ def test_doctor_requests_verbose_detail_by_default(runner, configure_hive_home, 
             "busy": False,
             "model": "gpt-5.4",
             "inputState": "ready",
-            "gate": "clear",
             "transcript": "/tmp/session.jsonl",
             "transcriptSize": 1234,
-            "gateReason": "",
         }
 
     monkeypatch.setattr("hive.sidecar.request_doctor", _request_doctor)
@@ -453,7 +449,6 @@ def test_doctor_with_skills_includes_local_skill_diagnostics(runner, configure_h
             "busy": False,
             "model": "gpt-5.4",
             "inputState": "ready",
-            "gate": "clear",
         },
     )
     monkeypatch.setattr(
