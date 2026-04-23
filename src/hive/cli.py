@@ -31,73 +31,87 @@ from .team import HIVE_HOME, LEAD_AGENT_NAME, Team, Terminal
 
 
 _COMMAND_HELP_SECTIONS = {
-    # Daily — the default agent collaboration path.
+    # Daily — per-turn agent collaboration loop.
     "init": "Daily",
     "team": "Daily",
     "send": "Daily",
     "reply": "Daily",
     "answer": "Daily",
     "notify": "Daily",
-    # Handoff — spawn/fork a pane, load a workflow, or bring a pane into the team.
+    # Handoff — hand a thread to another pane (same/new/forked).
     "handoff": "Handoff",
     "fork": "Handoff",
     "spawn": "Handoff",
-    "workflow": "Handoff",
-    "register": "Handoff",
-    # Debug — diagnostics, durable-store inspection, low-level pane control, rare admin.
+    # Workflow — higher-level flows on top of Hive.
+    "workflow": "Workflow",
+    "gang": "Workflow",
+    "board": "Workflow",
+    # Team — wire up the tmux team around the current window.
+    "create": "Team",
+    "delete": "Team",
+    "register": "Team",
+    "peer": "Team",
+    "terminal": "Team",
+    "layout": "Team",
+    # Human Helpers — human-only popup + split helpers.
+    "cvim": "Human Helpers",
+    "vim": "Human Helpers",
+    "vfork": "Human Helpers",
+    "hfork": "Human Helpers",
+    # Debug — troubleshooting, rarely on the happy path.
     "doctor": "Debug",
     "delivery": "Debug",
     "thread": "Debug",
-    "peer": "Debug",
     "capture": "Debug",
     "inject": "Debug",
     "interrupt": "Debug",
     "kill": "Debug",
     "exec": "Debug",
-    "terminal": "Debug",
-    "create": "Debug",
-    "delete": "Debug",
-    "layout": "Debug",
-    # Human Helpers (human-only core commands).
-    "cvim": "Human Helpers",
-    "vim": "Human Helpers",
-    "vfork": "Human Helpers",
-    "hfork": "Human Helpers",
-    # Extensions (unchanged).
+    # Extensions.
     "plugin": "Extensions",
 }
 _COMMAND_HELP_SECTION_ORDER = [
     "Daily",
     "Handoff",
-    "Debug",
+    "Workflow",
+    "Team",
     "Human Helpers",
+    "Debug",
     "Extensions",
     "Other Commands",
 ]
 _COMMAND_HELP_SECTION_DESCRIPTIONS = {
-    "Daily": "Daily agent path — inspect context, talk to peers, and pull the human in when necessary.",
-    "Handoff": "Spawn or fork a pane, or load a workflow so another agent can pick up the work.",
+    "Daily": "Core loop per turn: inspect context, talk to peers, pull the human in when blocked.",
+    "Handoff": "Hand a thread to another worker — same pane, a fresh spawn, or a forked clone.",
+    "Workflow": "Higher-level flows on top of Hive: load workflows, run gang squads, share a blackboard.",
+    "Team": "Create, extend, and wire up the tmux team around the current window.",
+    "Human Helpers": "Popup editor and split helpers for the human (not the model). In Claude Code / Codex, type `!hive cvim` via shell escape. Requires tmux >= 3.2.",
     "Debug": "Troubleshoot delivery, runtime state, and low-level pane behavior. Not on the happy path.",
-    "Human Helpers": "Core editor and split helpers for the human (not the model). In Claude Code / Codex, type `!hive cvim` via shell escape. Requires tmux >= 3.2 (popup support).",
-    "Extensions": "Manage first-party Hive plugins that materialize commands and skills for Factory, Claude Code, and Codex.",
+    "Extensions": "Manage first-party Hive plugins (Factory, Claude Code, Codex).",
 }
-_ROOT_HELP_EXAMPLES = '''# Show team members, peers, and runtime input/busy/safety state
-hive team
+_ROOT_HELP_EXAMPLES = '''# Team lifecycle
+hive init                                    # bind current tmux window as a team
+hive team                                    # members + runtime state (busy / inputState / turnPhase)
 
-# Send a short message to a peer
-hive send dodo "review this diff"
-
-# Hand a thread off to another teammate
-hive handoff dodo --artifact /tmp/task.md
-
-# Answer a pending AskUserQuestion from another agent
-hive answer dodo "yes"
-
-# Send detailed context via stdin artifact (preferred for long content)
+# Messaging (root thread: body is a short summary, details go in --artifact)
+hive send dodo "review this diff" --artifact /tmp/diff.md
 hive send dodo "see report" --artifact - <<'EOF'
 # Findings
 - item
-EOF'''
+EOF
+
+# Reply & answer (continue an existing thread)
+hive reply dodo "fixed"                      # auto-picks latest unanswered inbound
+hive answer dodo "yes"                       # answer a pending AskUserQuestion
+
+# Handoff, fork, spawn
+hive handoff dodo --artifact /tmp/task.md    # delegate a thread
+hive fork                                    # split the current pane into a clone
+hive spawn claude                            # bring up a new agent pane
+
+# Debug delivery / connectivity
+hive delivery <msgId>                        # trace a send
+hive doctor dodo                             # probe a peer's connectivity'''
 
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
 _TMUX_OPTIONAL_ROOT_COMMANDS = {"plugin", "_notify-hook"}
@@ -673,7 +687,21 @@ def _choose_fork_split(width: int, height: int) -> bool:
 @click.option("--join-as", default="", help="Register the forked pane into the current team as this agent name")
 @click.option("--prompt", default="", help="Prompt to send to the forked agent after it is ready")
 def fork_cmd(pane_id: str, split: str, join_as: str, prompt: str):
-    """Fork the current agent session into a new split pane."""
+    """Fork the current agent session into a new split pane.
+
+    Humans typically bind this to a keyboard shortcut (terminal + tmux).
+    Agents also invoke it during handoff to create a clone that can pick
+    up work without interrupting the current turn.
+
+    Pass `--join-as <name>` to register the new pane as a team member;
+    `--prompt` then sends an initial message after the fork is ready.
+
+    \b
+    Examples:
+      hive fork                                  # auto-detect split direction
+      hive fork --split h                        # force horizontal split
+      hive fork --join-as dodo-c1 --prompt "continue the thread"
+    """
     if prompt and not join_as:
         _fail("--prompt requires --join-as")
 
@@ -1671,7 +1699,20 @@ def delete(name: str, workspace: str, keep_workspace: bool, delete_workspace: bo
 @click.option("--cli", "cli_name", type=click.Choice(["droid", "claude", "codex"]), default=None, help="Agent CLI to spawn (default: same as current pane)")
 def spawn(agent_name: str, model: str, prompt: str,
           cwd: str, skill: str, workflow: str, env: tuple[str, ...], cli_name: str | None):
-    """Spawn an agent pane."""
+    """Spawn an agent pane.
+
+    Creates a new tmux pane in the current window and starts the chosen
+    agent CLI. By default spawns the same CLI as the current pane; use
+    `--cli droid|claude|codex` to pick a specific one. `--skill` loads
+    a base skill on startup (`hive` by default), `--workflow` stacks a
+    workflow skill on top, and `--prompt` sends an initial message.
+
+    \b
+    Examples:
+      hive spawn dodo --cli codex
+      hive spawn worker1 --prompt "start on task X" --workflow code-review
+      hive spawn claude -m claude-opus-4-7 --skill none
+    """
     team_name, t = _resolve_scoped_team(None, required=True)
     assert team_name is not None and t is not None
     try:
@@ -1708,7 +1749,27 @@ def handoff(
     spawn_target: bool,
     fork_target: bool,
 ):
-    """Delegate a thread via send/spawn/fork wrapper."""
+    """Delegate a thread via send / spawn / fork wrapper.
+
+    \b
+    Three modes, chosen by flags:
+      direct  (no flag)  target agent already exists in the team;
+                         the anchor inbound is forwarded to them.
+      --spawn            spin up a fresh agent pane first, then hand off.
+      --fork             fork the current session into a new clone, then
+                         hand off (preserves model + context).
+
+    By default the anchor is the latest unanswered inbound to you; pass
+    `--reply-to <msgId>` to pick a specific thread. `--note` appends a
+    short comment to the standard handoff message; `--artifact` attaches
+    a file.
+
+    \b
+    Examples:
+      hive handoff dodo --artifact /tmp/task.md       # direct, dodo already there
+      hive handoff worker1 --spawn --artifact /tmp/task.md
+      hive handoff dodo-c1 --fork --note "continue this"
+    """
     if spawn_target and fork_target:
         _fail("choose at most one of --spawn or --fork")
 
@@ -1865,7 +1926,16 @@ def wait_status(legacy_args: tuple[str, ...]):
 @click.argument("agent_name")
 @click.argument("text")
 def inject_cmd(agent_name: str, text: str):
-    """Debug: inject raw input into an agent pane."""
+    """Debug: inject raw input into an agent pane.
+
+    Writes text directly into the target pane without the `<HIVE>`
+    envelope or delivery tracking. Use only when bypassing the message
+    protocol for low-level debugging.
+
+    \b
+    Example:
+      hive inject dodo "plain ping"
+    """
     team_name, t = _resolve_scoped_team(None, required=True)
     assert team_name is not None and t is not None
     agent = t.get(agent_name)
@@ -1880,7 +1950,24 @@ def inject_cmd(agent_name: str, text: str):
 
 @cli.command("team")
 def team_cmd():
-    """Show team overview."""
+    """Show team overview.
+
+    Returns a JSON payload with `members[]`, `self` (your own name), the
+    bound `tmuxSession` / `tmuxWindow`, `runtimeWorkspace`, and `cwd`.
+
+    Each member row carries the runtime fields `busy`, `inputState`, and
+    `turnPhase` — see docs/runtime-model.md for semantics. `self` is a
+    string pointer: look yourself up in `members[]` for your own state.
+
+    If the current tmux window has no team bound, returns a bootstrap
+    payload instead: `team=null`, a pane list, and a `hint` telling you
+    to run `hive init`.
+
+    \b
+    Examples:
+      hive team                                # full payload when a team is bound
+      hive team | jq '.members[] | select(.name=="dodo")'
+    """
     _gc_dead_teams()
     discovered = _discover_tmux_binding()
     if discovered.get("team"):
@@ -2883,11 +2970,21 @@ def send(
     3+ lines, contains fenced code, or starts markdown heading/list
     lines.
 
-    The response carries a `delivery` field:
+    \b
+    Delivery outcomes (in the `delivery` field of the response):
+      success   Target pane rendered the msgId (via transcript or stream).
+      pending   Submit OK; background tracking continues for up to 60s.
+      failed    Submit error OR msgId never rendered before timeout.
+                Retry; CLI also exits with status 2.
 
-      - `success`: target pane rendered the msgId (transcript or stream).
-      - `pending`: submit completed; background tracking continues up to 60s.
-      - `failed`: submit errored OR target pane never rendered msgId before timeout. Retry.
+    \b
+    Examples:
+      hive send dodo "review this diff" --artifact /tmp/diff.md
+      hive send dodo "see report" --artifact - <<'EOF'
+      # Findings
+      - item
+      EOF
+      hive send dodo "ack" --wait     # block up to 60s for confirmed delivery
     """
     _reject_legacy_recipient_options(to_option, msg_option, command="send", to_agent=to_agent)
     team_name, t = _resolve_send_target_team(to_agent)
@@ -2951,11 +3048,17 @@ def reply(
 ):
     """Reply to the latest unanswered inbound message from another agent.
 
-    Without ``--reply-to``, hive picks the most recent send event from
-    ``to_agent`` to you that you have not already replied to. If there
+    Without `--reply-to`, hive picks the most recent send event from
+    `to_agent` to you that you have not already replied to. If there
     is no such message, the command fails and asks you to pass
-    ``--reply-to`` explicitly; ``hive reply`` never guesses across
+    `--reply-to` explicitly; `hive reply` never guesses across
     competing threads.
+
+    \b
+    Examples:
+      hive reply dodo "fixed"                      # auto-resolve latest inbound
+      hive reply dodo "got it" --reply-to aBc1     # explicit thread anchor
+      hive reply dodo "see v2" --artifact /tmp/v2.md
     """
     _reject_legacy_recipient_options(to_option, msg_option, command="reply", to_agent=to_agent)
     team_name, t = _resolve_send_target_team(to_agent)
@@ -3036,7 +3139,15 @@ def answer(agent_name: str, text: str):
 @cli.command()
 @click.argument("message_id")
 def delivery(message_id: str):
-    """Check delivery status of a sent message by ID."""
+    """Check delivery status of a sent message by ID.
+
+    Use after `hive send` returned `delivery=pending` or `failed` to
+    see the sidecar's tracking state and any observation events.
+
+    \b
+    Example:
+      hive delivery aBc1
+    """
     _, t = _resolve_scoped_team(None, required=True)
     assert t is not None
     ws = _resolve_workspace(t, required=True)
@@ -3055,7 +3166,15 @@ def delivery(message_id: str):
 @cli.command()
 @click.argument("message_id")
 def thread(message_id: str):
-    """Show a reply thread rooted at a msgId."""
+    """Show a reply thread rooted at a msgId.
+
+    Returns the chain of send/reply events linked to this msgId. Useful
+    to audit conversation flow or resolve "who replied to what".
+
+    \b
+    Example:
+      hive thread aBc1
+    """
     _, t = _resolve_scoped_team(None, required=True)
     assert t is not None
     ws = _resolve_workspace(t, required=True)
@@ -3075,7 +3194,22 @@ def thread(message_id: str):
 @click.argument("agent_name", required=False, default="")
 @click.option("--skills", "include_skills", is_flag=True, help="Include local hive skill installation diagnostics for the target CLI.")
 def doctor(agent_name: str, include_skills: bool):
-    """Diagnose agent connectivity and session state."""
+    """Diagnose agent connectivity and session state.
+
+    With no argument, probes yourself. With an agent name, probes that
+    peer — pane liveness, transcript readability, sidecar heartbeat,
+    runtime input state. `--skills` adds local `hive` skill installation
+    diagnostics (version, path, drift vs. shipped SKILL.md) for the
+    target CLI; useful after `pipx upgrade hive` when agents start
+    warning about stale skills.
+
+    \b
+    Examples:
+      hive doctor                  # probe self
+      hive doctor dodo             # probe a peer
+      hive doctor --skills         # check for hive skill drift on self's CLI
+      hive doctor dodo --skills
+    """
     _, t = _resolve_scoped_team(None, required=True)
     assert t is not None
     ws = _resolve_workspace(t, required=True)
@@ -3100,7 +3234,16 @@ def doctor(agent_name: str, include_skills: bool):
 @click.argument("member_name")
 @click.option("--lines", "-n", default=30)
 def capture(member_name: str, lines: int):
-    """Debug: capture raw pane output from any member (agent or terminal)."""
+    """Debug: capture raw pane output from any member (agent or terminal).
+
+    Prints the last N lines (default 30) of the member's tmux pane.
+    Use to inspect what the agent actually sees when transcript parsing
+    gives unexpected results.
+
+    \b
+    Example:
+      hive capture dodo -n 80
+    """
     _, t = _resolve_scoped_team(None, required=True)
     assert t is not None
     try:
@@ -3117,7 +3260,16 @@ def capture(member_name: str, lines: int):
 @cli.command()
 @click.argument("agent_name")
 def interrupt(agent_name: str):
-    """Interrupt an agent pane."""
+    """Interrupt an agent pane.
+
+    Sends the agent's native interrupt keystroke (e.g. Esc for Claude
+    Code) to cancel an in-progress turn. Use when a peer is stuck in a
+    tool loop or you need to abort a runaway action.
+
+    \b
+    Example:
+      hive interrupt dodo
+    """
     _, t = _resolve_scoped_team(None, required=True)
     assert t is not None
     agent = t.get(agent_name)
@@ -3138,6 +3290,10 @@ def kill(agent_name: str):
     Qualified names (`<group>.<name>`) resolve across teams so you can
     kill a peer-team agent from the main group pane. Bare names resolve
     against the caller's scoped team.
+
+    \b
+    Example:
+      hive kill worker1
     """
     _, t = _resolve_send_target_team(agent_name)
     try:
@@ -3236,7 +3392,18 @@ def notify_cmd(
     highlight: bool,
     window_status: bool,
 ):
-    """Notify the user for the current pane."""
+    """Notify the user for the current pane.
+
+    Pops a desktop notification and (optionally) flashes the tmux window
+    status / pane border. Use this only when you are blocked and need
+    the human back — not for progress updates. Message structure should
+    cover: what happened, why you need them now, what to do on return.
+
+    \b
+    Examples:
+      hive notify "press Space to come back and confirm migration"
+      hive notify "blocked on credentials" --highlight --seconds 30
+    """
     target_pane = _resolve_target_pane()
     payload = notify_ui.notify(
         message,
@@ -3349,7 +3516,16 @@ def _resolve_terminal(t: Team, name: str) -> Terminal:
 @click.argument("terminal_name")
 @click.argument("command")
 def exec_cmd(terminal_name: str, command: str):
-    """Debug: inject a command into a terminal pane."""
+    """Debug: inject a command into a terminal pane.
+
+    Only targets panes registered as terminals (not agents). Use for
+    terminal-side tooling scripted by agents; for agent-directed
+    commands use the message protocol.
+
+    \b
+    Example:
+      hive exec shell "ls -la"
+    """
     team_name, t = _resolve_scoped_team(None, required=True)
     assert team_name is not None and t is not None
     terminal = _resolve_terminal(t, terminal_name)

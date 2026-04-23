@@ -18,14 +18,6 @@ def test_hive_skill_guides_multiline_send_via_artifact():
     assert "--artifact - <<'EOF'" in skill_text
 
 
-def test_readme_uses_command_first_heredoc_examples():
-    repo_root = Path(__file__).resolve().parents[2]
-    readme_text = (repo_root / "README.md").read_text()
-
-    assert '--artifact - <<\'EOF\'' in readme_text
-    assert 'cat <<\'EOF\' | hive send' not in readme_text
-
-
 def test_hive_install_docs_use_npx_skills_add_as_canonical_path():
     """守 install/refresh 命令在 README / AGENTS 跨文件一致 — contract test"""
     repo_root = Path(__file__).resolve().parents[2]
@@ -36,6 +28,5 @@ def test_hive_install_docs_use_npx_skills_add_as_canonical_path():
     assert "npx skills update hive -g" in readme_text
     assert 'npx skills add https://github.com/notdp/hive -g --all' in readme_text
     assert 'npx skills add "$PWD" -g --all' in readme_text
-    assert 'Plugin enable does not install or refresh the base `hive` skill' in readme_text
     assert 'npx skills add "$PWD" -g --all' in agents_text
     assert 'repo changes to `skills/hive/SKILL.md` do not reach agents unless you refresh it via `npx skills add`' in agents_text

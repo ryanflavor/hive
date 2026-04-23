@@ -1708,9 +1708,9 @@ def test_send_help_explains_delivery_states(runner):
     help_text = " ".join(result.output.split())
 
     assert result.exit_code == 0
-    assert "`success`: target pane rendered the msgId" in help_text
-    assert "`pending`: submit completed; background tracking continues" in help_text
-    assert "`failed`: submit errored OR target pane never rendered msgId" in help_text
+    assert "success Target pane rendered the msgId" in help_text
+    assert "pending Submit OK; background tracking continues" in help_text
+    assert "failed Submit error OR msgId never rendered" in help_text
     assert "`queued`" not in help_text
     assert "`unconfirmed`" not in help_text
     assert "`deferred`" not in help_text
