@@ -1452,7 +1452,8 @@ def test_send_ack_unconfirmed_on_timeout(runner, configure_hive_home, monkeypatc
 
     result = runner.invoke(cli, ["send", "gpt", "test", "--artifact", artifact, "--wait"])
 
-    assert result.exit_code == 0
+    # delivery=failed exits 2 (P0-2: unix contract — exit 0 means success).
+    assert result.exit_code == 2
     payload = json.loads(result.output)
     assert payload["delivery"] == "failed"
     assert payload["meaning"] == "Delivery failed: either submit errored or the target pane never rendered the message id."
@@ -1702,7 +1703,8 @@ def test_send_inject_failure_no_sidecar(runner, configure_hive_home, monkeypatch
 
     result = runner.invoke(cli, ["send", "gpt", "test", "--artifact", artifact])
 
-    assert result.exit_code == 0
+    # delivery=failed exits 2 (P0-2: unix contract — exit 0 means success).
+    assert result.exit_code == 2
     payload = json.loads(result.output)
     assert payload["delivery"] == "failed"
     assert payload["meaning"] == "Delivery failed: either submit errored or the target pane never rendered the message id."
@@ -1967,3 +1969,97 @@ def test_answer_when_waiting_injects_text(runner, configure_hive_home, monkeypat
     events = bus.read_all_events(workspace)
     assert len(events) == 1
     assert events[0]["intent"] == "answer"
+
+
+def _patch_send_failed(monkeypatch, workspace):
+    """Make _request_send_payload return a delivery=failed payload without touching the sidecar."""
+
+    class _FakeTeam:
+        def __init__(self):
+            self.workspace = str(workspace)
+            self.name = "team-x"
+            self.tmux_session = "dev"
+            self.tmux_window = "dev:0"
+
+    team = _FakeTeam()
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
+    monkeypatch.setattr("hive.cli._resolve_send_target_team", lambda _agent: ("team-x", team))
+    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
+    monkeypatch.setattr(
+        "hive.cli._maybe_route_busy_root_send",
+        lambda **_kw: ("gpt", {}),
+    )
+    monkeypatch.setattr(
+        "hive.cli._request_send_payload",
+        lambda **_kw: {
+            "from": "claude",
+            "to": "gpt",
+            "msgId": FIXED_ID,
+            "gate": "clear",
+            "delivery": "failed",
+            "meaning": "Target pane never rendered msgId before timeout.",
+            "recommendedAction": "retry",
+        },
+    )
+
+
+def test_send_exits_nonzero_when_delivery_is_failed(runner, configure_hive_home, monkeypatch, tmp_path):
+    """`hive send` must exit non-zero when delivery=failed so shell `&&` chains respect failure."""
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    _patch_send_failed(monkeypatch, workspace)
+
+    result = runner.invoke(cli, ["send", "gpt", "please review"])
+
+    assert result.exit_code == 2, f"expected exit 2 on delivery=failed, got {result.exit_code}: {result.output}"
+    payload = json.loads(result.output)
+    assert payload["delivery"] == "failed"
+
+
+def test_reply_exits_nonzero_when_delivery_is_failed(runner, configure_hive_home, monkeypatch, tmp_path):
+    """`hive reply` must mirror `send` and exit non-zero on delivery=failed."""
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    _patch_send_failed(monkeypatch, workspace)
+    # reply needs an anchor msgId; pass one explicitly so auto-resolution isn't required
+    result = runner.invoke(cli, ["reply", "gpt", "ack", "--reply-to", FIXED_ID])
+
+    assert result.exit_code == 2, f"expected exit 2 on delivery=failed, got {result.exit_code}: {result.output}"
+    payload = json.loads(result.output)
+    assert payload["delivery"] == "failed"
+
+
+def test_send_exits_zero_on_delivery_pending(runner, configure_hive_home, monkeypatch, tmp_path):
+    """delivery=pending is async-not-failure — must stay exit 0."""
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+
+    class _FakeTeam:
+        def __init__(self):
+            self.workspace = str(workspace)
+            self.name = "team-x"
+            self.tmux_session = "dev"
+            self.tmux_window = "dev:0"
+
+    team = _FakeTeam()
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
+    monkeypatch.setattr("hive.cli._resolve_send_target_team", lambda _agent: ("team-x", team))
+    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
+    monkeypatch.setattr("hive.cli._maybe_route_busy_root_send", lambda **_kw: ("gpt", {}))
+    monkeypatch.setattr(
+        "hive.cli._request_send_payload",
+        lambda **_kw: {
+            "from": "claude",
+            "to": "gpt",
+            "msgId": FIXED_ID,
+            "delivery": "pending",
+        },
+    )
+
+    result = runner.invoke(cli, ["send", "gpt", "hi"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["delivery"] == "pending"

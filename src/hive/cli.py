@@ -475,6 +475,14 @@ def _resolve_artifact_path(artifact: str, workspace: str | Path = "") -> str:
         # Read from stdin, save to workspace artifacts
         if not workspace:
             _fail("--artifact - requires a workspace (run inside a team)")
+        if sys.stdin.isatty():
+            _fail(
+                "--artifact - expects piped stdin but a terminal is attached; "
+                "use a heredoc instead:\n"
+                "  hive <cmd> <args> --artifact - <<'EOF'\n"
+                "  # details\n"
+                "  EOF"
+            )
         content = sys.stdin.read()
         ws_artifacts = Path(workspace) / "artifacts"
         ws_artifacts.mkdir(parents=True, exist_ok=True)
@@ -2902,6 +2910,8 @@ def send(
     if routing:
         payload.update(routing)
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+    if payload.get("delivery") == "failed":
+        sys.exit(2)
 
 
 @cli.command()
@@ -2979,6 +2989,8 @@ def reply(
     if not reply_to_override:
         payload["autoReplyTo"] = resolved_reply_to
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+    if payload.get("delivery") == "failed":
+        sys.exit(2)
 
 
 @cli.command()
