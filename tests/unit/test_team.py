@@ -267,8 +267,10 @@ def test_team_spawn_tags_agent_and_passes_workflow_as_initial_skill(configure_hi
     monkeypatch.setattr("hive.team.tmux.tag_pane", lambda *args, **kwargs: tagged.append(args))
     monkeypatch.setattr("hive.team.tmux.get_current_window_target", lambda: "dev:1")
     monkeypatch.setattr("hive.team.tmux.enable_pane_border_status", lambda target: layouts.append(("border", target)))
-    monkeypatch.setattr("hive.team.tmux.set_window_option", lambda target, option, value: layouts.append((target, option, value)))
-    monkeypatch.setattr("hive.team.tmux.select_layout", lambda target, layout: layouts.append(("layout", target, layout)))
+    monkeypatch.setattr("hive.layout.tmux.window_size", lambda _t: (200, 50))
+    monkeypatch.setattr("hive.layout.tmux.list_panes", lambda _t: ["%1", "%9"])
+    monkeypatch.setattr("hive.layout.tmux.set_window_option", lambda target, option, value: layouts.append((target, option, value)))
+    monkeypatch.setattr("hive.layout.tmux.select_layout", lambda target, preset: layouts.append(("layout", target, preset)))
     monkeypatch.setattr("hive.agent.Agent.send", lambda self, text: sent.append(text))
 
     team = Team(name="team-a", lead_pane_id="%0")
@@ -281,6 +283,37 @@ def test_team_spawn_tags_agent_and_passes_workflow_as_initial_skill(configure_hi
     assert tagged == [("%9", "agent", "claude", "team-a")]
     assert sent == []
     assert ("border", "dev:1") in layouts
+
+
+def test_team_spawn_portrait_window_applies_even_vertical(configure_hive_home, monkeypatch):
+    """Guards Bug 1 regression: portrait window must end on `even-vertical`,
+    not the legacy hardcoded `main-vertical`."""
+    configure_hive_home(tmux_inside=True, current_pane="%0")
+    spawned: list[dict] = []
+    layouts: list[tuple] = []
+    agent = Agent(name="claude", team_name="team-a", pane_id="%9")
+
+    monkeypatch.setattr(
+        "hive.team.Agent.spawn",
+        lambda **kwargs: spawned.append(kwargs) or agent,
+    )
+    monkeypatch.setattr("hive.team.tmux.tag_pane", lambda *args, **kwargs: None)
+    monkeypatch.setattr("hive.team.tmux.get_current_window_target", lambda: "dev:1")
+    monkeypatch.setattr("hive.team.tmux.enable_pane_border_status", lambda target: None)
+    monkeypatch.setattr("hive.team.tmux.list_panes", lambda _t: ["%0"])
+    monkeypatch.setattr("hive.layout.tmux.window_size", lambda _t: (191, 171))
+    monkeypatch.setattr("hive.layout.tmux.list_panes", lambda _t: ["%0", "%9"])
+    monkeypatch.setattr("hive.layout.tmux.set_window_option", lambda *a, **kw: layouts.append(("opt", a)))
+    monkeypatch.setattr("hive.layout.tmux.select_layout", lambda t, p: layouts.append(("layout", t, p)))
+
+    team = Team(name="team-a", lead_pane_id="%0")
+    team.spawn("claude")
+
+    assert ("layout", "dev:1", "even-vertical") in layouts
+    # Portrait must not set main-pane-width.
+    assert not any(call[0] == "opt" for call in layouts)
+    # Pre-spawn split should also follow portrait orientation (vertical = False).
+    assert spawned[0]["split_horizontal"] is False
 
 
 def test_team_spawn_second_agent_splits_from_last_agent(configure_hive_home, monkeypatch):

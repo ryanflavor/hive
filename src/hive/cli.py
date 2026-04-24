@@ -1295,6 +1295,7 @@ def _attach_peer_to_team(
             group="peer",
         )
         _declare_pair(peer_name)
+        _apply_peer_layout(current_pane)
         return {
             "mode": "discovered",
             "pane": candidate.pane_id,
@@ -1307,12 +1308,17 @@ def _attach_peer_to_team(
     peer_cli = peer_cli_for_family(my_family)
     peer_name = _derive_agent_name(seen_names)
     peer_cwd = tmux.display_value(current_pane, "#{pane_current_path}") or os.getcwd()
+    from . import layout as layout_mod
+    peer_window = tmux.get_pane_window_target(current_pane) or ""
+    pane_count_after = (
+        len(tmux.list_panes(peer_window)) + 1 if peer_window else 2
+    )
     peer_agent = Agent.spawn(
         name=peer_name,
         team_name=t.name,
         target_pane=current_pane,
         cwd=peer_cwd,
-        split_horizontal=True,
+        split_horizontal=layout_mod.split_horizontal(peer_window, pane_count_after),
         cli=peer_cli,
         skill="hive",
     )
@@ -1325,6 +1331,7 @@ def _attach_peer_to_team(
         agent=peer_name,
     )
     _declare_pair(peer_name)
+    _apply_peer_layout(current_pane)
     return {
         "mode": "spawned",
         "pane": peer_agent.pane_id,
@@ -1332,6 +1339,17 @@ def _attach_peer_to_team(
         "cli": peer_cli,
         "pair": [lead_name, peer_name],
     }
+
+
+def _apply_peer_layout(current_pane: str) -> None:
+    """Apply adaptive layout to the window that owns *current_pane*."""
+    if not current_pane:
+        return
+    window_target = tmux.get_pane_window_target(current_pane) or ""
+    if not window_target:
+        return
+    from . import layout as layout_mod
+    layout_mod.apply_adaptive(window_target)
 
 
 def _register_existing_pane(
@@ -2008,18 +2026,33 @@ def who():
     team_cmd.callback()  # type: ignore[attr-defined]
 
 
-_LAYOUT_PRESETS = ("main-vertical", "main-horizontal", "tiled", "even-horizontal", "even-vertical")
+_LAYOUT_PRESETS = ("auto", "main-vertical", "main-horizontal", "tiled", "even-horizontal", "even-vertical")
 
 
 @cli.command("layout")
 @click.argument("preset", type=click.Choice(_LAYOUT_PRESETS, case_sensitive=False))
 def layout_cmd(preset: str):
-    """Apply a tmux layout preset to the current team window."""
+    """Apply a tmux layout preset to the current team window.
+
+    Use ``auto`` to pick a preset adaptively from the window's aspect ratio.
+    """
     _, t = _resolve_scoped_team(None, required=True)
     assert t is not None
     window_target = t.tmux_window or tmux.get_current_window_target() or ""
     if not window_target:
         _fail("Cannot determine tmux window target")
+    if preset == "auto":
+        from . import layout as layout_mod
+        choice = layout_mod.apply_adaptive(window_target)
+        if choice is None:
+            click.echo(json.dumps({"layout": "", "window": window_target, "reason": "no-op"}))
+            return
+        click.echo(json.dumps({
+            "layout": choice.preset,
+            "orientation": choice.orientation,
+            "window": window_target,
+        }))
+        return
     if preset in ("main-vertical", "main-horizontal"):
         dim = "main-pane-width" if preset == "main-vertical" else "main-pane-height"
         tmux.set_window_option(window_target, dim, "50%")
@@ -2272,28 +2305,15 @@ def _wait_for_peer_ready(
     return waiting
 
 
-def _pick_gang_orientation(window_target: str) -> str:
-    """Return 'horizontal' or 'vertical' based on window aspect ratio."""
-    w, h = tmux.window_size(window_target)
-    if w and h and w > h * 1.5:
-        return "horizontal"
-    return "vertical"
-
-
 def _apply_gang_layout(window_target: str) -> str:
-    """Apply the canonical GANG layout (auto-picked by aspect ratio).
+    """Apply the canonical GANG layout via the shared adaptive picker.
 
-    - horizontal window → tmux `main-vertical` with main-pane-width=67%
-      (orch main on left; board + skeptic stacked right)
-    - vertical window → tmux `even-vertical` (all 3 stacked equally)
+    Returns the orientation (``horizontal``/``vertical``/``""``) so the
+    gang JSON payloads can keep exposing it.
     """
-    orientation = _pick_gang_orientation(window_target)
-    if orientation == "horizontal":
-        tmux.set_window_option(window_target, "main-pane-width", "50%")
-        tmux.select_layout(window_target, "main-vertical")
-    else:
-        tmux.select_layout(window_target, "even-vertical")
-    return orientation
+    from . import layout as layout_mod
+    choice = layout_mod.apply_adaptive(window_target)
+    return choice.orientation if choice is not None else ""
 
 
 def _auto_init_team_for_gang() -> Team:
@@ -2696,9 +2716,6 @@ def gang_spawn_peer_cmd(feature_id: str, task_artifact: str, val_artifact: str):
         tmux_window_id=tmux.get_window_id(peer_window) or "",
     )
 
-    orientation = _pick_gang_orientation(peer_window)
-    split_horizontal = orientation == "horizontal"
-
     worker_agent = Agent.spawn(
         name=worker_name,
         team_name=peer_team_name,
@@ -2712,12 +2729,14 @@ def gang_spawn_peer_cmd(feature_id: str, task_artifact: str, val_artifact: str):
     tmux.set_pane_option(worker_agent.pane_id, "hive-owner", owner_name)
     peer_team.agents[worker_name] = worker_agent
 
+    from . import layout as layout_mod
+    validator_pane_count_after = len(tmux.list_panes(peer_window)) + 1
     validator_agent = Agent.spawn(
         name=validator_name,
         team_name=peer_team_name,
         target_pane=worker_agent.pane_id,
         cwd=cwd,
-        split_horizontal=split_horizontal,
+        split_horizontal=layout_mod.split_horizontal(peer_window, validator_pane_count_after),
         split_size="50%",
         skill="gang-validator",
         cli="codex",
@@ -2725,6 +2744,8 @@ def gang_spawn_peer_cmd(feature_id: str, task_artifact: str, val_artifact: str):
     tmux.set_pane_option(validator_agent.pane_id, "hive-group", gang_name)
     tmux.set_pane_option(validator_agent.pane_id, "hive-owner", owner_name)
     peer_team.agents[validator_name] = validator_agent
+
+    orientation = _apply_gang_layout(peer_window)
 
     # Declare the worker ↔ validator pair so `hive team` reflects it explicitly.
     try:
@@ -2829,7 +2850,7 @@ def gang_layout_cmd():
     """Re-apply the canonical GANG layout to the current gang window.
 
     Auto-picks by aspect ratio:
-      - horizontal window → orch main left (67%), board + skeptic stacked right
+      - horizontal window → orch main left (50%), board + skeptic stacked right
       - vertical window   → 3 panes stacked equally
 
     Useful after manually dragging panes or switching between monitors.
@@ -3304,6 +3325,10 @@ def kill(agent_name: str):
     agent.kill()
     if removed_from_team:
         del t.agents[agent_name]
+    layout_window = getattr(t, "tmux_window", "") or tmux.get_current_window_target() or ""
+    if layout_window:
+        from . import layout as layout_mod
+        layout_mod.apply_adaptive(layout_window)
     click.echo(json.dumps({
         "member": agent_name,
         "action": "kill",

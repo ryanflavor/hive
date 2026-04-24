@@ -208,15 +208,16 @@ class Team:
             raise ValueError(_TMUX_REQUIRED_MESSAGE)
 
         is_first = len(self.agents) == 0
+        from . import layout
+        window_for_split = tmux.get_current_window_target() or ""
         if is_first:
             target = self.lead_pane_id or tmux.get_current_pane_id() or ""
-            split_horizontal = True
-            split_size = "50%"
+            split_horizontal = layout.split_horizontal(window_for_split, 2)
         else:
             last_agent = list(self.agents.values())[-1]
             target = last_agent.pane_id
             split_horizontal = False
-            split_size = "50%"
+        split_size = "50%"
 
         initial_skill = workflow or skill
 
@@ -241,8 +242,8 @@ class Team:
         window_target = tmux.get_current_window_target()
         if window_target:
             tmux.enable_pane_border_status(window_target)
-            tmux.set_window_option(window_target, "main-pane-width", "50%")
-            tmux.select_layout(window_target, "main-vertical")
+            from . import layout
+            layout.apply_adaptive(window_target)
 
         return agent
 
