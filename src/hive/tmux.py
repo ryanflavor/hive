@@ -613,27 +613,35 @@ def display_value(target: str, fmt: str) -> str | None:
 
 
 def get_most_recent_client_tty(session_name: str | None = None) -> str | None:
+    rows = _list_terminal_clients(session_name)
+    return rows[0][2] if rows else None
+
+
+def get_most_recent_terminal_client_pane(session_name: str | None = None) -> str | None:
+    rows = _list_terminal_clients(session_name)
+    return rows[0][1] if rows else None
+
+
+def _list_terminal_clients(session_name: str | None = None) -> list[tuple[int, str, str]]:
     args = ["list-clients"]
     if session_name:
         args.extend(["-t", session_name])
-    args.extend(["-F", "#{client_activity}\t#{client_tty}"])
+    args.extend(["-F", "#{client_activity}\t#{client_control_mode}\t#{pane_id}\t#{client_tty}"])
     r = _run(args, check=False)
-    rows: list[tuple[int, str]] = []
+    rows: list[tuple[int, str, str]] = []
     for line in r.stdout.strip().split("\n"):
         if not line:
             continue
-        parts = line.split("\t", 1)
-        if len(parts) != 2 or not parts[1]:
+        parts = line.split("\t")
+        if len(parts) != 4 or parts[1] != "0" or not parts[2] or not parts[3]:
             continue
         try:
             activity = int(parts[0] or "0")
         except ValueError:
             activity = 0
-        rows.append((activity, parts[1]))
-    if not rows:
-        return None
+        rows.append((activity, parts[2], parts[3]))
     rows.sort(key=lambda item: item[0], reverse=True)
-    return rows[0][1]
+    return rows
 
 
 def get_client_window_target(client_tty: str) -> str | None:

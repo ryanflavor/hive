@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from . import bus
+from . import notify_ui
 from .agent_cli import detect_profile_for_pane
 from .runtime_state import (
     delivery_exception_body,
@@ -31,8 +32,10 @@ from .runtime_state import (
     send_guidance,
 )
 
-IDLE_SLEEP = 5.0
 ACTIVE_SLEEP = 0.5
+IDLE_NOTIFY_TICK_SECONDS = 1.0
+IDLE_NOTIFY_THRESHOLD_SECONDS = 10.0
+IDLE_NOTIFY_MESSAGE = "Agent has been idle for 10s. Return to the pane to review."
 OBSERVATION_TIMEOUT = 60.0
 POST_EXCEPTION_FOLLOWUP_TIMEOUT = 10.0
 SOCKET_READY_TIMEOUT = 2.0
@@ -43,6 +46,7 @@ SIDECAR_API_VERSION = 5
 _FINALIZE_PENDING = "__finalize__"
 BUSY_OUTPUT_THRESHOLD_SECONDS = 3.0
 _OUTPUT_BUSY_MONITOR = None
+_AGENT_NOTIFY_ROLES = {"agent", "lead", "orchestrator"}
 
 
 def _compute_build_hash() -> str:
@@ -89,6 +93,12 @@ def _busy_output_payload(pane_id: str) -> dict[str, Any]:
     return {
         "busy": bool(monitor.is_busy(pane_id, threshold_seconds=BUSY_OUTPUT_THRESHOLD_SECONDS)),
     }
+
+
+def _is_output_busy(pane_id: str, monitor: Any) -> bool:
+    if monitor is None:
+        return False
+    return bool(monitor.is_busy(pane_id, threshold_seconds=BUSY_OUTPUT_THRESHOLD_SECONDS))
 
 
 def _saw_msg_id(pane_id: str, msg_id: str) -> bool:
@@ -1035,6 +1045,52 @@ def _team_member_bindings(team_name: str) -> dict[str, dict[str, Any]]:
     return members
 
 
+def _idle_notify_agent_panes(team_name: str) -> list[str]:
+    from . import tmux
+
+    panes: list[str] = []
+    for member in _team_member_bindings(team_name).values():
+        if member.get("role") not in _AGENT_NOTIFY_ROLES:
+            continue
+        pane_id = str(member.get("pane") or "")
+        if pane_id and pane_id not in panes and tmux.is_pane_alive(pane_id):
+            panes.append(pane_id)
+    return panes
+
+
+def _idle_notify_tick(
+    *,
+    team_name: str,
+    session_name: str,
+    idle_notify: dict[str, dict[str, Any]],
+    busy_monitor: Any,
+    now: float,
+) -> None:
+    from . import tmux
+
+    active_pane = tmux.get_most_recent_terminal_client_pane(session_name) or ""
+    pane_ids = set(_idle_notify_agent_panes(team_name))
+    for pane_id in list(idle_notify):
+        if pane_id not in pane_ids:
+            idle_notify.pop(pane_id, None)
+
+    for pane_id in sorted(pane_ids):
+        record = idle_notify.setdefault(pane_id, {"last_busy_ts": now, "notified": False})
+        if pane_id == active_pane:
+            record["last_busy_ts"] = now
+            record["notified"] = False
+            continue
+        if _is_output_busy(pane_id, busy_monitor):
+            record["last_busy_ts"] = now
+            record["notified"] = False
+            continue
+
+        last_busy_ts = float(record.get("last_busy_ts", now))
+        if now - last_busy_ts >= IDLE_NOTIFY_THRESHOLD_SECONDS and not bool(record.get("notified", False)):
+            notify_ui.notify(IDLE_NOTIFY_MESSAGE, pane_id)
+            record["notified"] = True
+
+
 def _thread_payload(workspace: str, pending: dict[str, dict[str, Any]], message_id: str) -> dict[str, Any]:
     events = bus.read_events_with_ns(workspace)
     send_events: dict[str, tuple[int, dict[str, object]]] = {}
@@ -1378,6 +1434,7 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
 
     sidecar_started_at = _now_iso()
     pending: dict[str, dict[str, Any]] = {}
+    idle_notify: dict[str, dict[str, Any]] = {}
     last_window_check = 0.0
     server = _open_server_socket(workspace)
     session_target = (tmux_window.split(":", 1)[0] if ":" in tmux_window else tmux_window).strip()
@@ -1405,9 +1462,17 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                 tmux_window_id=tmux_window_id,
                 sidecar_started_at=sidecar_started_at,
                 pending=pending,
-                timeout=ACTIVE_SLEEP if pending else IDLE_SLEEP,
+                timeout=ACTIVE_SLEEP if pending else IDLE_NOTIFY_TICK_SECONDS,
             ):
                 return
+
+            _idle_notify_tick(
+                team_name=team,
+                session_name=session_target,
+                idle_notify=idle_notify,
+                busy_monitor=busy_monitor,
+                now=time.monotonic(),
+            )
 
             for message_id, record in list(pending.items()):
                 result = _check_pending(record)

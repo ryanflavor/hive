@@ -157,7 +157,7 @@ def test_plugin_reenable_preserves_user_skill_that_replaced_old_plugin_symlink(r
     assert (review_skill / "SKILL.md").read_text().startswith("---\nname: review\ndescription: user custom")
 
 
-def test_plugin_enable_notify_materializes_command_and_hooks(runner, configure_hive_home):
+def test_plugin_enable_notify_materializes_command_without_hooks(runner, configure_hive_home):
     hive_home = configure_hive_home(tmux_inside=False)
     factory_home = hive_home.parent / ".factory"
     codex_home = hive_home.parent / ".codex"
@@ -177,16 +177,12 @@ def test_plugin_enable_notify_materializes_command_and_hooks(runner, configure_h
     assert not (codex_home / "skills" / "notify").exists()
 
     installed_root = hive_home / "plugins" / "installed" / "notify"
-    hook_runner = installed_root / "bin" / "droid-notify-hook"
-    hook_defs = installed_root / "hooks" / "hooks.json"
-    assert hook_runner.exists()
-    assert hook_defs.exists()
+    assert not (installed_root / "bin" / "droid-notify-hook").exists()
+    assert not (installed_root / "hooks" / "hooks.json").exists()
 
-    settings = json.loads((factory_home / "settings.json").read_text())
-    for event in ("Notification", "Stop"):
-        group = settings["hooks"][event][0]
-        assert group["hooks"][0]["command"] == str(hook_runner)
-        assert group["hooks"][0]["timeout"] == 5
+    settings_path = factory_home / "settings.json"
+    settings = json.loads(settings_path.read_text()) if settings_path.exists() else {}
+    assert "hooks" not in settings
 
 
 @pytest.fixture

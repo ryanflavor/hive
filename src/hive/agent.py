@@ -236,9 +236,10 @@ class Agent:
             elif cli == "codex":
                 cmd_parts = ["exec", _shell_escape(bin_path), "-c", "check_for_update_on_startup=false", "fork", _shell_escape(session_id)]
 
-        spawn_env = dict(extra_env or {})
-        spawn_env["HIVE_TARGET_PANE"] = pane_id
-        env_parts = [f"{k}={_shell_escape(v)}" for k, v in spawn_env.items()]
+        env_parts: list[str] = []
+        if extra_env:
+            for k, v in extra_env.items():
+                env_parts.append(f"{k}={_shell_escape(v)}")
 
         cmd = f"cd {_shell_escape(cwd)}"
         if env_parts:

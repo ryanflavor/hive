@@ -83,12 +83,11 @@ def test_spawn_passes_extra_env(monkeypatch):
     startup_cmd = calls[0]
     assert "CR_WORKSPACE=" in startup_cmd
     assert "/tmp/cr-test" in startup_cmd
-    assert "HIVE_TARGET_PANE='%0'" in startup_cmd
     assert "HIVE_TEAM_NAME=" not in startup_cmd
     assert "HIVE_AGENT_NAME=" not in startup_cmd
 
 
-def test_spawn_without_extra_env_exports_target_pane_only(monkeypatch):
+def test_spawn_without_extra_env_does_not_export_default_hive_vars(monkeypatch):
     calls, _ = _setup_tmux_mocks(monkeypatch)
 
     Agent.spawn(
@@ -97,24 +96,9 @@ def test_spawn_without_extra_env_exports_target_pane_only(monkeypatch):
     )
 
     startup_cmd = calls[0]
-    assert "export " in startup_cmd
-    assert "HIVE_TARGET_PANE='%0'" in startup_cmd
     assert "HIVE_TEAM_NAME=" not in startup_cmd
     assert "HIVE_AGENT_NAME=" not in startup_cmd
-
-
-def test_spawn_extra_env_cannot_override_target_pane(monkeypatch):
-    calls, _ = _setup_tmux_mocks(monkeypatch)
-
-    Agent.spawn(
-        name="w1", team_name="t", target_pane="%0",
-        cwd="/tmp", is_first=True, skill="none",
-        extra_env={"HIVE_TARGET_PANE": "%wrong"},
-    )
-
-    startup_cmd = calls[0]
-    assert "HIVE_TARGET_PANE='%0'" in startup_cmd
-    assert "%wrong" not in startup_cmd
+    assert "export " not in startup_cmd
 
 
 def test_spawn_hive_loads_skill_and_sends_prompt(monkeypatch):

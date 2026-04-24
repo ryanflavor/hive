@@ -1341,14 +1341,6 @@ def test_notify_fails_outside_tmux(runner, monkeypatch):
     assert "requires tmux" in result.output
 
 
-def test_internal_notify_hook_command_delegates_to_notify_hook_main(runner, monkeypatch):
-    monkeypatch.setattr("hive.cli.notify_hook.main", lambda: 0)
-
-    result = runner.invoke(cli, ["_notify-hook"])
-
-    assert result.exit_code == 0
-
-
 # --- ACK-specific tests ---
 
 

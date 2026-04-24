@@ -9,7 +9,6 @@ def _mock_tmux_basics(monkeypatch):
     monkeypatch.setattr("hive.notify_ui.tmux.get_most_recent_client_window", lambda _session: "dev:9")
     monkeypatch.setattr("hive.notify_ui.tmux.get_most_recent_client_tty", lambda _session: "/dev/ttys050")
     monkeypatch.setattr("hive.notify_ui.tmux.set_pane_option", lambda *args, **kwargs: None)
-    monkeypatch.setattr("hive.notify_ui.notify_state.record_notification", lambda *args, **kwargs: None)
 
 
 def test_notify_fires_flash_and_bell(monkeypatch):
@@ -43,7 +42,6 @@ def test_notify_is_suppressed_when_user_is_already_in_target_window(monkeypatch)
     monkeypatch.setattr("hive.notify_ui.show_window_flash", lambda *args, **kwargs: calls.append(("flash",)))
     monkeypatch.setattr("hive.notify_ui._ring_terminal_bell", lambda pane: calls.append(("bell",)))
     monkeypatch.setattr("hive.notify_ui._show_pane_attention_now", lambda pane, session_name: calls.append(("attention", pane, session_name)))
-    monkeypatch.setattr("hive.notify_ui.notify_state.record_notification", lambda *args, **kwargs: calls.append(("record",)))
 
     payload = notify_ui.notify("回来确认", "%9")
 
@@ -51,71 +49,6 @@ def test_notify_is_suppressed_when_user_is_already_in_target_window(monkeypatch)
     assert payload["suppressed"] is True
     assert payload["suppressionReason"] == "same_window"
     assert calls == [("attention", "%9", "dev")]
-
-
-def test_hook_notify_is_suppressed_without_animation_when_user_is_already_in_target_window(monkeypatch):
-    _mock_tmux_basics(monkeypatch)
-    calls: list[tuple] = []
-
-    monkeypatch.setattr("hive.notify_ui.tmux.get_client_mode", lambda _pane: "terminal")
-    monkeypatch.setattr("hive.notify_ui.tmux.get_most_recent_client_window", lambda _session: "dev:1")
-    monkeypatch.setattr("hive.notify_ui.show_window_flash", lambda *args, **kwargs: calls.append(("flash",)))
-    monkeypatch.setattr("hive.notify_ui._ring_terminal_bell", lambda pane: calls.append(("bell",)))
-    monkeypatch.setattr("hive.notify_ui._show_pane_attention_now", lambda pane, session_name: calls.append(("attention", pane, session_name)))
-    monkeypatch.setattr("hive.notify_ui.notify_state.record_notification", lambda *args, **kwargs: calls.append(("record",)))
-
-    payload = notify_ui.notify(
-        "Droid finished responding. Return to the pane to review the result.",
-        "%9",
-        source=notify_ui.notify_state.SOURCE_HOOK,
-        kind="completed",
-    )
-
-    assert payload["surface"] == "suppressed"
-    assert payload["suppressed"] is True
-    assert payload["suppressionReason"] == "same_window"
-    assert calls == []
-
-
-def test_hook_notify_flashes_with_arrival_animation_when_user_is_away(monkeypatch):
-    _mock_tmux_basics(monkeypatch)
-    calls: list[tuple] = []
-
-    monkeypatch.setattr("hive.notify_ui.tmux.get_client_mode", lambda _pane: "terminal")
-    monkeypatch.setattr(
-        "hive.notify_ui.show_window_flash",
-        lambda msg, pane, wt, wn, agent_name="", animate_on_arrival=True: calls.append(
-            ("flash", msg, pane, wt, wn, agent_name, animate_on_arrival)
-        ),
-    )
-    monkeypatch.setattr("hive.notify_ui._ring_terminal_bell", lambda pane: calls.append(("bell", pane)))
-    monkeypatch.setattr(
-        "hive.notify_ui.notify_state.record_notification",
-        lambda pane, **kwargs: calls.append(("record", pane, kwargs.get("source"), kwargs.get("kind"))),
-    )
-
-    payload = notify_ui.notify(
-        "Droid finished responding. Return to the pane to review the result.",
-        "%9",
-        source=notify_ui.notify_state.SOURCE_HOOK,
-        kind="completed",
-    )
-
-    assert payload["surface"] == "fired"
-    assert payload["suppressed"] is False
-    assert calls == [
-        (
-            "flash",
-            "Droid finished responding. Return to the pane to review the result.",
-            "%9",
-            "dev:1",
-            "dev",
-            "orch",
-            True,
-        ),
-        ("bell", "%9"),
-        ("record", "%9", "hook", "completed"),
-    ]
 
 
 def _mock_show_flash_side_effects(monkeypatch, *, existing_original=None):

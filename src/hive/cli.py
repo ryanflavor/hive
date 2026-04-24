@@ -20,7 +20,6 @@ import click
 from . import bus
 from . import context as hive_context
 from . import gang_names
-from . import notify_hook
 from . import notify_ui
 from . import plugin_manager
 from . import skill_sync
@@ -114,7 +113,7 @@ hive delivery <msgId>                        # trace a send
 hive doctor dodo                             # probe a peer's connectivity'''
 
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
-_TMUX_OPTIONAL_ROOT_COMMANDS = {"plugin", "_notify-hook"}
+_TMUX_OPTIONAL_ROOT_COMMANDS = {"plugin"}
 _SEND_GRACE_TIMEOUT = 3.0
 _SEND_GRACE_POLL_INTERVAL = 0.2
 
@@ -604,7 +603,7 @@ def _stderr_is_interactive() -> bool:
 
 # Subcommands that must keep working even when the hive skill is stale —
 # they are the recovery/diagnostic paths the user needs to fix the drift.
-_SKILL_DRIFT_BYPASS_COMMANDS = {"doctor", "plugin", "_notify-hook"}
+_SKILL_DRIFT_BYPASS_COMMANDS = {"doctor", "plugin"}
 
 
 def _fail_if_current_pane_hive_skill_is_stale(invoked: str | None) -> None:
@@ -3400,12 +3399,6 @@ def notify_cmd(message: str):
     target_pane = _resolve_target_pane()
     payload = notify_ui.notify(message, target_pane)
     click.echo(json.dumps(payload))
-
-
-@cli.command("_notify-hook", hidden=True)
-def notify_hook_cmd() -> None:
-    """Handle Droid hook payloads for notify plugin internals."""
-    raise SystemExit(notify_hook.main())
 
 
 @cli.group()

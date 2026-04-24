@@ -5,7 +5,6 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import notify_state
 from . import tmux
 
 
@@ -390,9 +389,6 @@ def _show_pane_attention_now(pane_id: str, *, session_name: str) -> str:
 def notify(
     message: str,
     pane_id: str,
-    *,
-    source: str = notify_state.SOURCE_AGENT_CLI,
-    kind: str = "agent_attention",
 ) -> dict[str, object]:
     window_target = tmux.get_pane_window_target(pane_id) or ""
     window_name = tmux.get_pane_window_name(pane_id) or "target"
@@ -405,18 +401,6 @@ def notify(
         window_target=window_target,
     )
     if suppressed:
-        if source == notify_state.SOURCE_HOOK:
-            return {
-                "agent": agent_name,
-                "paneId": pane_id,
-                "window": window_target,
-                "tab": window_name,
-                "message": message,
-                "clientMode": client_mode,
-                "surface": "suppressed",
-                "suppressed": True,
-                "suppressionReason": "same_window",
-            }
         _show_pane_attention_now(pane_id, session_name=session_name)
         return {
             "agent": agent_name,
@@ -440,7 +424,6 @@ def notify(
             animate_on_arrival=True,
         )
     _ring_terminal_bell(pane_id)
-    notify_state.record_notification(pane_id, source=source, kind=kind, message=message)
     return {
         "agent": agent_name,
         "paneId": pane_id,

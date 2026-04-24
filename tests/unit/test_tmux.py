@@ -154,7 +154,7 @@ def test_client_window_helpers_resolve_most_recent_client(monkeypatch):
             return subprocess.CompletedProcess(
                 ["tmux", *args],
                 0,
-                "10\t/dev/ttys010\n50\t/dev/ttys050\n",
+                "10\t0\t%1\t/dev/ttys010\n50\t0\t%5\t/dev/ttys050\n",
                 "",
             )
         return subprocess.CompletedProcess(["tmux", *args], 0, "dev:5\n", "")
@@ -162,8 +162,27 @@ def test_client_window_helpers_resolve_most_recent_client(monkeypatch):
     monkeypatch.setattr("hive.tmux._run", _fake_run)
 
     assert tmux.get_most_recent_client_tty("dev") == "/dev/ttys050"
+    assert tmux.get_most_recent_terminal_client_pane("dev") == "%5"
     assert tmux.get_client_window_target("/dev/ttys050") == "dev:5"
     assert tmux.get_most_recent_client_window("dev") == "dev:5"
+
+
+def test_client_helpers_ignore_control_mode_clients(monkeypatch):
+    def _fake_run(args, check=False, timeout=5):
+        if args[0] == "list-clients":
+            return subprocess.CompletedProcess(
+                ["tmux", *args],
+                0,
+                "99\t1\t%control\t/dev/ttys999\n20\t0\t%term\t/dev/ttys020\n",
+                "",
+            )
+        return subprocess.CompletedProcess(["tmux", *args], 0, "dev:2\n", "")
+
+    monkeypatch.setattr("hive.tmux._run", _fake_run)
+
+    assert tmux.get_most_recent_client_tty("dev") == "/dev/ttys020"
+    assert tmux.get_most_recent_terminal_client_pane("dev") == "%term"
+    assert tmux.get_most_recent_client_window("dev") == "dev:2"
 
 
 def test_list_tty_processes_and_commands_strip_dev_prefix_and_parse_output(monkeypatch):
