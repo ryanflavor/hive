@@ -1313,12 +1313,10 @@ def test_notify_uses_current_pane_by_default(runner, monkeypatch):
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%72")
     monkeypatch.setattr(
         "hive.cli.notify_ui.notify",
-        lambda message, pane_id, seconds, highlight, window_status: {
+        lambda message, pane_id: {
             "message": message,
             "paneId": pane_id,
-            "seconds": seconds,
-            "highlight": highlight,
-            "windowStatus": window_status,
+            "surface": "fired",
         },
     )
 
@@ -1329,9 +1327,7 @@ def test_notify_uses_current_pane_by_default(runner, monkeypatch):
     assert payload == {
         "message": "按 Tab 和我对话",
         "paneId": "%72",
-        "seconds": 12,
-        "highlight": False,
-        "windowStatus": True,
+        "surface": "fired",
     }
 
 

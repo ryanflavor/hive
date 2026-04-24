@@ -3383,35 +3383,22 @@ def hfork_cmd(args: tuple[str, ...]) -> None:
 
 @cli.command("notify")
 @click.argument("message")
-@click.option("--seconds", default=12, type=int, show_default=True, help="Overlay/highlight duration")
-@click.option("--highlight/--no-highlight", default=False, help="Flash target pane border")
-@click.option("--window-status/--no-window-status", default=True, help="Flash tmux window status")
-def notify_cmd(
-    message: str,
-    seconds: int,
-    highlight: bool,
-    window_status: bool,
-):
+def notify_cmd(message: str):
     """Notify the user for the current pane.
 
-    Pops a desktop notification and (optionally) flashes the tmux window
-    status / pane border. Use this only when you are blocked and need
-    the human back — not for progress updates. Message structure should
-    cover: what happened, why you need them now, what to do on return.
+    Flashes the tmux window status line, renames the tab, and rings the
+    terminal bell so the user can spot the pending pane at a glance. The
+    flash persists until the user focuses the target window (no
+    timeout). Use this only when you are blocked and need the human
+    back — not for progress updates. Message structure should cover:
+    what happened, why you need them now, what to do on return.
 
     \b
     Examples:
       hive notify "press Space to come back and confirm migration"
-      hive notify "blocked on credentials" --highlight --seconds 30
     """
     target_pane = _resolve_target_pane()
-    payload = notify_ui.notify(
-        message,
-        target_pane,
-        seconds=max(1, seconds),
-        highlight=highlight,
-        window_status=window_status,
-    )
+    payload = notify_ui.notify(message, target_pane)
     click.echo(json.dumps(payload))
 
 

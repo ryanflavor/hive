@@ -498,7 +498,10 @@ def set_pane_title(pane_id: str, title: str) -> None:
     ], check=False)
 
 
-_HIVE_PANE_BORDER_FORMAT = " #{?@hive-agent,#{@hive-agent},#{pane_title}} "
+_HIVE_PANE_BORDER_FORMAT = (
+    " #{?@hive-notify-active,#[fg=colour220]#[bold][!] #[default],}"
+    "#{?@hive-agent,#{@hive-agent},#{pane_title}} "
+)
 
 
 def enable_pane_border_status(target: str) -> None:

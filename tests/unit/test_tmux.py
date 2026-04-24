@@ -257,6 +257,8 @@ def test_enable_pane_border_status_uses_hive_member_format(monkeypatch):
     assert calls[1] == (
         "set-window-option", "-t", "dev:1", "pane-border-format", tmux._HIVE_PANE_BORDER_FORMAT
     )
+    assert "#[fg=colour220,bold]" not in tmux._HIVE_PANE_BORDER_FORMAT
+    assert "#[fg=colour220]#[bold][!]" in tmux._HIVE_PANE_BORDER_FORMAT
 
 
 def test_parse_control_mode_output_pane_matches_output_notifications():
