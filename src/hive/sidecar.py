@@ -34,8 +34,9 @@ from .runtime_state import (
 
 ACTIVE_SLEEP = 0.5
 IDLE_NOTIFY_TICK_SECONDS = 1.0
-IDLE_NOTIFY_THRESHOLD_SECONDS = 10.0
-IDLE_NOTIFY_MESSAGE = "Agent has been idle for 10s. Return to the pane to review."
+IDLE_NOTIFY_THRESHOLD_SECONDS = 5.0
+IDLE_NOTIFY_MESSAGE = "Window idle 5s+ (all agents stopped). Return to review."
+IDLE_NOTIFY_MISSING_PRUNE_TICKS = 5
 OBSERVATION_TIMEOUT = 60.0
 POST_EXCEPTION_FOLLOWUP_TIMEOUT = 10.0
 SOCKET_READY_TIMEOUT = 2.0
@@ -99,6 +100,33 @@ def _is_output_busy(pane_id: str, monitor: Any) -> bool:
     if monitor is None:
         return False
     return bool(monitor.is_busy(pane_id, threshold_seconds=BUSY_OUTPUT_THRESHOLD_SECONDS))
+
+
+def _most_recent_output_pane(panes: list[str], monitor: Any) -> str:
+    if monitor is None:
+        return ""
+    candidates: list[tuple[float, str]] = []
+    for pane_id in panes:
+        try:
+            age = monitor.last_output_age(pane_id)
+        except AttributeError:
+            age = None
+        if age is None:
+            continue
+        candidates.append((float(age), pane_id))
+    if not candidates:
+        return ""
+    return min(candidates)[1]
+
+
+def _idle_notify_target_pane(panes: list[str], record: dict[str, Any], busy_monitor: Any) -> str:
+    recorded = str(record.get("last_busy_pane") or "")
+    if recorded in panes:
+        return recorded
+    recent = _most_recent_output_pane(panes, busy_monitor)
+    if recent:
+        return recent
+    return panes[0]
 
 
 def _saw_msg_id(pane_id: str, msg_id: str) -> bool:
@@ -1073,27 +1101,58 @@ def _idle_notify_tick(
         idle_notify.clear()
         return
 
-    active_pane = tmux.get_most_recent_terminal_client_pane(session_name) or ""
-    pane_ids = set(_idle_notify_agent_panes(team_name))
-    for pane_id in list(idle_notify):
-        if pane_id not in pane_ids:
-            idle_notify.pop(pane_id, None)
+    active_window = tmux.get_most_recent_client_window(session_name) or ""
 
-    for pane_id in sorted(pane_ids):
-        record = idle_notify.setdefault(pane_id, {"last_busy_ts": now, "notified": False})
-        if pane_id == active_pane:
-            record["last_busy_ts"] = now
-            record["notified"] = False
+    windows: dict[str, list[str]] = {}
+    for pane_id in _idle_notify_agent_panes(team_name):
+        window_target = tmux.get_pane_window_target(pane_id) or ""
+        if not window_target:
             continue
-        if _is_output_busy(pane_id, busy_monitor):
+        windows.setdefault(window_target, []).append(pane_id)
+
+    for window_target in list(idle_notify):
+        if window_target in windows:
+            idle_notify[window_target]["missing_ticks"] = 0
+            continue
+        record = idle_notify[window_target]
+        record["missing_ticks"] = int(record.get("missing_ticks", 0)) + 1
+        if record["missing_ticks"] >= IDLE_NOTIFY_MISSING_PRUNE_TICKS:
+            idle_notify.pop(window_target, None)
+
+    for window_target in sorted(windows):
+        panes = sorted(windows[window_target])
+        record = idle_notify.setdefault(
+            window_target,
+            {"last_busy_ts": now, "notified": True, "seen_since_fire": True, "missing_ticks": 0},
+        )
+        record["missing_ticks"] = 0
+
+        if window_target == active_window:
             record["last_busy_ts"] = now
-            record["notified"] = False
+            record["notified"] = True
+            record["seen_since_fire"] = True
+            continue
+
+        pending_notify = bool(tmux.get_window_option(window_target, notify_ui.NOTIFY_TOKEN_OPTION.lstrip("@")))
+        if pending_notify:
+            record["notified"] = True
+            record["seen_since_fire"] = False
+            continue
+
+        busy_panes = [p for p in panes if _is_output_busy(p, busy_monitor)]
+        if busy_panes:
+            record["last_busy_ts"] = now
+            record["last_busy_pane"] = _most_recent_output_pane(busy_panes, busy_monitor) or busy_panes[-1]
+            if record.get("seen_since_fire", True):
+                record["notified"] = False
             continue
 
         last_busy_ts = float(record.get("last_busy_ts", now))
         if now - last_busy_ts >= IDLE_NOTIFY_THRESHOLD_SECONDS and not bool(record.get("notified", False)):
-            notify_ui.notify(IDLE_NOTIFY_MESSAGE, pane_id)
+            payload = notify_ui.notify(IDLE_NOTIFY_MESSAGE, _idle_notify_target_pane(panes, record, busy_monitor))
+            suppressed = isinstance(payload, dict) and payload.get("suppressed") is True
             record["notified"] = True
+            record["seen_since_fire"] = suppressed
 
 
 def _thread_payload(workspace: str, pending: dict[str, dict[str, Any]], message_id: str) -> dict[str, Any]:

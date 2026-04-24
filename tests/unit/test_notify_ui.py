@@ -33,7 +33,7 @@ def test_notify_fires_flash_and_bell(monkeypatch):
     assert bell_calls == ["%9"]
 
 
-def test_notify_is_suppressed_when_user_is_already_in_target_window(monkeypatch):
+def test_notify_is_silent_when_target_window_is_focused(monkeypatch):
     _mock_tmux_basics(monkeypatch)
     calls: list[tuple] = []
 
@@ -41,14 +41,15 @@ def test_notify_is_suppressed_when_user_is_already_in_target_window(monkeypatch)
     monkeypatch.setattr("hive.notify_ui.tmux.get_most_recent_client_window", lambda _session: "dev:1")
     monkeypatch.setattr("hive.notify_ui.show_window_flash", lambda *args, **kwargs: calls.append(("flash",)))
     monkeypatch.setattr("hive.notify_ui._ring_terminal_bell", lambda pane: calls.append(("bell",)))
-    monkeypatch.setattr("hive.notify_ui._show_pane_attention_now", lambda pane, session_name: calls.append(("attention", pane, session_name)))
+    monkeypatch.setattr("hive.notify_ui.tmux.set_pane_option", lambda *args, **kwargs: calls.append(("pane-option",)))
+    monkeypatch.setattr("hive.notify_ui.tmux._run", lambda *args, **kwargs: calls.append(("run",)))
 
     payload = notify_ui.notify("回来确认", "%9")
 
-    assert payload["surface"] == "pane_attention"
+    assert payload["surface"] == "suppressed"
     assert payload["suppressed"] is True
-    assert payload["suppressionReason"] == "same_window"
-    assert calls == [("attention", "%9", "dev")]
+    assert payload["suppressionReason"] == "focused_window"
+    assert calls == []
 
 
 def _mock_show_flash_side_effects(monkeypatch, *, existing_original=None):
@@ -97,9 +98,12 @@ def test_show_window_flash_renames_sets_reverse_bold_and_hook(monkeypatch):
     assert token_value.startswith("%9:")
     assert pane_option_calls == [("%9", "hive-notify-active", token_value)]
     assert attention_args == [{"pane_id": "%9", "token": token_value}]
+    hook_name_value = [v for (_, opt, v) in option_calls if opt == "@hive-notify-hook"][0]
+    assert hook_name_value.startswith("after-select-window[")
     assert option_calls == [
         ("dev:1", "@hive-notify-original-name", "dev"),
         ("dev:1", "@hive-notify-token", token_value),
+        ("dev:1", "@hive-notify-hook", hook_name_value),
         ("dev:1", "window-status-style", "reverse,bold"),
         ("dev:1", "window-status-current-style", "reverse,bold"),
     ]
@@ -179,12 +183,36 @@ def test_double_notify_preserves_original_and_does_not_rewrite_original_option(m
 
 def test_cleanup_template_restores_via_runtime_option():
     assert '@hive-notify-original-name' in notify_ui.CLEANUP_SCRIPT_TEMPLATE
+    pane_cleanup_idx = notify_ui.CLEANUP_SCRIPT_TEMPLATE.index(
+        'PANE_CUR="$(tmux show-options -p -v -t "$QP" @hive-notify-active'
+    )
+    token_mismatch_idx = notify_ui.CLEANUP_SCRIPT_TEMPLATE.index('if [ "$CUR" != "$TOKEN" ]')
+    assert pane_cleanup_idx < token_mismatch_idx
     assert 'ORIGINAL="$(tmux show-window-option -v -t "$QT" @hive-notify-original-name' in notify_ui.CLEANUP_SCRIPT_TEMPLATE
     assert 'tmux rename-window -t "$QT" "$ORIGINAL"' in notify_ui.CLEANUP_SCRIPT_TEMPLATE
     assert 'tmux set-window-option -t "$QT" -u @hive-notify-original-name' in notify_ui.CLEANUP_SCRIPT_TEMPLATE
+    assert 'tmux set-window-option -t "$QT" -u @hive-notify-hook' in notify_ui.CLEANUP_SCRIPT_TEMPLATE
     assert '"$ATTENTION" "$CLIENT"' in notify_ui.CLEANUP_SCRIPT_TEMPLATE
     assert '[ -n "$ATTENTION" ] && [ -x "$ATTENTION" ]' in notify_ui.CLEANUP_SCRIPT_TEMPLATE
     assert 'tmux set-option -p -t "$QP" -u @hive-notify-active' in notify_ui.CLEANUP_SCRIPT_TEMPLATE
+
+
+def test_show_window_flash_unsets_stale_hook_before_setting_new_one(monkeypatch):
+    rename_calls, option_calls, _, run_calls, _, _ = _mock_show_flash_side_effects(monkeypatch)
+    monkeypatch.setattr(
+        "hive.notify_ui.tmux.get_window_option",
+        lambda target, key: {
+            "hive-notify-original-name": "dev",
+            "hive-notify-hook": "after-select-window[111]",
+        }.get(key),
+    )
+
+    notify_ui.show_window_flash("m", "%9", "dev:1", "dev", agent_name="orch")
+
+    unset_calls = [args for args in run_calls if args[:2] == ["set-hook", "-ut"]]
+    assert unset_calls == [["set-hook", "-ut", "dev", "after-select-window[111]"]]
+    set_calls = [args for args in run_calls if args[:2] == ["set-hook", "-t"]]
+    assert len(set_calls) == 1
 
 
 def test_pane_attention_popup_covers_target_pane():
@@ -193,3 +221,15 @@ def test_pane_attention_popup_covers_target_pane():
     assert 'x = "#{popup_pane_left}"' in notify_ui._PANE_ATTENTION_PYTHON
     assert 'y = "#{popup_pane_top}"' in notify_ui._PANE_ATTENTION_PYTHON
     assert "TARGET LOCKED:" in notify_ui._PANE_ATTENTION_PYTHON
+
+
+def test_pane_attention_animation_timing_is_fast():
+    assert "SCAN_FRAMES = 14" in notify_ui._PANE_ATTENTION_PYTHON
+    assert "SCAN_DELAY = 0.032" in notify_ui._PANE_ATTENTION_PYTHON
+    assert "PULSE_FRAMES = 4" in notify_ui._PANE_ATTENTION_PYTHON
+    assert "PULSE_DELAY = 0.055" in notify_ui._PANE_ATTENTION_PYTHON
+    script = notify_ui._write_pane_attention_script(pane_id="%9", token="tok")
+    try:
+        assert "sleep 0.18" in script.read_text()
+    finally:
+        script.unlink(missing_ok=True)

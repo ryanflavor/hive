@@ -8,7 +8,7 @@ from pathlib import Path
 from . import tmux
 
 
-def _user_is_already_in_target_window(pane_id: str, *, session_name: str, window_target: str) -> bool:
+def _target_window_is_focused(*, session_name: str, window_target: str) -> bool:
     if not session_name or not window_target:
         return False
     active_window = tmux.get_most_recent_client_window(session_name)
@@ -18,6 +18,8 @@ def _user_is_already_in_target_window(pane_id: str, *, session_name: str, window
 NOTIFY_TOKEN_OPTION = "@hive-notify-token"
 ORIGINAL_NAME_OPTION = "@hive-notify-original-name"
 ORIGINAL_NAME_KEY = "hive-notify-original-name"
+HOOK_NAME_OPTION = "@hive-notify-hook"
+HOOK_NAME_KEY = "hive-notify-hook"
 PANE_NOTIFY_ACTIVE_KEY = "hive-notify-active"
 FLASH_STYLE = "reverse,bold"
 
@@ -41,6 +43,11 @@ fi
 tmux set-hook -ut "$SESSION" "$HOOK_NAME" >/dev/null 2>&1 || true
 
 CUR="$(tmux show-window-option -v -t "$QT" @hive-notify-token 2>/dev/null || echo '')"
+PANE_CUR="$(tmux show-options -p -v -t "$QP" @hive-notify-active 2>/dev/null || echo '')"
+if [ "$PANE_CUR" = "$TOKEN" ]; then
+  tmux set-option -p -t "$QP" -u @hive-notify-active >/dev/null 2>&1 || true
+fi
+
 if [ "$CUR" != "$TOKEN" ]; then
   if [ -n "$ATTENTION" ]; then
     rm -f "$ATTENTION"
@@ -58,14 +65,10 @@ tmux rename-window -t "$QT" "$ORIGINAL" >/dev/null 2>&1 || true
 
 tmux set-window-option -t "$QT" -u @hive-notify-token >/dev/null 2>&1 || true
 tmux set-window-option -t "$QT" -u @hive-notify-original-name >/dev/null 2>&1 || true
+tmux set-window-option -t "$QT" -u @hive-notify-hook >/dev/null 2>&1 || true
 
 if [ -n "$ATTENTION" ] && [ -x "$ATTENTION" ]; then
   "$ATTENTION" "$CLIENT" >/dev/null 2>&1 || true
-fi
-
-PANE_CUR="$(tmux show-options -p -v -t "$QP" @hive-notify-active 2>/dev/null || echo '')"
-if [ "$PANE_CUR" = "$TOKEN" ]; then
-  tmux set-option -p -t "$QP" -u @hive-notify-active >/dev/null 2>&1 || true
 fi
 
 rm -f "$0"
@@ -100,6 +103,12 @@ pane_id = os.environ.get("HIVE_NOTIFY_PANE_ID", "").strip() or "unknown"
 label = f"TARGET LOCKED: {agent.upper()}"
 chars = "01ABCDEF/%#@{}[]"
 cx, cy = cols // 2, rows // 2
+SCAN_FRAMES = 14
+SCAN_DELAY = 0.032
+PULSE_FRAMES = 4
+PULSE_DELAY = 0.055
+FINAL_HOLD = 0.1
+COLLAPSE_DELAY = 0.032
 
 
 def clear() -> None:
@@ -119,9 +128,9 @@ def corner(y: int, x: int, sx: int, sy: int, color: int = 46) -> None:
         at(y + sy * i, x, f"\033[38;5;{color};1m┃\033[0m")
 
 
-for frame in range(18):
+for frame in range(SCAN_FRAMES):
     clear()
-    t = frame / 17
+    t = frame / (SCAN_FRAMES - 1)
     ease = 1 - (1 - t) ** 3
     margin_x = int((cols // 2 - 18) * ease)
     margin_y = int((rows // 2 - 6) * ease)
@@ -138,13 +147,13 @@ for frame in range(18):
             random.randint(max(0, lx), max(0, rx - 12)),
             "\033[38;5;28m" + text + "\033[0m",
         )
-    if frame > 8:
+    if frame >= SCAN_FRAMES // 2:
         scan = "SCAN " + "".join(random.choice(chars) for _ in range(12))
         at(cy, cx - len(scan) // 2, "\033[38;5;82m" + scan + "\033[0m")
     sys.stdout.flush()
-    time.sleep(0.045)
+    time.sleep(SCAN_DELAY)
 
-for pulse in range(6):
+for pulse in range(PULSE_FRAMES):
     clear()
     color = 220 if pulse % 2 == 0 else 46
     box_w = min(cols - 4, max(len(label) + 6, 28))
@@ -170,15 +179,15 @@ for pulse in range(6):
     diagnostic = f"window={window_target} pane={pane_id}"
     at(cy + 4, cx - len(diagnostic) // 2, "\033[38;5;245m" + diagnostic + "\033[0m")
     sys.stdout.flush()
-    time.sleep(0.09)
+    time.sleep(PULSE_DELAY)
 
-time.sleep(0.2)
-for width in [40, 28, 18, 8, 2]:
+time.sleep(FINAL_HOLD)
+for width in [40, 24, 10, 2]:
     clear()
     width = min(width, cols - 4)
     at(cy, cx - width // 2, "\033[38;5;46;1m" + "━" * width + "\033[0m")
     sys.stdout.flush()
-    time.sleep(0.045)
+    time.sleep(COLLAPSE_DELAY)
 
 clear()
 sys.stdout.write("\033[?25h")
@@ -279,7 +288,7 @@ HIVE_NOTIFY_PANE="$QP" HIVE_NOTIFY_CLIENT="$CLIENT" python3 <<'PY'
 {_PANE_ATTENTION_PYTHON}
 PY
 
-sleep 0.35
+sleep 0.18
 ''')
     path = Path(handle.name)
     path.chmod(0o755)
@@ -333,6 +342,13 @@ def show_window_flash(
     agent_name: str = "",
     animate_on_arrival: bool = True,
 ) -> None:
+    parts = window_target.rsplit(":", 1)
+    session = parts[0] if len(parts) == 2 else ""
+
+    stale_hook = tmux.get_window_option(window_target, HOOK_NAME_KEY)
+    if stale_hook and session:
+        tmux._run(["set-hook", "-ut", session, stale_hook], check=False)
+
     original = tmux.get_window_option(window_target, ORIGINAL_NAME_KEY)
     if not original:
         original = window_name
@@ -342,8 +358,6 @@ def show_window_flash(
     flash_name = f"[!] {body}"
     tmux.rename_window(window_target, flash_name)
 
-    parts = window_target.rsplit(":", 1)
-    session = parts[0] if len(parts) == 2 else ""
     hook_idx = int(time.time() * 1000) % 1_000_000_000
     hook_name = f"after-select-window[{hook_idx}]"
     token = f"{pane_id}:{hook_idx}"
@@ -352,6 +366,7 @@ def show_window_flash(
         attention_script = _write_pane_attention_script(pane_id=pane_id, token=token)
 
     tmux.set_window_option(window_target, NOTIFY_TOKEN_OPTION, token)
+    tmux.set_window_option(window_target, HOOK_NAME_OPTION, hook_name)
     if attention_script is not None:
         tmux.set_pane_option(pane_id, PANE_NOTIFY_ACTIVE_KEY, token)
     cleanup_script = _write_notify_cleanup_script(
@@ -374,19 +389,6 @@ def show_window_flash(
     tmux.set_window_option(window_target, "window-status-current-style", FLASH_STYLE)
 
 
-def _show_pane_attention_now(pane_id: str, *, session_name: str) -> str:
-    hook_idx = int(time.time() * 1000) % 1_000_000_000
-    token = f"{pane_id}:same-window:{hook_idx}"
-    client_tty = tmux.get_most_recent_client_tty(session_name) or ""
-    attention_script = _write_pane_attention_script(pane_id=pane_id, token=token)
-    tmux.set_pane_option(pane_id, PANE_NOTIFY_ACTIVE_KEY, token)
-    cmd = shlex.quote(str(attention_script))
-    if client_tty:
-        cmd = f"{cmd} {shlex.quote(client_tty)}"
-    tmux._run(["run-shell", "-b", cmd], check=False)
-    return token
-
-
 def notify(
     message: str,
     pane_id: str,
@@ -396,13 +398,11 @@ def notify(
     agent_name = tmux.get_pane_option(pane_id, "hive-agent") or ""
     session_name = tmux.get_pane_session_name(pane_id) or ""
     client_mode = tmux.get_client_mode(pane_id)
-    suppressed = _user_is_already_in_target_window(
-        pane_id,
+    suppressed = _target_window_is_focused(
         session_name=session_name,
         window_target=window_target,
     )
     if suppressed:
-        _show_pane_attention_now(pane_id, session_name=session_name)
         return {
             "agent": agent_name,
             "paneId": pane_id,
@@ -410,9 +410,9 @@ def notify(
             "tab": window_name,
             "message": message,
             "clientMode": client_mode,
-            "surface": "pane_attention",
+            "surface": "suppressed",
             "suppressed": True,
-            "suppressionReason": "same_window",
+            "suppressionReason": "focused_window",
         }
 
     if window_target:
