@@ -157,7 +157,7 @@ def test_plugin_reenable_preserves_user_skill_that_replaced_old_plugin_symlink(r
     assert (review_skill / "SKILL.md").read_text().startswith("---\nname: review\ndescription: user custom")
 
 
-def test_plugin_enable_notify_materializes_command_without_hooks(runner, configure_hive_home):
+def test_plugin_enable_notify_is_pure_toggle_without_files_or_hooks(runner, configure_hive_home):
     hive_home = configure_hive_home(tmux_inside=False)
     factory_home = hive_home.parent / ".factory"
     codex_home = hive_home.parent / ".codex"
@@ -167,18 +167,13 @@ def test_plugin_enable_notify_materializes_command_without_hooks(runner, configu
 
     assert enabled.exit_code == 0
     assert "Plugin 'notify' enabled." in enabled.output
-    assert "commands: notify" in enabled.output
-    # notify is a pure command plugin; it must not register any Claude/Codex
-    # wrapper anymore. Claude and Codex invoke `hive notify "<msg>"` via
-    # their built-in shell escape.
+    # notify plugin is a pure toggle: the sidecar idle watcher reads its
+    # enabled state. Enable installs no commands, skills, or hooks.
+    assert "commands:" not in enabled.output
     assert "skills:" not in enabled.output
-    assert (factory_home / "commands" / "notify").exists()
+    assert not (factory_home / "commands" / "notify").exists()
     assert not (claude_home / "commands" / "notify.md").exists()
     assert not (codex_home / "skills" / "notify").exists()
-
-    installed_root = hive_home / "plugins" / "installed" / "notify"
-    assert not (installed_root / "bin" / "droid-notify-hook").exists()
-    assert not (installed_root / "hooks" / "hooks.json").exists()
 
     settings_path = factory_home / "settings.json"
     settings = json.loads(settings_path.read_text()) if settings_path.exists() else {}

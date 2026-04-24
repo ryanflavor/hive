@@ -124,6 +124,10 @@ def load_manifest(name: str) -> PluginManifest:
     )
 
 
+def is_plugin_enabled(name: str) -> bool:
+    return name in _load_state().get("plugins", {})
+
+
 def list_plugins() -> list[dict[str, object]]:
     state = _load_state().get("plugins", {})
     rows: list[dict[str, object]] = []

@@ -1066,7 +1066,12 @@ def _idle_notify_tick(
     busy_monitor: Any,
     now: float,
 ) -> None:
+    from . import plugin_manager
     from . import tmux
+
+    if not plugin_manager.is_plugin_enabled("notify"):
+        idle_notify.clear()
+        return
 
     active_pane = tmux.get_most_recent_terminal_client_pane(session_name) or ""
     pane_ids = set(_idle_notify_agent_panes(team_name))

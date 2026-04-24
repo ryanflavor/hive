@@ -9,11 +9,12 @@ class _BusyMonitor:
         return pane_id in self.busy_panes
 
 
-def _setup(monkeypatch, *, panes=None, active_pane=""):
+def _setup(monkeypatch, *, panes=None, active_pane="", plugin_enabled=True):
     calls: list[tuple[str, str]] = []
     monkeypatch.setattr(sidecar, "_idle_notify_agent_panes", lambda _team_name: list(panes or ["%1"]))
     monkeypatch.setattr("hive.tmux.get_most_recent_terminal_client_pane", lambda _session: active_pane)
     monkeypatch.setattr(sidecar.notify_ui, "notify", lambda message, pane_id: calls.append((message, pane_id)))
+    monkeypatch.setattr("hive.plugin_manager.is_plugin_enabled", lambda name: plugin_enabled)
     return calls
 
 
@@ -135,6 +136,22 @@ def test_idle_notify_prunes_removed_panes(monkeypatch):
 
     assert calls == []
     assert sorted(state) == ["%2"]
+
+
+def test_idle_notify_skips_and_clears_state_when_plugin_disabled(monkeypatch):
+    calls = _setup(monkeypatch, plugin_enabled=False)
+    state: dict[str, dict[str, object]] = {"%1": {"last_busy_ts": 80.0, "notified": False}}
+
+    sidecar._idle_notify_tick(
+        team_name="team-a",
+        session_name="dev",
+        idle_notify=state,
+        busy_monitor=_BusyMonitor(),
+        now=200.0,
+    )
+
+    assert calls == []
+    assert state == {}
 
 
 def test_idle_notify_agent_panes_filters_to_live_agent_roles(monkeypatch):

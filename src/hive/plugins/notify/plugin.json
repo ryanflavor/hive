@@ -1,4 +1,4 @@
 {
   "name": "notify",
-  "description": "Install Hive notify command wiring for manual attention prompts."
+  "description": "Toggle the sidecar idle watcher. Manual `hive notify` stays available either way."
 }

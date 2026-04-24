@@ -46,7 +46,7 @@ Commands commonly run by humans:
 
 ```bash
 # Plugins
-hive plugin enable notify         # human notification popup
+hive plugin enable notify         # sidecar idle watcher toggle (manual `hive notify` stays available either way)
 hive plugin enable code-review    # multi-agent code review workflow
 hive plugin list
 
