@@ -326,15 +326,21 @@ def _run_command_actions(
     return [json.loads(line) for line in actions_path.read_text().splitlines() if line.strip()]
 
 
-def _popup_geometry(log_record: dict[str, object]) -> tuple[str, str, str, str]:
+def _popup_geometry(log_record: dict[str, object]) -> tuple[int, int, int, int]:
+    """Return the popup rectangle as (left, top, width, height).
+
+    tmux's numeric `display-popup -y` is the popup *bottom* edge row, not the
+    top. We convert back to the terminal-space top by subtracting height so
+    assertions read like "popup covers pane %2" instead of leaking the tmux
+    contract.
+    """
     args = log_record["args"]
     assert log_record["cmd"] == "display-popup"
-    return (
-        args[args.index("-x") + 1],
-        args[args.index("-y") + 1],
-        args[args.index("-w") + 1],
-        args[args.index("-h") + 1],
-    )
+    x = int(args[args.index("-x") + 1])
+    y_bottom = int(args[args.index("-y") + 1])
+    width = int(args[args.index("-w") + 1])
+    height = int(args[args.index("-h") + 1])
+    return (x, y_bottom - height, width, height)
 
 
 def test_popup_uses_right_half_when_only_one_pane(tmp_path):
@@ -346,7 +352,7 @@ def test_popup_uses_right_half_when_only_one_pane(tmp_path):
         ],
     )
 
-    assert _popup_geometry(record) == ("100", "0", "100", "100")
+    assert _popup_geometry(record) == (100, 0, 100, 100)
 
 
 def test_popup_prefers_all_panes_to_the_right_in_linear_layout(tmp_path):
@@ -361,9 +367,9 @@ def test_popup_prefers_all_panes_to_the_right_in_linear_layout(tmp_path):
     mid_right = _run_command(tmp_path / "mid_right", current_pane="%3", panes=panes)
     rightmost = _run_command(tmp_path / "rightmost", current_pane="%4", panes=panes)
 
-    assert _popup_geometry(leftmost) == ("50", "0", "150", "100")
-    assert _popup_geometry(mid_right) == ("150", "0", "50", "100")
-    assert _popup_geometry(rightmost) == ("0", "0", "150", "100")
+    assert _popup_geometry(leftmost) == (50, 0, 150, 100)
+    assert _popup_geometry(mid_right) == (150, 0, 50, 100)
+    assert _popup_geometry(rightmost) == (0, 0, 150, 100)
 
 
 def test_popup_uses_only_right_column_in_tiled_layout(tmp_path):
@@ -376,7 +382,7 @@ def test_popup_uses_only_right_column_in_tiled_layout(tmp_path):
 
     record = _run_command(tmp_path, current_pane="%1", panes=panes)
 
-    assert _popup_geometry(record) == ("100", "0", "100", "100")
+    assert _popup_geometry(record) == (100, 0, 100, 100)
 
 
 def test_popup_uses_lower_half_in_top_bottom_layout(tmp_path):
@@ -388,8 +394,10 @@ def test_popup_uses_lower_half_in_top_bottom_layout(tmp_path):
     top = _run_command(tmp_path / "top", current_pane="%1", panes=panes)
     bottom = _run_command(tmp_path / "bottom", current_pane="%2", panes=panes)
 
-    assert _popup_geometry(top) == ("0", "50", "200", "50")
-    assert _popup_geometry(bottom) == ("0", "0", "200", "50")
+    # Source in the upper pane → popup lands on the lower pane.
+    assert _popup_geometry(top) == (0, 50, 200, 50)
+    # Source in the lower pane → popup lands on the upper pane.
+    assert _popup_geometry(bottom) == (0, 0, 200, 50)
 
 
 def test_popup_chooses_left_column_when_source_is_middle_right_of_staggered_layout(tmp_path):
@@ -404,7 +412,7 @@ def test_popup_chooses_left_column_when_source_is_middle_right_of_staggered_layo
 
     record = _run_command(tmp_path, current_pane="%x", panes=panes)
 
-    assert _popup_geometry(record) == ("0", "0", "100", "100")
+    assert _popup_geometry(record) == (0, 0, 100, 100)
 
 
 def test_popup_chooses_right_block_in_three_by_three_left_middle_layout(tmp_path):
@@ -422,7 +430,7 @@ def test_popup_chooses_right_block_in_three_by_three_left_middle_layout(tmp_path
 
     record = _run_command(tmp_path, current_pane="%x", panes=panes)
 
-    assert _popup_geometry(record) == ("50", "0", "150", "100")
+    assert _popup_geometry(record) == (50, 0, 150, 100)
 
 
 def test_popup_chooses_right_column_when_source_is_center_of_three_by_three(tmp_path):
@@ -440,7 +448,7 @@ def test_popup_chooses_right_column_when_source_is_center_of_three_by_three(tmp_
 
     record = _run_command(tmp_path, current_pane="%x", panes=panes)
 
-    assert _popup_geometry(record) == ("150", "0", "50", "100")
+    assert _popup_geometry(record) == (150, 0, 50, 100)
 
 
 def test_edited_save_interrupts_before_paste_and_submits(tmp_path):

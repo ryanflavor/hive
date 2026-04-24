@@ -223,6 +223,9 @@ resolve_tmux_target_client() {
   printf '%s\n' "$client_tty"
 }
 
+# Returned y is the popup *bottom* edge row (what tmux's numeric `display-popup -y`
+# wants). tmux internally does `top = y - height`, so "popup top = region_y" means
+# we must return `region_y + height`.
 fit_popup_to_region() {
   local region_x="$1"
   local region_y="$2"
@@ -236,23 +239,23 @@ fit_popup_to_region() {
   case "$align" in
     right)
       x=$(( region_x + region_w - width ))
-      y=$(( region_y + (region_h - height) / 2 ))
+      y=$(( region_y + (region_h + height) / 2 ))
       ;;
     left)
       x="$region_x"
-      y=$(( region_y + (region_h - height) / 2 ))
+      y=$(( region_y + (region_h + height) / 2 ))
       ;;
     bottom)
       x=$(( region_x + (region_w - width) / 2 ))
-      y=$(( region_y + region_h - height ))
+      y=$(( region_y + region_h ))
       ;;
     top)
       x=$(( region_x + (region_w - width) / 2 ))
-      y="$region_y"
+      y=$(( region_y + height ))
       ;;
     *)
       x=$(( region_x + (region_w - width) / 2 ))
-      y=$(( region_y + (region_h - height) / 2 ))
+      y=$(( region_y + (region_h + height) / 2 ))
       ;;
   esac
 
