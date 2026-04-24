@@ -3427,6 +3427,10 @@ def _render_plugin_mutation_result(action: str, payload: dict[str, object]) -> s
         lines.append(f"  commands: {', '.join(command_names)}")
     if skill_names:
         lines.append(f"  skills: {', '.join(skill_names)}")
+    lines.append(
+        "  note: existing Codex panes may not reload plugin settings dynamically; "
+        "restart them if old hooks or commands still run."
+    )
     return "\n".join(lines)
 
 

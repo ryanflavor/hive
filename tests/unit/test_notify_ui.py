@@ -116,6 +116,9 @@ def test_show_window_flash_renames_sets_reverse_bold_and_hook(monkeypatch):
     hook_cmd = run_calls[0]
     assert hook_cmd[0:3] == ["set-hook", "-t", "dev"]
     assert hook_cmd[3].startswith("after-select-window[")
+    assert "set-hook -ut dev " in hook_cmd[4]
+    assert "after-select-window[" in hook_cmd[4]
+    assert hook_cmd[4].index("set-hook -ut dev") < hook_cmd[4].index("run-shell -b")
     assert 'run-shell -b /tmp/hive-notify-cleanup.sh' in hook_cmd[4]
     assert "'#{client_tty}'" in hook_cmd[4]
     assert 'arrival' not in hook_cmd[4]

@@ -365,7 +365,8 @@ def show_window_flash(
     )
     hook_cmd = (
         f"if -F '#{{==:#{{session_name}}:#{{window_index}},{window_target}}}' "
-        f"\"run-shell -b {shlex.quote(str(cleanup_script))} '#{{client_tty}}'\" ''"
+        f"\"set-hook -ut {shlex.quote(session)} {shlex.quote(hook_name)} \\; "
+        f"run-shell -b {shlex.quote(str(cleanup_script))} '#{{client_tty}}'\" ''"
     )
     tmux._run(["set-hook", "-t", session, hook_name, hook_cmd], check=False)
 

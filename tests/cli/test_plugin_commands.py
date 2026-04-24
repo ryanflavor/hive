@@ -180,6 +180,19 @@ def test_plugin_enable_notify_is_pure_toggle_without_files_or_hooks(runner, conf
     assert "hooks" not in settings
 
 
+def test_plugin_enable_disable_outputs_codex_restart_hint(runner, configure_hive_home):
+    configure_hive_home(tmux_inside=False)
+
+    enabled = runner.invoke(cli, ["plugin", "enable", "notify"])
+    disabled = runner.invoke(cli, ["plugin", "disable", "notify"])
+
+    hint = "existing Codex panes may not reload plugin settings dynamically"
+    assert enabled.exit_code == 0
+    assert disabled.exit_code == 0
+    assert hint in enabled.output
+    assert hint in disabled.output
+
+
 @pytest.fixture
 def capture_exec(monkeypatch):
     calls: list[tuple[str, list[str]]] = []
