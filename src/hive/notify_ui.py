@@ -321,6 +321,27 @@ def _write_notify_cleanup_script(
     return path
 
 
+def clear_stale_notify(window_target: str, panes: list[str], *, token: str = "") -> None:
+    """Recover a window from durable notify state after its cleanup hook is gone."""
+    token = token or tmux.get_window_option(window_target, NOTIFY_TOKEN_OPTION.lstrip("@")) or ""
+    original = tmux.get_window_option(window_target, ORIGINAL_NAME_KEY) or ""
+
+    tmux.clear_window_option(window_target, "window-status-style")
+    tmux.clear_window_option(window_target, "window-status-current-style")
+    if original:
+        tmux.rename_window(window_target, original)
+
+    tmux.clear_window_option(window_target, NOTIFY_TOKEN_OPTION)
+    tmux.clear_window_option(window_target, ORIGINAL_NAME_OPTION)
+    tmux.clear_window_option(window_target, HOOK_NAME_OPTION)
+
+    if not token:
+        return
+    for pane_id in panes:
+        if tmux.get_pane_option(pane_id, PANE_NOTIFY_ACTIVE_KEY) == token:
+            tmux.clear_pane_option(pane_id, PANE_NOTIFY_ACTIVE_KEY)
+
+
 def _ring_terminal_bell(pane_id: str) -> None:
     tty_path = tmux.get_pane_tty(pane_id)
     if not tty_path:
@@ -347,7 +368,7 @@ def show_window_flash(
 
     stale_hook = tmux.get_window_option(window_target, HOOK_NAME_KEY)
     if stale_hook and session:
-        tmux._run(["set-hook", "-ut", session, stale_hook], check=False)
+        tmux.unset_session_hook(session, stale_hook)
 
     original = tmux.get_window_option(window_target, ORIGINAL_NAME_KEY)
     if not original:
@@ -378,10 +399,14 @@ def show_window_flash(
         token=token,
         attention_script=attention_script,
     )
+    # IMPORTANT: do not unset the hook in the hook body. The cleanup script unsets
+    # it at start (see CLEANUP_SCRIPT_TEMPLATE), which makes "script actually
+    # started" the point where the retry path is removed. Previously the body
+    # unset the hook before run-shell, so any one-shot run-shell failure left the
+    # window permanently stuck with @hive-notify-* options but no hook to retry.
     hook_cmd = (
         f"if -F '#{{==:#{{session_name}}:#{{window_index}},{window_target}}}' "
-        f"\"set-hook -ut {shlex.quote(session)} {shlex.quote(hook_name)} \\; "
-        f"run-shell -b {shlex.quote(str(cleanup_script))} '#{{client_tty}}'\" ''"
+        f"\"run-shell -b {shlex.quote(str(cleanup_script))} '#{{client_tty}}'\" ''"
     )
     tmux._run(["set-hook", "-t", session, hook_name, hook_cmd], check=False)
 

@@ -315,6 +315,28 @@ def test_window_option_helpers_and_flash(monkeypatch):
     assert calls[2][2].count("sleep 0.5") == 6
 
 
+def test_hook_helpers_parse_indexed_hooks(monkeypatch):
+    calls = []
+
+    def _fake_run(args, check=False, timeout=5):
+        calls.append(tuple(args))
+        return subprocess.CompletedProcess(
+            ["tmux", *args],
+            0,
+            "after-select-window\nafter-select-window[123] display-message ok\nclient-attached[7] run-shell true\n",
+            "",
+        )
+
+    monkeypatch.setattr("hive.tmux._run", _fake_run)
+
+    hooks = tmux.list_session_hook_names("dev")
+
+    assert hooks == {"after-select-window", "after-select-window[123]", "client-attached[7]"}
+    assert tmux.has_hook("dev", "after-select-window[123]", known_hooks=hooks) is True
+    assert tmux.has_hook("dev", "after-select-window[999]", known_hooks=hooks) is False
+    assert calls == [("show-hooks", "-t", "dev")]
+
+
 def test_wait_for_text_success_and_timeout(monkeypatch):
     outputs = iter(["booting", "still booting", "ready for help"])
     monkeypatch.setattr("hive.tmux.capture_pane", lambda _pane, lines=50: next(outputs))

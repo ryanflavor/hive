@@ -78,6 +78,10 @@ def _mock_show_flash_side_effects(monkeypatch, *, existing_original=None):
     monkeypatch.setattr("hive.notify_ui.tmux.set_pane_option", lambda pane, key, value: pane_option_calls.append((pane, key, value)))
     monkeypatch.setattr("hive.notify_ui.tmux._run", lambda args, check=False: run_calls.append(args))
     monkeypatch.setattr(
+        "hive.notify_ui.tmux.unset_session_hook",
+        lambda session, hook_name: run_calls.append(["unset-session-hook", session, hook_name]),
+    )
+    monkeypatch.setattr(
         "hive.notify_ui._write_pane_attention_script",
         lambda **kwargs: attention_args.append(kwargs) or __import__("pathlib").Path("/tmp/hive-pane-attention.sh"),
     )
@@ -120,9 +124,11 @@ def test_show_window_flash_renames_sets_reverse_bold_and_hook(monkeypatch):
     hook_cmd = run_calls[0]
     assert hook_cmd[0:3] == ["set-hook", "-t", "dev"]
     assert hook_cmd[3].startswith("after-select-window[")
-    assert "set-hook -ut dev " in hook_cmd[4]
-    assert "after-select-window[" in hook_cmd[4]
-    assert hook_cmd[4].index("set-hook -ut dev") < hook_cmd[4].index("run-shell -b")
+    # Regression: hook body must NOT unset the hook before cleanup starts.
+    # Otherwise a one-shot run-shell failure leaves the window permanently
+    # stuck — the cleanup script itself unsets the hook at its first step,
+    # so script-actually-started is the right boundary for breaking retry.
+    assert "set-hook -ut" not in hook_cmd[4]
     assert 'run-shell -b /tmp/hive-notify-cleanup.sh' in hook_cmd[4]
     assert "'#{client_tty}'" in hook_cmd[4]
     assert 'arrival' not in hook_cmd[4]
@@ -209,10 +215,49 @@ def test_show_window_flash_unsets_stale_hook_before_setting_new_one(monkeypatch)
 
     notify_ui.show_window_flash("m", "%9", "dev:1", "dev", agent_name="orch")
 
-    unset_calls = [args for args in run_calls if args[:2] == ["set-hook", "-ut"]]
-    assert unset_calls == [["set-hook", "-ut", "dev", "after-select-window[111]"]]
+    unset_calls = [args for args in run_calls if args[:1] == ["unset-session-hook"]]
+    assert unset_calls == [["unset-session-hook", "dev", "after-select-window[111]"]]
     set_calls = [args for args in run_calls if args[:2] == ["set-hook", "-t"]]
     assert len(set_calls) == 1
+
+
+def test_clear_stale_notify_restores_window_options_and_matching_pane(monkeypatch):
+    window_options = {
+        "hive-notify-token": "%9:old-fire",
+        "hive-notify-original-name": "dev",
+        "hive-notify-hook": "after-select-window[111]",
+    }
+    pane_options = {
+        ("%9", "hive-notify-active"): "%9:old-fire",
+        ("%10", "hive-notify-active"): "%10:new-fire",
+    }
+    actions: list[tuple[str, str, str]] = []
+
+    monkeypatch.setattr("hive.notify_ui.tmux.get_window_option", lambda _target, key: window_options.get(key))
+    monkeypatch.setattr(
+        "hive.notify_ui.tmux.clear_window_option",
+        lambda target, option: actions.append(("clear-window", target, option)) or window_options.pop(option.lstrip("@"), None),
+    )
+    monkeypatch.setattr("hive.notify_ui.tmux.rename_window", lambda target, name: actions.append(("rename-window", target, name)))
+    monkeypatch.setattr("hive.notify_ui.tmux.get_pane_option", lambda pane, key: pane_options.get((pane, key)))
+    monkeypatch.setattr(
+        "hive.notify_ui.tmux.clear_pane_option",
+        lambda pane, key: actions.append(("clear-pane", pane, key)) or pane_options.pop((pane, key), None),
+    )
+
+    notify_ui.clear_stale_notify("dev:1", ["%9", "%10"])
+
+    assert actions == [
+        ("clear-window", "dev:1", "window-status-style"),
+        ("clear-window", "dev:1", "window-status-current-style"),
+        ("rename-window", "dev:1", "dev"),
+        ("clear-window", "dev:1", "@hive-notify-token"),
+        ("clear-window", "dev:1", "@hive-notify-original-name"),
+        ("clear-window", "dev:1", "@hive-notify-hook"),
+        ("clear-pane", "%9", "hive-notify-active"),
+    ]
+    assert window_options == {}
+    assert pane_options == {("%10", "hive-notify-active"): "%10:new-fire"}
 
 
 def test_pane_attention_popup_covers_target_pane():

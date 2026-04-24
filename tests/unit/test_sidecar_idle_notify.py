@@ -22,10 +22,14 @@ def _setup(
     plugin_enabled=True,
     notify_payload=None,
     window_options=None,
+    session_hooks=None,
+    stale_cleanups=None,
 ):
     calls: list[tuple[str, str]] = []
     pane_window_map = pane_windows or {}
     window_option_map = window_options or {}
+    session_hooks_map = session_hooks or {}
+    cleanups_sink = stale_cleanups if stale_cleanups is not None else []
     monkeypatch.setattr(sidecar, "_idle_notify_agent_panes", lambda _team_name: list(panes or ["%1"]))
     monkeypatch.setattr("hive.tmux.get_most_recent_client_window", lambda _session: active_window)
     monkeypatch.setattr("hive.tmux.get_pane_window_target", lambda pane_id: pane_window_map.get(pane_id, WINDOW))
@@ -34,9 +38,22 @@ def _setup(
         lambda window_target, key: window_option_map.get((window_target, key)),
     )
     monkeypatch.setattr(
+        "hive.tmux.list_session_hook_names",
+        lambda session: set(session_hooks_map.get(session, ())),
+    )
+    monkeypatch.setattr(
+        "hive.tmux.has_hook",
+        lambda _session, hook_name, known_hooks=None: hook_name in (known_hooks or set()),
+    )
+    monkeypatch.setattr(
         sidecar.notify_ui,
         "notify",
         lambda message, pane_id: calls.append((message, pane_id)) or (notify_payload if notify_payload is not None else {}),
+    )
+    monkeypatch.setattr(
+        sidecar.notify_ui,
+        "clear_stale_notify",
+        lambda window_target, agent_panes, **_kwargs: cleanups_sink.append((window_target, tuple(agent_panes))),
     )
     monkeypatch.setattr("hive.plugin_manager.is_plugin_enabled", lambda name: plugin_enabled)
     return calls
@@ -250,7 +267,11 @@ def test_idle_notify_transient_pane_query_failure_does_not_reset_state(monkeypat
 def test_idle_notify_existing_window_flash_keeps_rebuilt_state_locked(monkeypatch):
     calls = _setup(
         monkeypatch,
-        window_options={(WINDOW, "hive-notify-token"): "%1:old-fire"},
+        window_options={
+            (WINDOW, "hive-notify-token"): "%1:old-fire",
+            (WINDOW, "hive-notify-hook"): "after-select-window[42]",
+        },
+        session_hooks={"team-a": {"after-select-window[42]"}},
     )
     state: dict[str, dict[str, object]] = {}
 
@@ -260,6 +281,50 @@ def test_idle_notify_existing_window_flash_keeps_rebuilt_state_locked(monkeypatc
     assert calls == []
     assert state[WINDOW]["notified"] is True
     assert state[WINDOW]["seen_since_fire"] is False
+
+
+def test_idle_notify_heals_stale_token_without_live_hook(monkeypatch):
+    """Regression: bug recurred because notification state is durable while the
+    cleanup hook is one-shot; if the hook disappears before cleanup runs,
+    sidecar treated stale state as pending forever. Now we detect a missing
+    indexed hook and heal via clear_stale_notify.
+    """
+    stale_cleanups: list[tuple[str, tuple[str, ...]]] = []
+    calls = _setup(
+        monkeypatch,
+        window_options={
+            (WINDOW, "hive-notify-token"): "%1:stale-fire",
+            (WINDOW, "hive-notify-hook"): "after-select-window[42]",
+        },
+        session_hooks={"team-a": set()},  # hook is gone — stale
+        stale_cleanups=stale_cleanups,
+    )
+    state: dict[str, dict[str, object]] = {}
+
+    _tick(state, _BusyMonitor(), now=100.0)
+
+    assert calls == []
+    assert stale_cleanups == [(WINDOW, ("%1",))]
+    assert state[WINDOW]["notified"] is False
+    assert state[WINDOW]["seen_since_fire"] is True
+
+
+def test_idle_notify_heals_stale_when_hook_option_missing(monkeypatch):
+    """Token exists but @hive-notify-hook is empty — also stale."""
+    stale_cleanups: list[tuple[str, tuple[str, ...]]] = []
+    calls = _setup(
+        monkeypatch,
+        window_options={(WINDOW, "hive-notify-token"): "%1:orphan"},
+        session_hooks={"team-a": {"after-select-window[42]"}},
+        stale_cleanups=stale_cleanups,
+    )
+    state: dict[str, dict[str, object]] = {}
+
+    _tick(state, _BusyMonitor(), now=100.0)
+
+    assert calls == []
+    assert stale_cleanups == [(WINDOW, ("%1",))]
+    assert state[WINDOW]["notified"] is False
 
 
 def test_idle_notify_skips_and_clears_state_when_plugin_disabled(monkeypatch):

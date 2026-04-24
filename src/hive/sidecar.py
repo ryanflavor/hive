@@ -1119,6 +1119,8 @@ def _idle_notify_tick(
         if record["missing_ticks"] >= IDLE_NOTIFY_MISSING_PRUNE_TICKS:
             idle_notify.pop(window_target, None)
 
+    session_hooks_cache: dict[str, set[str]] = {}
+
     for window_target in sorted(windows):
         panes = sorted(windows[window_target])
         record = idle_notify.setdefault(
@@ -1133,10 +1135,26 @@ def _idle_notify_tick(
             record["seen_since_fire"] = True
             continue
 
-        pending_notify = bool(tmux.get_window_option(window_target, notify_ui.NOTIFY_TOKEN_OPTION.lstrip("@")))
-        if pending_notify:
-            record["notified"] = True
-            record["seen_since_fire"] = False
+        token = tmux.get_window_option(window_target, notify_ui.NOTIFY_TOKEN_OPTION.lstrip("@"))
+        if token:
+            hook_name = tmux.get_window_option(window_target, notify_ui.HOOK_NAME_KEY) or ""
+            session = window_target.rsplit(":", 1)[0] if ":" in window_target else session_name
+            if session and hook_name:
+                if session not in session_hooks_cache:
+                    session_hooks_cache[session] = tmux.list_session_hook_names(session)
+                hook_alive = tmux.has_hook(session, hook_name, known_hooks=session_hooks_cache[session])
+            else:
+                hook_alive = False
+            if hook_alive:
+                record["notified"] = True
+                record["seen_since_fire"] = False
+                continue
+            # Stale durable state: options claim pending but the hook is gone.
+            # Heal by clearing the window-level notify state so future idle
+            # cycles can re-notify.
+            notify_ui.clear_stale_notify(window_target, panes, token=token)
+            record["notified"] = False
+            record["seen_since_fire"] = True
             continue
 
         busy_panes = [p for p in panes if _is_output_busy(p, busy_monitor)]
