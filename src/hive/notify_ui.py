@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import argparse
+import subprocess
 import shlex
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -20,59 +23,13 @@ ORIGINAL_NAME_OPTION = "@hive-notify-original-name"
 ORIGINAL_NAME_KEY = "hive-notify-original-name"
 HOOK_NAME_OPTION = "@hive-notify-hook"
 HOOK_NAME_KEY = "hive-notify-hook"
+ATTENTION_SCRIPT_OPTION = "@hive-notify-attention"
+ATTENTION_SCRIPT_KEY = "hive-notify-attention"
 PANE_NOTIFY_ACTIVE_KEY = "hive-notify-active"
 FLASH_STYLE = "reverse,bold"
-
-
-CLEANUP_SCRIPT_TEMPLATE = r'''#!/usr/bin/env bash
-set -euo pipefail
-
-QT={qt}
-QP={qp}
-QNAME={qname}
-SESSION={session}
-HOOK_NAME={hook_name}
-TOKEN={token}
-ATTENTION={attention}
-CLIENT="${{1:-}}"
-
-if [[ "$CLIENT" == *"#{{"* ]]; then
-  CLIENT=""
-fi
-
-tmux set-hook -ut "$SESSION" "$HOOK_NAME" >/dev/null 2>&1 || true
-
-CUR="$(tmux show-window-option -v -t "$QT" @hive-notify-token 2>/dev/null || echo '')"
-PANE_CUR="$(tmux show-options -p -v -t "$QP" @hive-notify-active 2>/dev/null || echo '')"
-if [ "$PANE_CUR" = "$TOKEN" ]; then
-  tmux set-option -p -t "$QP" -u @hive-notify-active >/dev/null 2>&1 || true
-fi
-
-if [ "$CUR" != "$TOKEN" ]; then
-  if [ -n "$ATTENTION" ]; then
-    rm -f "$ATTENTION"
-  fi
-  rm -f "$0"
-  exit 0
-fi
-
-tmux set-window-option -t "$QT" -u window-status-style >/dev/null 2>&1 || true
-tmux set-window-option -t "$QT" -u window-status-current-style >/dev/null 2>&1 || true
-
-ORIGINAL="$(tmux show-window-option -v -t "$QT" @hive-notify-original-name 2>/dev/null || echo '')"
-[ -n "$ORIGINAL" ] || ORIGINAL="$QNAME"
-tmux rename-window -t "$QT" "$ORIGINAL" >/dev/null 2>&1 || true
-
-tmux set-window-option -t "$QT" -u @hive-notify-token >/dev/null 2>&1 || true
-tmux set-window-option -t "$QT" -u @hive-notify-original-name >/dev/null 2>&1 || true
-tmux set-window-option -t "$QT" -u @hive-notify-hook >/dev/null 2>&1 || true
-
-if [ -n "$ATTENTION" ] && [ -x "$ATTENTION" ]; then
-  "$ATTENTION" "$CLIENT" >/dev/null 2>&1 || true
-fi
-
-rm -f "$0"
-'''
+# Use one stable high-index hook so each notify refreshes the same fast-path
+# instead of installing per-notify hook/script pairs that can go stale.
+SELECT_HOOK_NAME = "after-select-window[900001]"
 
 
 _PANE_ATTENTION_PYTHON = r'''
@@ -295,36 +252,59 @@ sleep 0.18
     return path
 
 
-def _write_notify_cleanup_script(
-    *,
+def _select_hook_command() -> str:
+    cleanup_cmd = (
+        f"{shlex.quote(sys.executable)} -m hive.notify_ui "
+        "--cleanup-selected '#{session_name}:#{window_index}' "
+        "--client '#{client_tty}'"
+    )
+    # This string is parsed by tmux's hook command parser, then by run-shell.
+    # Keep the attached-client e2e test in sync if this quoting changes.
+    escaped = cleanup_cmd.replace("\\", "\\\\").replace('"', '\\"')
+    run_cmd = f'run-shell -b "{escaped}"'
+    return f"if-shell -F '#{{?@{NOTIFY_TOKEN_OPTION.lstrip('@')},1,0}}' {shlex.quote(run_cmd)}"
+
+
+def ensure_notify_select_hook(session: str) -> None:
+    if not session:
+        return
+    tmux._run(["set-hook", "-t", session, SELECT_HOOK_NAME, _select_hook_command()], check=False)
+
+
+def _remove_attention_script(path: str) -> None:
+    if not path:
+        return
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError:
+        return
+
+
+def _run_attention_script(path: str, client: str) -> None:
+    if not path:
+        return
+    if "#{client_tty}" in client:
+        client = ""
+    try:
+        script = Path(path)
+        if not script.is_file():
+            return
+        subprocess.run([str(script), client], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=5)
+    except Exception:
+        return
+
+
+def clear_stale_notify(
     window_target: str,
-    pane_id: str,
-    window_name: str,
-    session: str,
-    hook_name: str,
-    token: str,
-    attention_script: Path | None,
-) -> Path:
-    handle = tempfile.NamedTemporaryFile("w", suffix=".sh", prefix="hive-notify-", delete=False)
-    with handle:
-        handle.write(CLEANUP_SCRIPT_TEMPLATE.format(
-            qt=shlex.quote(window_target),
-            qp=shlex.quote(pane_id),
-            qname=shlex.quote(window_name),
-            session=shlex.quote(session),
-            hook_name=shlex.quote(hook_name),
-            token=shlex.quote(token),
-            attention=shlex.quote(str(attention_script)) if attention_script is not None else "''",
-        ))
-    path = Path(handle.name)
-    path.chmod(0o755)
-    return path
-
-
-def clear_stale_notify(window_target: str, panes: list[str], *, token: str = "") -> None:
-    """Recover a window from durable notify state after its cleanup hook is gone."""
+    panes: list[str],
+    *,
+    token: str = "",
+    remove_attention: bool = True,
+) -> None:
+    """Recover a window from durable notify state."""
     token = token or tmux.get_window_option(window_target, NOTIFY_TOKEN_OPTION.lstrip("@")) or ""
     original = tmux.get_window_option(window_target, ORIGINAL_NAME_KEY) or ""
+    attention = tmux.get_window_option(window_target, ATTENTION_SCRIPT_KEY) or ""
 
     tmux.clear_window_option(window_target, "window-status-style")
     tmux.clear_window_option(window_target, "window-status-current-style")
@@ -334,12 +314,30 @@ def clear_stale_notify(window_target: str, panes: list[str], *, token: str = "")
     tmux.clear_window_option(window_target, NOTIFY_TOKEN_OPTION)
     tmux.clear_window_option(window_target, ORIGINAL_NAME_OPTION)
     tmux.clear_window_option(window_target, HOOK_NAME_OPTION)
+    tmux.clear_window_option(window_target, ATTENTION_SCRIPT_OPTION)
+    if remove_attention:
+        _remove_attention_script(attention)
 
     if not token:
         return
+    # Known boundary: only panes still in this window are reconciled here;
+    # cross-window break-pane moves are not chased by notify cleanup.
     for pane_id in panes:
         if tmux.get_pane_option(pane_id, PANE_NOTIFY_ACTIVE_KEY) == token:
             tmux.clear_pane_option(pane_id, PANE_NOTIFY_ACTIVE_KEY)
+
+
+def cleanup_selected_window(window_target: str, *, client: str = "") -> bool:
+    if not window_target or "#{" in window_target:
+        return False
+    token = tmux.get_window_option(window_target, NOTIFY_TOKEN_OPTION.lstrip("@")) or ""
+    if not token:
+        return False
+    attention = tmux.get_window_option(window_target, ATTENTION_SCRIPT_KEY) or ""
+    panes = tmux.list_panes(window_target)
+    clear_stale_notify(window_target, panes, token=token, remove_attention=False)
+    _run_attention_script(attention, client)
+    return True
 
 
 def _ring_terminal_bell(pane_id: str) -> None:
@@ -366,9 +364,7 @@ def show_window_flash(
     parts = window_target.rsplit(":", 1)
     session = parts[0] if len(parts) == 2 else ""
 
-    stale_hook = tmux.get_window_option(window_target, HOOK_NAME_KEY)
-    if stale_hook and session:
-        tmux.unset_session_hook(session, stale_hook)
+    ensure_notify_select_hook(session)
 
     original = tmux.get_window_option(window_target, ORIGINAL_NAME_KEY)
     if not original:
@@ -380,35 +376,17 @@ def show_window_flash(
     tmux.rename_window(window_target, flash_name)
 
     hook_idx = int(time.time() * 1000) % 1_000_000_000
-    hook_name = f"after-select-window[{hook_idx}]"
     token = f"{pane_id}:{hook_idx}"
     attention_script = None
     if animate_on_arrival:
         attention_script = _write_pane_attention_script(pane_id=pane_id, token=token)
 
     tmux.set_window_option(window_target, NOTIFY_TOKEN_OPTION, token)
-    tmux.set_window_option(window_target, HOOK_NAME_OPTION, hook_name)
+    tmux.set_window_option(window_target, HOOK_NAME_OPTION, SELECT_HOOK_NAME)
+    if attention_script is not None:
+        tmux.set_window_option(window_target, ATTENTION_SCRIPT_OPTION, str(attention_script))
     if attention_script is not None:
         tmux.set_pane_option(pane_id, PANE_NOTIFY_ACTIVE_KEY, token)
-    cleanup_script = _write_notify_cleanup_script(
-        window_target=window_target,
-        pane_id=pane_id,
-        window_name=original,
-        session=session,
-        hook_name=hook_name,
-        token=token,
-        attention_script=attention_script,
-    )
-    # IMPORTANT: do not unset the hook in the hook body. The cleanup script unsets
-    # it at start (see CLEANUP_SCRIPT_TEMPLATE), which makes "script actually
-    # started" the point where the retry path is removed. Previously the body
-    # unset the hook before run-shell, so any one-shot run-shell failure left the
-    # window permanently stuck with @hive-notify-* options but no hook to retry.
-    hook_cmd = (
-        f"if -F '#{{==:#{{session_name}}:#{{window_index}},{window_target}}}' "
-        f"\"run-shell -b {shlex.quote(str(cleanup_script))} '#{{client_tty}}'\" ''"
-    )
-    tmux._run(["set-hook", "-t", session, hook_name, hook_cmd], check=False)
 
     tmux.set_window_option(window_target, "window-status-style", FLASH_STYLE)
     tmux.set_window_option(window_target, "window-status-current-style", FLASH_STYLE)
@@ -460,3 +438,18 @@ def notify(
         "surface": "fired",
         "suppressed": False,
     }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--cleanup-selected", default="")
+    parser.add_argument("--client", default="")
+    args = parser.parse_args(argv)
+    if args.cleanup_selected:
+        cleanup_selected_window(args.cleanup_selected, client=args.client)
+        return 0
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

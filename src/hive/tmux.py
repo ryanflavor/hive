@@ -535,30 +535,6 @@ def clear_window_option(target: str, option: str) -> None:
     _run(["set-window-option", "-t", target, "-u", option], check=False)
 
 
-def list_session_hook_names(session: str) -> set[str]:
-    if not session:
-        return set()
-    r = _run(["show-hooks", "-t", session], check=False)
-    names: set[str] = set()
-    for line in r.stdout.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        names.add(stripped.split(None, 1)[0])
-    return names
-
-
-def has_hook(session: str, hook_name: str, *, known_hooks: set[str] | None = None) -> bool:
-    if not hook_name:
-        return False
-    hooks = known_hooks if known_hooks is not None else list_session_hook_names(session)
-    return hook_name in hooks
-
-
-def unset_session_hook(session: str, hook_name: str) -> None:
-    _run(["set-hook", "-ut", session, hook_name], check=False)
-
-
 def resize_pane(pane_id: str, width: str | None = None, height: str | None = None) -> None:
     args = ["resize-pane", "-t", pane_id]
     if width:

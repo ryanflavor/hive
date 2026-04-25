@@ -22,13 +22,11 @@ def _setup(
     plugin_enabled=True,
     notify_payload=None,
     window_options=None,
-    session_hooks=None,
     stale_cleanups=None,
 ):
     calls: list[tuple[str, str]] = []
     pane_window_map = pane_windows or {}
     window_option_map = window_options or {}
-    session_hooks_map = session_hooks or {}
     cleanups_sink = stale_cleanups if stale_cleanups is not None else []
     monkeypatch.setattr(sidecar, "_idle_notify_agent_panes", lambda _team_name: list(panes or ["%1"]))
     monkeypatch.setattr("hive.tmux.get_most_recent_client_window", lambda _session: active_window)
@@ -36,14 +34,6 @@ def _setup(
     monkeypatch.setattr(
         "hive.tmux.get_window_option",
         lambda window_target, key: window_option_map.get((window_target, key)),
-    )
-    monkeypatch.setattr(
-        "hive.tmux.list_session_hook_names",
-        lambda session: set(session_hooks_map.get(session, ())),
-    )
-    monkeypatch.setattr(
-        "hive.tmux.has_hook",
-        lambda _session, hook_name, known_hooks=None: hook_name in (known_hooks or set()),
     )
     monkeypatch.setattr(
         sidecar.notify_ui,
@@ -269,9 +259,7 @@ def test_idle_notify_existing_window_flash_keeps_rebuilt_state_locked(monkeypatc
         monkeypatch,
         window_options={
             (WINDOW, "hive-notify-token"): "%1:old-fire",
-            (WINDOW, "hive-notify-hook"): "after-select-window[42]",
         },
-        session_hooks={"team-a": {"after-select-window[42]"}},
     )
     state: dict[str, dict[str, object]] = {}
 
@@ -283,20 +271,14 @@ def test_idle_notify_existing_window_flash_keeps_rebuilt_state_locked(monkeypatc
     assert state[WINDOW]["seen_since_fire"] is False
 
 
-def test_idle_notify_heals_stale_token_without_live_hook(monkeypatch):
-    """Regression: bug recurred because notification state is durable while the
-    cleanup hook is one-shot; if the hook disappears before cleanup runs,
-    sidecar treated stale state as pending forever. Now we detect a missing
-    indexed hook and heal via clear_stale_notify.
-    """
+def test_idle_notify_clears_notify_when_target_window_is_selected(monkeypatch):
     stale_cleanups: list[tuple[str, tuple[str, ...]]] = []
     calls = _setup(
         monkeypatch,
+        active_window=WINDOW,
         window_options={
-            (WINDOW, "hive-notify-token"): "%1:stale-fire",
-            (WINDOW, "hive-notify-hook"): "after-select-window[42]",
+            (WINDOW, "hive-notify-token"): "%1:selected-fire",
         },
-        session_hooks={"team-a": set()},  # hook is gone — stale
         stale_cleanups=stale_cleanups,
     )
     state: dict[str, dict[str, object]] = {}
@@ -305,26 +287,66 @@ def test_idle_notify_heals_stale_token_without_live_hook(monkeypatch):
 
     assert calls == []
     assert stale_cleanups == [(WINDOW, ("%1",))]
-    assert state[WINDOW]["notified"] is False
+    assert state[WINDOW]["notified"] is True
     assert state[WINDOW]["seen_since_fire"] is True
 
 
-def test_idle_notify_heals_stale_when_hook_option_missing(monkeypatch):
-    """Token exists but @hive-notify-hook is empty — also stale."""
+def test_idle_notify_reconciles_selected_notify_even_when_plugin_disabled(monkeypatch):
     stale_cleanups: list[tuple[str, tuple[str, ...]]] = []
     calls = _setup(
         monkeypatch,
-        window_options={(WINDOW, "hive-notify-token"): "%1:orphan"},
-        session_hooks={"team-a": {"after-select-window[42]"}},
+        active_window=WINDOW,
+        plugin_enabled=False,
+        window_options={(WINDOW, "hive-notify-token"): "%1:selected-fire"},
         stale_cleanups=stale_cleanups,
     )
-    state: dict[str, dict[str, object]] = {}
+    state: dict[str, dict[str, object]] = {WINDOW: {"last_busy_ts": 80.0, "notified": False}}
 
     _tick(state, _BusyMonitor(), now=100.0)
 
     assert calls == []
     assert stale_cleanups == [(WINDOW, ("%1",))]
-    assert state[WINDOW]["notified"] is False
+    assert state == {}
+
+
+def test_idle_notify_selected_cleanup_uses_real_notify_reconciler(monkeypatch):
+    token = "%1:selected-fire"
+    window_options = {
+        (WINDOW, "hive-notify-token"): token,
+        (WINDOW, "hive-notify-original-name"): "dev",
+        (WINDOW, "hive-notify-hook"): "after-select-window[900001]",
+        (WINDOW, "hive-notify-attention"): "/tmp/missing-attention.sh",
+    }
+    pane_options = {
+        ("%1", "hive-notify-active"): token,
+        ("%2", "hive-notify-active"): "%2:other-fire",
+    }
+    renamed: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(sidecar, "_idle_notify_agent_panes", lambda _team_name: ["%1", "%2"])
+    monkeypatch.setattr("hive.tmux.get_most_recent_client_window", lambda _session: WINDOW)
+    monkeypatch.setattr("hive.tmux.get_pane_window_target", lambda _pane: WINDOW)
+    monkeypatch.setattr("hive.plugin_manager.is_plugin_enabled", lambda _name: False)
+    monkeypatch.setattr("hive.tmux.get_window_option", lambda target, key: window_options.get((target, key)))
+    monkeypatch.setattr(
+        "hive.tmux.clear_window_option",
+        lambda target, option: window_options.pop((target, option.lstrip("@")), None),
+    )
+    monkeypatch.setattr("hive.tmux.rename_window", lambda target, name: renamed.append((target, name)))
+    monkeypatch.setattr("hive.tmux.get_pane_option", lambda pane, key: pane_options.get((pane, key)))
+    monkeypatch.setattr(
+        "hive.tmux.clear_pane_option",
+        lambda pane, key: pane_options.pop((pane, key), None),
+    )
+
+    state: dict[str, dict[str, object]] = {WINDOW: {"last_busy_ts": 80.0, "notified": False}}
+
+    _tick(state, _BusyMonitor(), now=100.0)
+
+    assert window_options == {}
+    assert pane_options == {("%2", "hive-notify-active"): "%2:other-fire"}
+    assert renamed == [(WINDOW, "dev")]
+    assert state == {}
 
 
 def test_idle_notify_skips_and_clears_state_when_plugin_disabled(monkeypatch):

@@ -57,7 +57,6 @@ def _mock_show_flash_side_effects(monkeypatch, *, existing_original=None):
     option_calls: list[tuple] = []
     pane_option_calls: list[tuple] = []
     run_calls: list[tuple] = []
-    cleanup_args: list[dict] = []
     attention_args: list[dict] = []
 
     state = {"original": existing_original}
@@ -78,22 +77,14 @@ def _mock_show_flash_side_effects(monkeypatch, *, existing_original=None):
     monkeypatch.setattr("hive.notify_ui.tmux.set_pane_option", lambda pane, key, value: pane_option_calls.append((pane, key, value)))
     monkeypatch.setattr("hive.notify_ui.tmux._run", lambda args, check=False: run_calls.append(args))
     monkeypatch.setattr(
-        "hive.notify_ui.tmux.unset_session_hook",
-        lambda session, hook_name: run_calls.append(["unset-session-hook", session, hook_name]),
-    )
-    monkeypatch.setattr(
         "hive.notify_ui._write_pane_attention_script",
         lambda **kwargs: attention_args.append(kwargs) or __import__("pathlib").Path("/tmp/hive-pane-attention.sh"),
     )
-    monkeypatch.setattr(
-        "hive.notify_ui._write_notify_cleanup_script",
-        lambda **kwargs: cleanup_args.append(kwargs) or __import__("pathlib").Path("/tmp/hive-notify-cleanup.sh"),
-    )
-    return rename_calls, option_calls, pane_option_calls, run_calls, cleanup_args, attention_args
+    return rename_calls, option_calls, pane_option_calls, run_calls, attention_args
 
 
 def test_show_window_flash_renames_sets_reverse_bold_and_hook(monkeypatch):
-    rename_calls, option_calls, pane_option_calls, run_calls, cleanup_args, attention_args = _mock_show_flash_side_effects(monkeypatch)
+    rename_calls, option_calls, pane_option_calls, run_calls, attention_args = _mock_show_flash_side_effects(monkeypatch)
 
     notify_ui.show_window_flash("Agent finished", "%9", "dev:1", "dev", agent_name="orch")
 
@@ -103,40 +94,26 @@ def test_show_window_flash_renames_sets_reverse_bold_and_hook(monkeypatch):
     assert pane_option_calls == [("%9", "hive-notify-active", token_value)]
     assert attention_args == [{"pane_id": "%9", "token": token_value}]
     hook_name_value = [v for (_, opt, v) in option_calls if opt == "@hive-notify-hook"][0]
-    assert hook_name_value.startswith("after-select-window[")
+    assert hook_name_value == notify_ui.SELECT_HOOK_NAME
     assert option_calls == [
         ("dev:1", "@hive-notify-original-name", "dev"),
         ("dev:1", "@hive-notify-token", token_value),
         ("dev:1", "@hive-notify-hook", hook_name_value),
+        ("dev:1", "@hive-notify-attention", "/tmp/hive-pane-attention.sh"),
         ("dev:1", "window-status-style", "reverse,bold"),
         ("dev:1", "window-status-current-style", "reverse,bold"),
     ]
-    assert cleanup_args == [{
-        "window_target": "dev:1",
-        "pane_id": "%9",
-        "window_name": "dev",
-        "session": "dev",
-        "hook_name": cleanup_args[0]["hook_name"],
-        "token": token_value,
-        "attention_script": __import__("pathlib").Path("/tmp/hive-pane-attention.sh"),
-    }]
     assert len(run_calls) == 1
     hook_cmd = run_calls[0]
-    assert hook_cmd[0:3] == ["set-hook", "-t", "dev"]
-    assert hook_cmd[3].startswith("after-select-window[")
-    # Regression: hook body must NOT unset the hook before cleanup starts.
-    # Otherwise a one-shot run-shell failure leaves the window permanently
-    # stuck — the cleanup script itself unsets the hook at its first step,
-    # so script-actually-started is the right boundary for breaking retry.
+    assert hook_cmd[0:4] == ["set-hook", "-t", "dev", notify_ui.SELECT_HOOK_NAME]
     assert "set-hook -ut" not in hook_cmd[4]
-    assert 'run-shell -b /tmp/hive-notify-cleanup.sh' in hook_cmd[4]
+    assert "/tmp/hive-notify-" not in hook_cmd[4]
+    assert "-m hive.notify_ui --cleanup-selected" in hook_cmd[4]
     assert "'#{client_tty}'" in hook_cmd[4]
-    assert 'arrival' not in hook_cmd[4]
-    assert "dev:1" in hook_cmd[4]
 
 
 def test_show_window_flash_can_skip_arrival_animation(monkeypatch):
-    rename_calls, option_calls, pane_option_calls, run_calls, cleanup_args, attention_args = _mock_show_flash_side_effects(monkeypatch)
+    rename_calls, option_calls, pane_option_calls, run_calls, attention_args = _mock_show_flash_side_effects(monkeypatch)
 
     notify_ui.show_window_flash(
         "Agent finished",
@@ -152,20 +129,12 @@ def test_show_window_flash_can_skip_arrival_animation(monkeypatch):
     assert token_value.startswith("%9:")
     assert pane_option_calls == []
     assert attention_args == []
-    assert cleanup_args == [{
-        "window_target": "dev:1",
-        "pane_id": "%9",
-        "window_name": "dev",
-        "session": "dev",
-        "hook_name": cleanup_args[0]["hook_name"],
-        "token": token_value,
-        "attention_script": None,
-    }]
+    assert not [item for item in option_calls if item[1] == "@hive-notify-attention"]
     assert len(run_calls) == 1
 
 
 def test_show_window_flash_without_agent_name_uses_bare_flag(monkeypatch):
-    rename_calls, _, _, _, _, _ = _mock_show_flash_side_effects(monkeypatch)
+    rename_calls, _, _, _, _ = _mock_show_flash_side_effects(monkeypatch)
 
     notify_ui.show_window_flash("Agent finished", "%9", "dev:1", "dev")
 
@@ -173,7 +142,7 @@ def test_show_window_flash_without_agent_name_uses_bare_flag(monkeypatch):
 
 
 def test_double_notify_preserves_original_and_does_not_rewrite_original_option(monkeypatch):
-    rename_calls, option_calls, _, _, cleanup_args, _ = _mock_show_flash_side_effects(monkeypatch)
+    rename_calls, option_calls, _, _, _ = _mock_show_flash_side_effects(monkeypatch)
 
     notify_ui.show_window_flash("m1", "%9", "dev:1", "dev", agent_name="orch")
     notify_ui.show_window_flash("m2", "%9", "dev:1", "[!] orch · dev", agent_name="orch")
@@ -184,48 +153,14 @@ def test_double_notify_preserves_original_and_does_not_rewrite_original_option(m
     ]
     original_writes = [v for (_, opt, v) in option_calls if opt == "@hive-notify-original-name"]
     assert original_writes == ["dev"]
-    assert [args["window_name"] for args in cleanup_args] == ["dev", "dev"]
-
-
-def test_cleanup_template_restores_via_runtime_option():
-    assert '@hive-notify-original-name' in notify_ui.CLEANUP_SCRIPT_TEMPLATE
-    pane_cleanup_idx = notify_ui.CLEANUP_SCRIPT_TEMPLATE.index(
-        'PANE_CUR="$(tmux show-options -p -v -t "$QP" @hive-notify-active'
-    )
-    token_mismatch_idx = notify_ui.CLEANUP_SCRIPT_TEMPLATE.index('if [ "$CUR" != "$TOKEN" ]')
-    assert pane_cleanup_idx < token_mismatch_idx
-    assert 'ORIGINAL="$(tmux show-window-option -v -t "$QT" @hive-notify-original-name' in notify_ui.CLEANUP_SCRIPT_TEMPLATE
-    assert 'tmux rename-window -t "$QT" "$ORIGINAL"' in notify_ui.CLEANUP_SCRIPT_TEMPLATE
-    assert 'tmux set-window-option -t "$QT" -u @hive-notify-original-name' in notify_ui.CLEANUP_SCRIPT_TEMPLATE
-    assert 'tmux set-window-option -t "$QT" -u @hive-notify-hook' in notify_ui.CLEANUP_SCRIPT_TEMPLATE
-    assert '"$ATTENTION" "$CLIENT"' in notify_ui.CLEANUP_SCRIPT_TEMPLATE
-    assert '[ -n "$ATTENTION" ] && [ -x "$ATTENTION" ]' in notify_ui.CLEANUP_SCRIPT_TEMPLATE
-    assert 'tmux set-option -p -t "$QP" -u @hive-notify-active' in notify_ui.CLEANUP_SCRIPT_TEMPLATE
-
-
-def test_show_window_flash_unsets_stale_hook_before_setting_new_one(monkeypatch):
-    rename_calls, option_calls, _, run_calls, _, _ = _mock_show_flash_side_effects(monkeypatch)
-    monkeypatch.setattr(
-        "hive.notify_ui.tmux.get_window_option",
-        lambda target, key: {
-            "hive-notify-original-name": "dev",
-            "hive-notify-hook": "after-select-window[111]",
-        }.get(key),
-    )
-
-    notify_ui.show_window_flash("m", "%9", "dev:1", "dev", agent_name="orch")
-
-    unset_calls = [args for args in run_calls if args[:1] == ["unset-session-hook"]]
-    assert unset_calls == [["unset-session-hook", "dev", "after-select-window[111]"]]
-    set_calls = [args for args in run_calls if args[:2] == ["set-hook", "-t"]]
-    assert len(set_calls) == 1
 
 
 def test_clear_stale_notify_restores_window_options_and_matching_pane(monkeypatch):
     window_options = {
         "hive-notify-token": "%9:old-fire",
         "hive-notify-original-name": "dev",
-        "hive-notify-hook": "after-select-window[111]",
+        "hive-notify-hook": notify_ui.SELECT_HOOK_NAME,
+        "hive-notify-attention": "/tmp/missing-attention.sh",
     }
     pane_options = {
         ("%9", "hive-notify-active"): "%9:old-fire",
@@ -254,10 +189,41 @@ def test_clear_stale_notify_restores_window_options_and_matching_pane(monkeypatc
         ("clear-window", "dev:1", "@hive-notify-token"),
         ("clear-window", "dev:1", "@hive-notify-original-name"),
         ("clear-window", "dev:1", "@hive-notify-hook"),
+        ("clear-window", "dev:1", "@hive-notify-attention"),
         ("clear-pane", "%9", "hive-notify-active"),
     ]
     assert window_options == {}
     assert pane_options == {("%10", "hive-notify-active"): "%10:new-fire"}
+
+
+def test_cleanup_selected_window_clears_current_token_and_runs_attention(monkeypatch):
+    window_options = {
+        "hive-notify-token": "%9:old-fire",
+        "hive-notify-original-name": "dev",
+        "hive-notify-attention": "/tmp/hive-pane-attention.sh",
+    }
+    pane_options = {("%9", "hive-notify-active"): "%9:old-fire"}
+    attention_calls: list[tuple[str, str]] = []
+
+    monkeypatch.setattr("hive.notify_ui.tmux.get_window_option", lambda _target, key: window_options.get(key))
+    monkeypatch.setattr(
+        "hive.notify_ui.tmux.clear_window_option",
+        lambda _target, option: window_options.pop(option.lstrip("@"), None),
+    )
+    monkeypatch.setattr("hive.notify_ui.tmux.rename_window", lambda _target, _name: None)
+    monkeypatch.setattr("hive.notify_ui.tmux.list_panes", lambda _target: ["%9"])
+    monkeypatch.setattr("hive.notify_ui.tmux.get_pane_option", lambda pane, key: pane_options.get((pane, key)))
+    monkeypatch.setattr(
+        "hive.notify_ui.tmux.clear_pane_option",
+        lambda pane, key: pane_options.pop((pane, key), None),
+    )
+    monkeypatch.setattr("hive.notify_ui._run_attention_script", lambda path, client: attention_calls.append((path, client)))
+
+    assert notify_ui.cleanup_selected_window("dev:1", client="/dev/ttys050") is True
+
+    assert window_options == {}
+    assert pane_options == {}
+    assert attention_calls == [("/tmp/hive-pane-attention.sh", "/dev/ttys050")]
 
 
 def test_pane_attention_popup_covers_target_pane():
