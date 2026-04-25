@@ -6,6 +6,14 @@ from click.testing import CliRunner
 from hive.tmux import PaneInfo
 
 
+@pytest.fixture(autouse=True)
+def _isolate_notify_debug_global_log(tmp_path, monkeypatch):
+    """Prevent notify_debug.emit from writing to the real ~/.cache/hive log."""
+    from hive import notify_debug
+
+    monkeypatch.setattr(notify_debug, "_GLOBAL_LOG", tmp_path / "notify-debug-isolation.jsonl")
+
+
 @pytest.fixture
 def runner() -> CliRunner:
     return CliRunner()
