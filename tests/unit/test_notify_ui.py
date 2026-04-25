@@ -8,39 +8,22 @@ from hive import notify_debug, notify_ui
 
 
 @pytest.fixture
-def isolated_global_flag(tmp_path, monkeypatch):
-    flag = tmp_path / "notify-debug"
-    log = tmp_path / "notify.jsonl"
-    monkeypatch.setattr(notify_debug, "_GLOBAL_FLAG", flag)
+def isolated_global_log(tmp_path, monkeypatch):
+    log = tmp_path / "global-notify.jsonl"
     monkeypatch.setattr(notify_debug, "_GLOBAL_LOG", log)
-    return flag, log
+    return log
 
 
-def test_notify_debug_off_skips_emit(isolated_global_flag, tmp_path):
-    _flag, log = isolated_global_flag
-    notify_debug.emit("", "test.event", payload="x")
-    notify_debug.emit_for_window("dev:1", "test.event", payload="y")
-    assert not log.exists()
-
-
-def test_notify_debug_global_flag_writes_global_log(isolated_global_flag):
-    flag, log = isolated_global_flag
-    flag.parent.mkdir(parents=True, exist_ok=True)
-    flag.touch()
-    notify_debug.emit("", "test.event", payload="x")
-    lines = log.read_text().splitlines()
-    assert len(lines) == 1
-    record = json.loads(lines[0])
-    assert record["event"] == "test.event"
+def test_emit_falls_back_to_global_log_when_no_workspace(isolated_global_log):
+    notify_debug.emit("", "global.event", payload="x")
+    record = json.loads(isolated_global_log.read_text().splitlines()[0])
+    assert record["event"] == "global.event"
     assert record["payload"] == "x"
     assert record["pid"] == os.getpid()
 
 
-def test_notify_debug_workspace_flag_writes_workspace_log(tmp_path, monkeypatch):
-    monkeypatch.setattr(notify_debug, "_GLOBAL_FLAG", tmp_path / "absent")
+def test_emit_writes_workspace_log_when_workspace_known(tmp_path):
     workspace = tmp_path / "ws"
-    (workspace / "run").mkdir(parents=True)
-    (workspace / "run" / "notify-debug").touch()
     notify_debug.emit(str(workspace), "ws.event", a=1)
     log = workspace / "run" / "notify.jsonl"
     record = json.loads(log.read_text().splitlines()[0])
@@ -48,11 +31,8 @@ def test_notify_debug_workspace_flag_writes_workspace_log(tmp_path, monkeypatch)
     assert record["a"] == 1
 
 
-def test_emit_for_window_uses_passed_workspace_when_global_flag_off(tmp_path, monkeypatch):
-    monkeypatch.setattr(notify_debug, "_GLOBAL_FLAG", tmp_path / "absent-global")
+def test_emit_for_window_uses_passed_workspace(tmp_path, monkeypatch):
     workspace = tmp_path / "ws"
-    (workspace / "run").mkdir(parents=True)
-    (workspace / "run" / "notify-debug").touch()
     tmux_lookups: list[str] = []
     monkeypatch.setattr(
         notify_debug,
@@ -68,10 +48,7 @@ def test_emit_for_window_uses_passed_workspace_when_global_flag_off(tmp_path, mo
 
 
 def test_emit_for_window_resolves_workspace_when_not_passed(tmp_path, monkeypatch):
-    monkeypatch.setattr(notify_debug, "_GLOBAL_FLAG", tmp_path / "absent-global")
     workspace = tmp_path / "ws"
-    (workspace / "run").mkdir(parents=True)
-    (workspace / "run" / "notify-debug").touch()
     monkeypatch.setattr(notify_debug, "workspace_for_window", lambda _wt: str(workspace))
     notify_debug.emit_for_window("dev:1", "ui.event", payload="resolved")
     log = workspace / "run" / "notify.jsonl"
@@ -310,11 +287,8 @@ def test_cleanup_selected_window_clears_current_token_and_runs_attention(monkeyp
     assert attention_calls == [("/tmp/hive-pane-attention.sh", "/dev/ttys050")]
 
 
-def test_notify_with_workspace_flag_alone_writes_ui_events(tmp_path, monkeypatch):
+def test_notify_with_workspace_writes_ui_events(tmp_path, monkeypatch):
     workspace = tmp_path / "ws"
-    (workspace / "run").mkdir(parents=True)
-    (workspace / "run" / "notify-debug").touch()
-    monkeypatch.setattr(notify_debug, "_GLOBAL_FLAG", tmp_path / "absent-global")
 
     _mock_tmux_basics(monkeypatch)
     monkeypatch.setattr("hive.notify_ui.tmux.get_client_mode", lambda _pane: "terminal")

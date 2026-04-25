@@ -1,20 +1,19 @@
 """Notify debug tracing.
 
-A workspace-scoped JSONL log of notify state-machine transitions, covering both
-the sidecar idle watcher and the notify_ui delivery path.
+Always-on JSONL log of notify state-machine transitions, covering both the
+sidecar idle watcher and the notify_ui delivery path. Modeled after cvim's
+debug log: write transition-level events to a known cache path so
+post-incident review has the full chain in one place.
 
-Off by default. Two ways to turn on:
+Logs go to ``<workspace>/run/notify.jsonl`` when the workspace is known
+(sidecar paths, select-hook cleanup with ``@hive-workspace``) and fall back
+to ``~/.cache/hive/notify.jsonl`` (or ``$XDG_CACHE_HOME/hive/...``) when no
+workspace can be resolved.
 
-- ``<workspace>/run/notify-debug`` enables logging for that workspace. Logs go
-  to ``<workspace>/run/notify.jsonl``.
-- ``~/.cache/hive/notify-debug`` (or ``$XDG_CACHE_HOME/hive/notify-debug``)
-  enables logging globally. Logs prefer the workspace path when known and fall
-  back to ``~/.cache/hive/notify.jsonl`` otherwise.
-
-Sidecar callers already know their workspace and pass it explicitly; UI-layer
-helpers either receive a hint via the ``workspace`` kwarg (sidecar-triggered
-fires) or resolve it via ``@hive-workspace`` on the target window
-(select-hook cleanup, manual ``hive notify``).
+Sidecar callers already know their workspace and pass it explicitly via
+``emit_for_window(..., workspace=...)``; UI helpers without the hint resolve
+``@hive-workspace`` on the target window. ``workspace_for_window`` failures
+fall back to the global log silently.
 
 Multiple processes (sidecar loop, select-hook cleanup) write to the same log
 via a single ``os.write`` call on an ``O_APPEND`` fd, which the kernel
@@ -33,34 +32,14 @@ from . import tmux
 
 
 _RUN_DIR = "run"
-_FLAG_NAME = "notify-debug"
 _LOG_NAME = "notify.jsonl"
 
-# Global flag lets callers enable tracing even when no workspace can be
-# resolved; sidecar paths pass workspace explicitly to avoid tmux lookups.
 _GLOBAL_DIR = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "hive"
-_GLOBAL_FLAG = _GLOBAL_DIR / "notify-debug"
 _GLOBAL_LOG = _GLOBAL_DIR / "notify.jsonl"
-
-
-def flag_path(workspace: str) -> Path:
-    return Path(workspace) / _RUN_DIR / _FLAG_NAME
 
 
 def log_path(workspace: str) -> Path:
     return Path(workspace) / _RUN_DIR / _LOG_NAME
-
-
-def globally_enabled() -> bool:
-    return _GLOBAL_FLAG.exists()
-
-
-def enabled(workspace: str) -> bool:
-    if globally_enabled():
-        return True
-    if not workspace:
-        return False
-    return flag_path(workspace).exists()
 
 
 def workspace_for_window(window_target: str) -> str:
@@ -87,8 +66,6 @@ def emit_for_window(
 
 
 def emit(workspace: str, event: str, **fields: Any) -> None:
-    if not enabled(workspace):
-        return
     record: dict[str, Any] = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "pid": os.getpid(),
