@@ -2,8 +2,8 @@
 
 This document records the current runtime design that Hive actually implements.
 It is intentionally narrower than a full architecture spec. The goal is to pin
-down the meanings, sources, and intended uses of the runtime fields and deferred
-root-delivery behavior that already exist in code.
+down the meanings, sources, and intended uses of the runtime fields and
+active-turn fork routing that already exist in code.
 
 ## Scope
 
@@ -13,8 +13,7 @@ This document covers:
 - `inputState`
 - `turnPhase`
 - root-message summary/artifact protocol
-- `deferred` root delivery
-- deferred lifecycle: `unopened` / `opened` / `handled`
+- active-turn fork routing
 
 This document does not define:
 
@@ -67,7 +66,6 @@ Question answered:
 
 What it is good for:
 
-- deciding whether a root send should become `deferred`
 - deciding whether to fork the target or direct-send
 - explaining why Hive treated that target as it did
 
@@ -165,11 +163,8 @@ Hard busy is not currently surfaced as its own public runtime field.
 
 ## Consumer Subsets of `turnPhase`
 
-Two decision sites inside Hive read `turnPhase` directly. Each defines its own
-subset, without a second-layer abstraction:
+One decision site inside Hive reads `turnPhase` directly:
 
-- Safety gate in root send (`sidecar._send_with_gate`):
-  - `turnPhase ∈ {tool_open, input_backlog}` → deferred delivery
 - Fork selector in root send (`cli._maybe_route_busy_root_send`):
   - `turnPhase ∈ {task_closed, turn_closed}` → never fork (turn already closed)
   - `busy=False ∧ turnPhase ∈ {tool_open, user_prompt_pending, tool_result_pending_reply}` → fork (hard unclosed even though pane is idle)
@@ -230,62 +225,31 @@ Current root-body hard failures:
 This rule applies to root sends. Replies are not subject to these summary-body
 limits.
 
-## Deferred Root Delivery
+## Active-Turn Fork Routing
 
-When a root send targets a member whose current `turnPhase` is in the safety
-gate subset (`tool_open`, `input_backlog`), Hive currently:
+When a root send's target is in an active turn — `busy=true`, or
+`turnPhase ∈ {tool_open, user_prompt_pending, tool_result_pending_reply}`
+even when `busy=false` — Hive automatically forks a clone pane (named
+`<target>-c1`, `-c2`, ...) and routes the message there. The clone is
+spawned with a boundary system block; the original target is never
+interrupted.
 
-1. accepts the send
-2. stores the message durably in the bus/artifact layer
-3. returns `state=deferred` to the sender
-4. still injects the normal short Hive message to the receiver pane
+Three bypass exemptions skip the fork and deliver to the original target
+directly:
 
-So `deferred` currently means:
+1. peer relationship (`sender.peer == target`, symmetric)
+2. owner parent → child (`sender == target.@hive-owner`)
+3. child → parent owner (`target == sender.@hive-owner`)
 
-- accepted by Hive
-- marked for delayed review/tracking
-- not rejected
+When a fork happens, the routing return payload carries:
 
-It does not mean:
+- `routingMode=fork_handoff`
+- `routingReason=active_turn_fork`
+- `forkedFromPane`
+- `forkedToPane`
 
-- automatic rerouting
-- automatic fork/spawn
-- a separate message protocol
-
-## Deferred Lifecycle
-
-Deferred roots are tracked with three states:
-
-- `unopened`
-- `opened`
-- `handled`
-
-### `unopened`
-
-The deferred root exists, but Hive has not yet observed the receiver open the
-artifact.
-
-### `opened`
-
-Hive observed the receiver read the deferred artifact through transcript/JCL
-evidence.
-
-Current matching rules:
-
-- Claude: `Read(file_path == artifact_path)`
-- Codex: parsed command classified as `read` with `path == artifact_path`
-- Droid: `Read(file_path == artifact_path)`
-
-This is transcript/JCL-based observation, not a filesystem read detector.
-
-### `handled`
-
-Hive observed an explicit thread action on that deferred root:
-
-- reply with `--reply-to`
-- handoff along that root thread
-
-`handled` is explicit. `opened` is observed.
+`turnPhase ∈ {task_closed, turn_closed}` never forks: the turn is already
+closed, so the message goes straight to the original target.
 
 ## Why There Is Only One Runtime Doc
 
@@ -295,6 +259,6 @@ actually shipped is small enough to keep in one place:
 - output activity
 - interrupt safety
 - root protocol
-- deferred lifecycle
+- active-turn fork routing
 
 Keeping these together reduces drift between overlapping docs.

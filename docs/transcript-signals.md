@@ -19,7 +19,6 @@ Current split:
 
 - `busy` comes from tmux control-mode output activity
 - `turnPhase` come from transcript/JCL
-- deferred `opened` detection also comes from transcript/JCL
 
 So if someone remembers an earlier “JSONL busy” discussion, that was design
 reasoning, not the shipped public field.
@@ -105,17 +104,6 @@ Both map to:
 - assistant text without stronger open/close evidence
   - => `assistant_text_idle`
 
-### Artifact Opened Detection
-
-Hive treats the artifact as opened when Claude transcript shows:
-
-- `assistant`
-- `tool_use`
-- tool name `Read`
-- `input.file_path == artifact_path`
-
-Nothing else counts as opened.
-
 ## Codex JCL / Event JSONL
 
 Hive treats Codex session logs as JCL-like event JSONL and looks at:
@@ -146,17 +134,6 @@ Hive treats Codex session logs as JCL-like event JSONL and looks at:
 - assistant message with text but without stronger evidence
   - => `assistant_text_idle`
 
-### Artifact Opened Detection
-
-Hive treats the artifact as opened when Codex log shows:
-
-- `event_msg`
-- `payload.type = exec_command_end`
-- `payload.parsed_cmd[*].type = read`
-- `payload.parsed_cmd[*].path == artifact_path`
-
-This is stricter than “a shell command happened to mention the file”.
-
 ## Droid Transcript
 
 Hive treats Droid transcript as message-oriented JSONL and looks at:
@@ -182,28 +159,9 @@ Hive treats Droid transcript as message-oriented JSONL and looks at:
 - assistant text without `tool_use`
   - => `assistant_text_idle`
 
-### Artifact Opened Detection
-
-Hive treats the artifact as opened when Droid transcript shows:
-
-- assistant message
-- `tool_use`
-- tool name `Read`
-- `input.file_path == artifact_path`
-
 ## What Does Not Count
 
-The following do not count as opened in current code:
-
-- filesystem access time
-- editor previews
-- shell grep/search mentioning msgId or content
-- directory listing
-- management commands such as move/remove
-- arbitrary shell commands unless they are normalized into the exact supported
-  read structure
-
-The following also do not count as transcript-derived `busy`:
+The following do not count as transcript-derived `busy`:
 
 - any transcript tail heuristic on its own
 - any single “there was output” observation
