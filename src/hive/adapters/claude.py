@@ -300,10 +300,8 @@ def _read_json_file(path: Path) -> dict[str, Any] | None:
 
 
 def _is_claude_process(command: str, argv: str) -> bool:
-    if normalize_command_token(command) == "claude":
-        return True
-    for token in (argv or "").split():
-        if normalize_command_token(token) == "claude":
+    for token in (command, *(argv or "").split()):
+        if normalize_command_token(token) in {"claude", "claude.exe"}:
             return True
     return False
 

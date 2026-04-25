@@ -111,6 +111,31 @@ def test_claude_adapter_reads_pid_mapping_when_claude_runs_under_node(monkeypatc
         assert adapter.resolve_current_session_id("%1070") == "sess-claude-node"
 
 
+def test_claude_adapter_reads_pid_mapping_when_argv_is_claude_exe(monkeypatch):
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        sessions_dir = root / "sessions"
+        sessions_dir.mkdir(parents=True)
+        (sessions_dir / "20473.json").write_text(json.dumps({"sessionId": "sess-claude-exe"}))
+
+        monkeypatch.setenv("CLAUDE_HOME", str(root))
+        monkeypatch.setattr("hive.adapters.claude.tmux.get_pane_tty", lambda _pane: "/dev/ttys001")
+        monkeypatch.setattr("hive.adapters.claude.tmux.display_value", lambda _pane, _fmt: "/repo")
+        monkeypatch.setattr("hive.adapters.claude.tmux.list_tty_processes", lambda _tty: [
+            tmux.TTYProcessInfo(
+                pid="20473",
+                command="/opt/homebrew/li",
+                argv="/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe --resume 2315094b-1bac-4719-9111-2ef29b04d43a",
+            ),
+        ])
+
+        adapter = adapters.get("claude")
+        assert adapter.resolve_current_session_id("%479") == "sess-claude-exe"
+
+
 def test_claude_adapter_prefers_newer_project_transcript_over_stale_pid_mapping(monkeypatch):
     import tempfile
     from pathlib import Path
