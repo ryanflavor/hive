@@ -37,6 +37,7 @@ IDLE_NOTIFY_TICK_SECONDS = 1.0
 IDLE_NOTIFY_THRESHOLD_SECONDS = 5.0
 IDLE_NOTIFY_MESSAGE = "Window idle 5s+ (all agents stopped). Return to review."
 IDLE_NOTIFY_MISSING_PRUNE_TICKS = 5
+NOTIFY_DEBUG_HEARTBEAT_SECONDS = 30.0
 OBSERVATION_TIMEOUT = 60.0
 POST_EXCEPTION_FOLLOWUP_TIMEOUT = 10.0
 SOCKET_READY_TIMEOUT = 2.0
@@ -1093,9 +1094,17 @@ def _idle_notify_tick(
     idle_notify: dict[str, dict[str, Any]],
     busy_monitor: Any,
     now: float,
+    workspace: str = "",
+    debug_state: dict[str, Any] | None = None,
 ) -> None:
+    from . import notify_debug
     from . import plugin_manager
     from . import tmux
+
+    if debug_state is None:
+        debug_state = {}
+    debug_state["tick_seq"] = int(debug_state.get("tick_seq", 0)) + 1
+    per_window = debug_state.setdefault("windows", {})
 
     active_window = tmux.get_most_recent_client_window(session_name) or ""
 
@@ -1106,12 +1115,56 @@ def _idle_notify_tick(
             continue
         windows.setdefault(window_target, []).append(pane_id)
 
+    prev_active = debug_state.get("active_window", "__init__")
+    if prev_active != active_window:
+        notify_debug.emit(
+            workspace,
+            "active.changed",
+            team=team_name,
+            old=prev_active if prev_active != "__init__" else None,
+            new=active_window or None,
+        )
+        debug_state["active_window"] = active_window
+
+    prev_keys = debug_state.get("windows_keys", "__init__")
+    new_keys = sorted(windows)
+    if prev_keys != new_keys:
+        notify_debug.emit(
+            workspace,
+            "windows.changed",
+            team=team_name,
+            old=list(prev_keys) if prev_keys != "__init__" else None,
+            new=new_keys,
+        )
+        debug_state["windows_keys"] = new_keys
+
     if active_window in windows:
         token = tmux.get_window_option(active_window, notify_ui.NOTIFY_TOKEN_OPTION.lstrip("@"))
         if token:
-            notify_ui.clear_stale_notify(active_window, sorted(windows[active_window]), token=token)
+            notify_debug.emit(
+                workspace,
+                "active.clear_attempt",
+                team=team_name,
+                window=active_window,
+                token=token,
+                panes=sorted(windows[active_window]),
+            )
+            notify_ui.clear_stale_notify(
+                active_window,
+                sorted(windows[active_window]),
+                token=token,
+                source="sidecar.active_window",
+                workspace=workspace,
+            )
 
     if not plugin_manager.is_plugin_enabled("notify"):
+        if idle_notify:
+            notify_debug.emit(
+                workspace,
+                "plugin.disabled",
+                team=team_name,
+                records_cleared=len(idle_notify),
+            )
         idle_notify.clear()
         return
 
@@ -1122,42 +1175,190 @@ def _idle_notify_tick(
         record = idle_notify[window_target]
         record["missing_ticks"] = int(record.get("missing_ticks", 0)) + 1
         if record["missing_ticks"] >= IDLE_NOTIFY_MISSING_PRUNE_TICKS:
+            notify_debug.emit(
+                workspace,
+                "record.prune",
+                team=team_name,
+                window=window_target,
+                missing_ticks=record["missing_ticks"],
+                last_state={
+                    "notified": record.get("notified"),
+                    "seen_since_fire": record.get("seen_since_fire"),
+                    "last_busy_ts": record.get("last_busy_ts"),
+                },
+            )
             idle_notify.pop(window_target, None)
+            per_window.pop(window_target, None)
 
     for window_target in sorted(windows):
         panes = sorted(windows[window_target])
+        record_existed = window_target in idle_notify
         record = idle_notify.setdefault(
             window_target,
             {"last_busy_ts": now, "notified": True, "seen_since_fire": True, "missing_ticks": 0},
         )
+        win_dbg = per_window.setdefault(window_target, {"busy_observed": False, "observed_token": None})
+        if not record_existed:
+            notify_debug.emit(
+                workspace,
+                "record.create",
+                team=team_name,
+                window=window_target,
+                panes=panes,
+                initial={
+                    "last_busy_ts": record["last_busy_ts"],
+                    "notified": record["notified"],
+                    "seen_since_fire": record["seen_since_fire"],
+                },
+            )
         record["missing_ticks"] = 0
 
         if window_target == active_window:
+            state_before = {
+                "notified": record.get("notified"),
+                "seen_since_fire": record.get("seen_since_fire"),
+                "last_busy_ts": record.get("last_busy_ts"),
+            }
             record["last_busy_ts"] = now
             record["notified"] = True
             record["seen_since_fire"] = True
+            if (
+                state_before["seen_since_fire"] is not True
+                or state_before["notified"] is not True
+            ):
+                notify_debug.emit(
+                    workspace,
+                    "active.block",
+                    team=team_name,
+                    window=window_target,
+                    state_before=state_before,
+                )
             continue
 
         token = tmux.get_window_option(window_target, notify_ui.NOTIFY_TOKEN_OPTION.lstrip("@"))
         if token:
+            prev_token = win_dbg.get("observed_token")
+            if prev_token != token:
+                notify_debug.emit(
+                    workspace,
+                    "token.present",
+                    team=team_name,
+                    window=window_target,
+                    token=token,
+                    state_before={
+                        "notified": record.get("notified"),
+                        "seen_since_fire": record.get("seen_since_fire"),
+                    },
+                )
+                win_dbg["observed_token"] = token
             record["notified"] = True
             record["seen_since_fire"] = False
             continue
 
+        if win_dbg.get("observed_token"):
+            notify_debug.emit(
+                workspace,
+                "token.cleared_externally",
+                team=team_name,
+                window=window_target,
+                prev_token=win_dbg["observed_token"],
+                state_before={
+                    "notified": record.get("notified"),
+                    "seen_since_fire": record.get("seen_since_fire"),
+                    "last_busy_ts": record.get("last_busy_ts"),
+                },
+            )
+            win_dbg["observed_token"] = None
+
         busy_panes = [p for p in panes if _is_output_busy(p, busy_monitor)]
+        prev_busy = bool(win_dbg.get("busy_observed", False))
+        is_busy = bool(busy_panes)
         if busy_panes:
             record["last_busy_ts"] = now
             record["last_busy_pane"] = _most_recent_output_pane(busy_panes, busy_monitor) or busy_panes[-1]
-            if record.get("seen_since_fire", True):
+            if prev_busy != is_busy:
+                notify_debug.emit(
+                    workspace,
+                    "busy.transition",
+                    team=team_name,
+                    window=window_target,
+                    busy=True,
+                    busy_panes=busy_panes,
+                    last_busy_pane=record.get("last_busy_pane"),
+                )
+            seen_since_fire = record.get("seen_since_fire", True)
+            if seen_since_fire:
+                if record.get("notified") is True:
+                    notify_debug.emit(
+                        workspace,
+                        "busy.rearm",
+                        team=team_name,
+                        window=window_target,
+                        seen_since_fire=True,
+                    )
                 record["notified"] = False
+            win_dbg["busy_observed"] = True
             continue
+
+        if prev_busy != is_busy:
+            notify_debug.emit(
+                workspace,
+                "busy.transition",
+                team=team_name,
+                window=window_target,
+                busy=False,
+                last_busy_ts=record.get("last_busy_ts"),
+            )
+        win_dbg["busy_observed"] = False
 
         last_busy_ts = float(record.get("last_busy_ts", now))
         if now - last_busy_ts >= IDLE_NOTIFY_THRESHOLD_SECONDS and not bool(record.get("notified", False)):
-            payload = notify_ui.notify(IDLE_NOTIFY_MESSAGE, _idle_notify_target_pane(panes, record, busy_monitor))
+            target_pane = _idle_notify_target_pane(panes, record, busy_monitor)
+            notify_debug.emit(
+                workspace,
+                "fire.attempt",
+                team=team_name,
+                window=window_target,
+                target_pane=target_pane,
+                idle_seconds=now - last_busy_ts,
+                state_before={
+                    "notified": record.get("notified"),
+                    "seen_since_fire": record.get("seen_since_fire"),
+                },
+            )
+            payload = notify_ui.notify(IDLE_NOTIFY_MESSAGE, target_pane, workspace=workspace)
             suppressed = isinstance(payload, dict) and payload.get("suppressed") is True
             record["notified"] = True
             record["seen_since_fire"] = suppressed
+            new_token = tmux.get_window_option(window_target, notify_ui.NOTIFY_TOKEN_OPTION.lstrip("@")) or ""
+            win_dbg["observed_token"] = new_token or None
+            notify_debug.emit(
+                workspace,
+                "fire.result",
+                team=team_name,
+                window=window_target,
+                target_pane=target_pane,
+                surface=(payload.get("surface") if isinstance(payload, dict) else None),
+                suppressed=suppressed,
+                token_after=new_token or None,
+                state_after={
+                    "notified": record["notified"],
+                    "seen_since_fire": record["seen_since_fire"],
+                },
+            )
+
+    last_heartbeat = float(debug_state.get("last_heartbeat", 0.0))
+    if now - last_heartbeat >= NOTIFY_DEBUG_HEARTBEAT_SECONDS:
+        notify_debug.emit(
+            workspace,
+            "tick.summary",
+            team=team_name,
+            tick_seq=debug_state["tick_seq"],
+            active_window=active_window or None,
+            windows=new_keys,
+            records=len(idle_notify),
+        )
+        debug_state["last_heartbeat"] = now
 
 
 def _thread_payload(workspace: str, pending: dict[str, dict[str, Any]], message_id: str) -> dict[str, Any]:
@@ -1501,10 +1702,21 @@ def _serve_requests(
 def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: str) -> None:
     from . import tmux
 
+    from . import notify_debug
+
     sidecar_started_at = _now_iso()
     pending: dict[str, dict[str, Any]] = {}
     idle_notify: dict[str, dict[str, Any]] = {}
+    notify_debug_state: dict[str, Any] = {}
     last_window_check = 0.0
+    notify_debug.emit(
+        workspace,
+        "sidecar.start",
+        team=team,
+        tmux_window=tmux_window,
+        tmux_window_id=tmux_window_id,
+        startedAt=sidecar_started_at,
+    )
     server = _open_server_socket(workspace)
     session_target = (tmux_window.split(":", 1)[0] if ":" in tmux_window else tmux_window).strip()
     busy_monitor = tmux.ControlModeOutputMonitor(session_target) if session_target else None
@@ -1541,6 +1753,8 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                 idle_notify=idle_notify,
                 busy_monitor=busy_monitor,
                 now=time.monotonic(),
+                workspace=workspace,
+                debug_state=notify_debug_state,
             )
 
             for message_id, record in list(pending.items()):

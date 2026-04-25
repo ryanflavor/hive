@@ -38,7 +38,7 @@ def _setup(
     monkeypatch.setattr(
         sidecar.notify_ui,
         "notify",
-        lambda message, pane_id: calls.append((message, pane_id)) or (notify_payload if notify_payload is not None else {}),
+        lambda message, pane_id, **_kwargs: calls.append((message, pane_id)) or (notify_payload if notify_payload is not None else {}),
     )
     monkeypatch.setattr(
         sidecar.notify_ui,
@@ -231,7 +231,7 @@ def test_idle_notify_transient_pane_query_failure_does_not_reset_state(monkeypat
     monkeypatch.setattr(
         sidecar.notify_ui,
         "notify",
-        lambda message, pane_id: calls.append((message, pane_id)) or {},
+        lambda message, pane_id, **_kwargs: calls.append((message, pane_id)) or {},
     )
     monkeypatch.setattr("hive.plugin_manager.is_plugin_enabled", lambda _n: True)
 

@@ -1,4 +1,83 @@
-from hive import notify_ui
+import json
+import os
+from pathlib import Path
+
+import pytest
+
+from hive import notify_debug, notify_ui
+
+
+@pytest.fixture
+def isolated_global_flag(tmp_path, monkeypatch):
+    flag = tmp_path / "notify-debug"
+    log = tmp_path / "notify.jsonl"
+    monkeypatch.setattr(notify_debug, "_GLOBAL_FLAG", flag)
+    monkeypatch.setattr(notify_debug, "_GLOBAL_LOG", log)
+    return flag, log
+
+
+def test_notify_debug_off_skips_emit(isolated_global_flag, tmp_path):
+    _flag, log = isolated_global_flag
+    notify_debug.emit("", "test.event", payload="x")
+    notify_debug.emit_for_window("dev:1", "test.event", payload="y")
+    assert not log.exists()
+
+
+def test_notify_debug_global_flag_writes_global_log(isolated_global_flag):
+    flag, log = isolated_global_flag
+    flag.parent.mkdir(parents=True, exist_ok=True)
+    flag.touch()
+    notify_debug.emit("", "test.event", payload="x")
+    lines = log.read_text().splitlines()
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["event"] == "test.event"
+    assert record["payload"] == "x"
+    assert record["pid"] == os.getpid()
+
+
+def test_notify_debug_workspace_flag_writes_workspace_log(tmp_path, monkeypatch):
+    monkeypatch.setattr(notify_debug, "_GLOBAL_FLAG", tmp_path / "absent")
+    workspace = tmp_path / "ws"
+    (workspace / "run").mkdir(parents=True)
+    (workspace / "run" / "notify-debug").touch()
+    notify_debug.emit(str(workspace), "ws.event", a=1)
+    log = workspace / "run" / "notify.jsonl"
+    record = json.loads(log.read_text().splitlines()[0])
+    assert record["event"] == "ws.event"
+    assert record["a"] == 1
+
+
+def test_emit_for_window_uses_passed_workspace_when_global_flag_off(tmp_path, monkeypatch):
+    monkeypatch.setattr(notify_debug, "_GLOBAL_FLAG", tmp_path / "absent-global")
+    workspace = tmp_path / "ws"
+    (workspace / "run").mkdir(parents=True)
+    (workspace / "run" / "notify-debug").touch()
+    tmux_lookups: list[str] = []
+    monkeypatch.setattr(
+        notify_debug,
+        "workspace_for_window",
+        lambda window_target: tmux_lookups.append(window_target) or "",
+    )
+    notify_debug.emit_for_window("dev:1", "ui.event", workspace=str(workspace), payload="x")
+    log = workspace / "run" / "notify.jsonl"
+    record = json.loads(log.read_text().splitlines()[0])
+    assert record["event"] == "ui.event"
+    assert record["payload"] == "x"
+    assert tmux_lookups == []  # passed workspace skips lookup
+
+
+def test_emit_for_window_resolves_workspace_when_not_passed(tmp_path, monkeypatch):
+    monkeypatch.setattr(notify_debug, "_GLOBAL_FLAG", tmp_path / "absent-global")
+    workspace = tmp_path / "ws"
+    (workspace / "run").mkdir(parents=True)
+    (workspace / "run" / "notify-debug").touch()
+    monkeypatch.setattr(notify_debug, "workspace_for_window", lambda _wt: str(workspace))
+    notify_debug.emit_for_window("dev:1", "ui.event", payload="resolved")
+    log = workspace / "run" / "notify.jsonl"
+    record = json.loads(log.read_text().splitlines()[0])
+    assert record["event"] == "ui.event"
+    assert record["payload"] == "resolved"
 
 
 def _mock_tmux_basics(monkeypatch):
@@ -19,11 +98,11 @@ def test_notify_fires_flash_and_bell(monkeypatch):
     monkeypatch.setattr("hive.notify_ui.tmux.get_client_mode", lambda _pane: "terminal")
     monkeypatch.setattr(
         "hive.notify_ui.show_window_flash",
-        lambda msg, pane, wt, wn, agent_name="", animate_on_arrival=True: flash_calls.append(
+        lambda msg, pane, wt, wn, agent_name="", animate_on_arrival=True, **_kwargs: flash_calls.append(
             (msg, pane, wt, wn, agent_name, animate_on_arrival)
         ),
     )
-    monkeypatch.setattr("hive.notify_ui._ring_terminal_bell", lambda pane: bell_calls.append(pane))
+    monkeypatch.setattr("hive.notify_ui._ring_terminal_bell", lambda pane, **_kwargs: bell_calls.append(pane))
 
     payload = notify_ui.notify("回来确认", "%9")
 
@@ -40,9 +119,11 @@ def test_notify_is_silent_when_target_window_is_focused(monkeypatch):
     monkeypatch.setattr("hive.notify_ui.tmux.get_client_mode", lambda _pane: "terminal")
     monkeypatch.setattr("hive.notify_ui.tmux.get_most_recent_client_window", lambda _session: "dev:1")
     monkeypatch.setattr("hive.notify_ui.show_window_flash", lambda *args, **kwargs: calls.append(("flash",)))
-    monkeypatch.setattr("hive.notify_ui._ring_terminal_bell", lambda pane: calls.append(("bell",)))
+    monkeypatch.setattr("hive.notify_ui._ring_terminal_bell", lambda pane, **_kwargs: calls.append(("bell",)))
     monkeypatch.setattr("hive.notify_ui.tmux.set_pane_option", lambda *args, **kwargs: calls.append(("pane-option",)))
-    monkeypatch.setattr("hive.notify_ui.tmux._run", lambda *args, **kwargs: calls.append(("run",)))
+    # debug logging may resolve workspace via tmux on its own; neutralize to keep
+    # this test focused on production side effects.
+    monkeypatch.setattr("hive.notify_ui.notify_debug.emit_for_window", lambda *args, **kwargs: None)
 
     payload = notify_ui.notify("回来确认", "%9")
 
@@ -217,13 +298,35 @@ def test_cleanup_selected_window_clears_current_token_and_runs_attention(monkeyp
         "hive.notify_ui.tmux.clear_pane_option",
         lambda pane, key: pane_options.pop((pane, key), None),
     )
-    monkeypatch.setattr("hive.notify_ui._run_attention_script", lambda path, client: attention_calls.append((path, client)))
+    monkeypatch.setattr(
+        "hive.notify_ui._run_attention_script",
+        lambda path, client, **_kwargs: attention_calls.append((path, client)),
+    )
 
     assert notify_ui.cleanup_selected_window("dev:1", client="/dev/ttys050") is True
 
     assert window_options == {}
     assert pane_options == {}
     assert attention_calls == [("/tmp/hive-pane-attention.sh", "/dev/ttys050")]
+
+
+def test_notify_with_workspace_flag_alone_writes_ui_events(tmp_path, monkeypatch):
+    workspace = tmp_path / "ws"
+    (workspace / "run").mkdir(parents=True)
+    (workspace / "run" / "notify-debug").touch()
+    monkeypatch.setattr(notify_debug, "_GLOBAL_FLAG", tmp_path / "absent-global")
+
+    _mock_tmux_basics(monkeypatch)
+    monkeypatch.setattr("hive.notify_ui.tmux.get_client_mode", lambda _pane: "terminal")
+    monkeypatch.setattr("hive.notify_ui.tmux.get_most_recent_client_window", lambda _session: "dev:9")
+    monkeypatch.setattr("hive.notify_ui.show_window_flash", lambda *args, **kwargs: None)
+    monkeypatch.setattr("hive.notify_ui._ring_terminal_bell", lambda *args, **kwargs: None)
+
+    notify_ui.notify("回来确认", "%9", workspace=str(workspace))
+
+    log = workspace / "run" / "notify.jsonl"
+    events = [json.loads(line)["event"] for line in log.read_text().splitlines()]
+    assert "notify.call" in events
 
 
 def test_pane_attention_popup_covers_target_pane():

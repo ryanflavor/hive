@@ -8,6 +8,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from . import notify_debug
 from . import tmux
 
 
@@ -280,18 +281,43 @@ def _remove_attention_script(path: str) -> None:
         return
 
 
-def _run_attention_script(path: str, client: str) -> None:
+def _run_attention_script(path: str, client: str, *, window_target: str = "") -> None:
     if not path:
+        notify_debug.emit_for_window(window_target, "attention.run", script_present=False, window=window_target or None)
         return
     if "#{client_tty}" in client:
         client = ""
     try:
         script = Path(path)
         if not script.is_file():
+            notify_debug.emit_for_window(
+                window_target,
+                "attention.run",
+                script_present=False,
+                window=window_target or None,
+                path=str(path),
+                error="missing_file",
+            )
             return
-        subprocess.run([str(script), client], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=5)
-    except Exception:
-        return
+        result = subprocess.run(
+            [str(script), client],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=5,
+        )
+        notify_debug.emit_for_window(
+            window_target,
+            "attention.run",
+            script_present=True,
+            window=window_target or None,
+            client_present=bool(client),
+            returncode=result.returncode,
+        )
+    except subprocess.TimeoutExpired:
+        notify_debug.emit_for_window(window_target, "attention.run", window=window_target or None, error="timeout")
+    except Exception as exc:
+        notify_debug.emit_for_window(window_target, "attention.run", window=window_target or None, error=type(exc).__name__)
 
 
 def clear_stale_notify(
@@ -300,11 +326,24 @@ def clear_stale_notify(
     *,
     token: str = "",
     remove_attention: bool = True,
+    source: str = "unknown",
+    workspace: str = "",
 ) -> None:
     """Recover a window from durable notify state."""
     token = token or tmux.get_window_option(window_target, NOTIFY_TOKEN_OPTION.lstrip("@")) or ""
     original = tmux.get_window_option(window_target, ORIGINAL_NAME_KEY) or ""
     attention = tmux.get_window_option(window_target, ATTENTION_SCRIPT_KEY) or ""
+
+    notify_debug.emit_for_window(
+        window_target,
+        "clear.start",
+        workspace=workspace,
+        source=source,
+        window=window_target,
+        token=token or None,
+        panes_count=len(panes),
+        remove_attention=remove_attention,
+    )
 
     tmux.clear_window_option(window_target, "window-status-style")
     tmux.clear_window_option(window_target, "window-status-current-style")
@@ -318,38 +357,71 @@ def clear_stale_notify(
     if remove_attention:
         _remove_attention_script(attention)
 
-    if not token:
-        return
-    # Known boundary: only panes still in this window are reconciled here;
-    # cross-window break-pane moves are not chased by notify cleanup.
-    for pane_id in panes:
-        if tmux.get_pane_option(pane_id, PANE_NOTIFY_ACTIVE_KEY) == token:
-            tmux.clear_pane_option(pane_id, PANE_NOTIFY_ACTIVE_KEY)
+    pane_active_matches = 0
+    if token:
+        # Known boundary: only panes still in this window are reconciled here;
+        # cross-window break-pane moves are not chased by notify cleanup.
+        for pane_id in panes:
+            if tmux.get_pane_option(pane_id, PANE_NOTIFY_ACTIVE_KEY) == token:
+                tmux.clear_pane_option(pane_id, PANE_NOTIFY_ACTIVE_KEY)
+                pane_active_matches += 1
+
+    notify_debug.emit_for_window(
+        window_target,
+        "clear.done",
+        workspace=workspace,
+        source=source,
+        window=window_target,
+        token=token or None,
+        pane_active_matches=pane_active_matches,
+    )
 
 
 def cleanup_selected_window(window_target: str, *, client: str = "") -> bool:
     if not window_target or "#{" in window_target:
         return False
     token = tmux.get_window_option(window_target, NOTIFY_TOKEN_OPTION.lstrip("@")) or ""
+    notify_debug.emit_for_window(
+        window_target,
+        "cleanup_selected.start",
+        window=window_target,
+        client=client or None,
+        token=token or None,
+    )
     if not token:
         return False
     attention = tmux.get_window_option(window_target, ATTENTION_SCRIPT_KEY) or ""
     panes = tmux.list_panes(window_target)
-    clear_stale_notify(window_target, panes, token=token, remove_attention=False)
-    _run_attention_script(attention, client)
+    clear_stale_notify(
+        window_target,
+        panes,
+        token=token,
+        remove_attention=False,
+        source="select_hook",
+    )
+    _run_attention_script(attention, client, window_target=window_target)
     return True
 
 
-def _ring_terminal_bell(pane_id: str) -> None:
+def _ring_terminal_bell(pane_id: str, *, window_target: str = "", workspace: str = "") -> None:
     tty_path = tmux.get_pane_tty(pane_id)
     if not tty_path:
+        notify_debug.emit_for_window(
+            window_target, "bell", workspace=workspace, pane=pane_id, tty_present=False, success=False
+        )
         return
     try:
         with open(tty_path, "w") as handle:
             handle.write("\a")
             handle.flush()
     except OSError:
+        notify_debug.emit_for_window(
+            window_target, "bell", workspace=workspace, pane=pane_id, tty_present=True, success=False
+        )
         return
+    notify_debug.emit_for_window(
+        window_target, "bell", workspace=workspace, pane=pane_id, tty_present=True, success=True
+    )
 
 
 def show_window_flash(
@@ -360,6 +432,7 @@ def show_window_flash(
     *,
     agent_name: str = "",
     animate_on_arrival: bool = True,
+    workspace: str = "",
 ) -> None:
     parts = window_target.rsplit(":", 1)
     session = parts[0] if len(parts) == 2 else ""
@@ -367,6 +440,7 @@ def show_window_flash(
     ensure_notify_select_hook(session)
 
     original = tmux.get_window_option(window_target, ORIGINAL_NAME_KEY)
+    original_present = bool(original)
     if not original:
         original = window_name
         tmux.set_window_option(window_target, ORIGINAL_NAME_OPTION, original)
@@ -377,6 +451,18 @@ def show_window_flash(
 
     hook_idx = int(time.time() * 1000) % 1_000_000_000
     token = f"{pane_id}:{hook_idx}"
+    old_token = tmux.get_window_option(window_target, NOTIFY_TOKEN_OPTION.lstrip("@")) or ""
+    notify_debug.emit_for_window(
+        window_target,
+        "flash.start",
+        workspace=workspace,
+        window=window_target,
+        pane=pane_id,
+        old_token=old_token or None,
+        new_token=token,
+        original_name_present=original_present,
+        animate=animate_on_arrival,
+    )
     attention_script = None
     if animate_on_arrival:
         attention_script = _write_pane_attention_script(pane_id=pane_id, token=token)
@@ -390,11 +476,22 @@ def show_window_flash(
 
     tmux.set_window_option(window_target, "window-status-style", FLASH_STYLE)
     tmux.set_window_option(window_target, "window-status-current-style", FLASH_STYLE)
+    notify_debug.emit_for_window(
+        window_target,
+        "flash.done",
+        workspace=workspace,
+        window=window_target,
+        pane=pane_id,
+        new_token=token,
+        attention_script_created=attention_script is not None,
+    )
 
 
 def notify(
     message: str,
     pane_id: str,
+    *,
+    workspace: str = "",
 ) -> dict[str, object]:
     window_target = tmux.get_pane_window_target(pane_id) or ""
     window_name = tmux.get_pane_window_name(pane_id) or "target"
@@ -404,6 +501,16 @@ def notify(
     suppressed = _target_window_is_focused(
         session_name=session_name,
         window_target=window_target,
+    )
+    notify_debug.emit_for_window(
+        window_target,
+        "notify.call",
+        workspace=workspace,
+        pane=pane_id,
+        window=window_target or None,
+        agent=agent_name or None,
+        client_mode=client_mode,
+        suppressed=suppressed,
     )
     if suppressed:
         return {
@@ -426,8 +533,9 @@ def notify(
             window_name,
             agent_name=agent_name,
             animate_on_arrival=True,
+            workspace=workspace,
         )
-    _ring_terminal_bell(pane_id)
+    _ring_terminal_bell(pane_id, window_target=window_target, workspace=workspace)
     return {
         "agent": agent_name,
         "paneId": pane_id,
