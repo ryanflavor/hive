@@ -128,6 +128,71 @@ def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
     return pending
 
 
+def _setup_busy_send_target(monkeypatch, workspace):
+    class _FakeAgent:
+        def __init__(self, name: str, pane_id: str, *, cli: str = "claude") -> None:
+            self.name = name
+            self.pane_id = pane_id
+            self.cli = cli
+            self.sent: list[str] = []
+
+        def is_alive(self) -> bool:
+            return True
+
+        def send(self, text: str) -> None:
+            self.sent.append(text)
+
+    class _FakeTeam:
+        def __init__(self) -> None:
+            self.workspace = str(workspace)
+            self.name = "team-x"
+            self.tmux_session = "dev"
+            self.tmux_window = "dev:0"
+            self.lead_name = "orch"
+            self.members = {"gpt": _FakeAgent("gpt", "%99")}
+
+        def get(self, name: str):
+            return self.members[name]
+
+        def resolve_peer(self, _name):
+            return None
+
+    team = _FakeTeam()
+    fork_calls: list[str] = []
+
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
+    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
+    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="claude"))
+    monkeypatch.setattr("hive.cli.resolve_session_id_for_pane", lambda _pane_id, profile=None: "sess-1")
+    _patch_sidecar_requests(monkeypatch, team)
+
+    def _runtime_payload(pane_id: str):
+        if pane_id == "%99":
+            return {
+                "alive": True,
+                "busy": True,
+                "inputState": "ready",
+                "turnPhase": "tool_open",
+            }
+        return {
+            "alive": True,
+            "busy": False,
+            "inputState": "ready",
+            "turnPhase": "task_closed",
+        }
+
+    monkeypatch.setattr("hive.sidecar._agent_runtime_payload", _runtime_payload)
+
+    def _fork_registered_agent(*_args, join_as: str, **_kwargs):
+        fork_calls.append(join_as)
+        clone = _FakeAgent(join_as, "%41")
+        team.members[join_as] = clone
+        return clone, "%41"
+
+    monkeypatch.setattr("hive.cli._fork_registered_agent", _fork_registered_agent)
+    return team, fork_calls
+
+
 
 def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
@@ -962,6 +1027,33 @@ def test_send_busy_root_falls_back_to_direct_send_when_fork_is_unavailable(runne
     assert payload["to"] == "gpt"
     assert "effectiveTarget" not in payload
     assert "routingMode" not in payload
+
+
+def test_send_missing_artifact_to_busy_target_fails_before_fork(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    missing_artifact = tmp_path / "does-not-exist.md"
+    _team, fork_calls = _setup_busy_send_target(monkeypatch, workspace)
+
+    result = runner.invoke(cli, ["send", "gpt", "please review this", "--artifact", str(missing_artifact)])
+
+    assert result.exit_code != 0
+    assert "artifact not found" in result.output
+    assert fork_calls == []
+
+
+def test_send_empty_stdin_artifact_to_busy_target_fails_before_fork(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    _team, fork_calls = _setup_busy_send_target(monkeypatch, workspace)
+
+    result = runner.invoke(cli, ["send", "gpt", "please review this", "--artifact", "-"], input="")
+
+    assert result.exit_code != 0
+    assert "--artifact - received empty stdin" in result.output
+    assert fork_calls == []
 
 
 def _reply_fake_team(workspace, *, sent_transcript):

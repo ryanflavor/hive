@@ -3011,13 +3011,13 @@ def send(
     sender = _resolve_sender(None)
     ws = _resolve_workspace(t, required=True)
     _validate_root_send_protocol(body, artifact)
+    resolved_artifact = _resolve_artifact_path(artifact, workspace=ws)
     effective_target, routing = _maybe_route_busy_root_send(
         t=t,
         workspace=ws,
         target_agent=to_agent,
         sender_agent=sender,
     )
-    resolved_artifact = _resolve_artifact_path(artifact, workspace=ws)
     try:
         payload = _request_send_payload(
             workspace=ws,
