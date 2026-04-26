@@ -25,7 +25,7 @@ from . import plugin_manager
 from . import skill_sync
 from . import tmux
 from .agent import AGENT_STARTUP_TIMEOUT, Agent
-from .agent_cli import AGENT_CLI_NAMES, anti_peer_cli, detect_profile_for_pane, family_for_pane, member_role_for_pane, normalize_command, peer_cli_for_family, resolve_session_id_for_pane
+from .agent_cli import AGENT_CLI_NAMES, anti_peer_cli, detect_profile_for_pane, family_for_pane, member_role_for_pane, normalize_command, peer_cli_for_family, resolve_peer_spawn, resolve_session_id_for_pane
 from .team import HIVE_HOME, LEAD_AGENT_NAME, Team, Terminal
 
 
@@ -68,6 +68,7 @@ _COMMAND_HELP_SECTIONS = {
     "exec": "Debug",
     # Extensions.
     "plugin": "Extensions",
+    "config": "Extensions",
 }
 _COMMAND_HELP_SECTION_ORDER = [
     "Daily",
@@ -113,7 +114,7 @@ hive delivery <msgId>                        # trace a send
 hive doctor dodo                             # probe a peer's connectivity'''
 
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
-_TMUX_OPTIONAL_ROOT_COMMANDS = {"plugin"}
+_TMUX_OPTIONAL_ROOT_COMMANDS = {"plugin", "config"}
 _SEND_GRACE_TIMEOUT = 3.0
 _SEND_GRACE_POLL_INTERVAL = 0.2
 
@@ -1268,7 +1269,17 @@ def _attach_peer_to_team(
         except (KeyError, ValueError):
             pass
 
-    candidate = _discover_peer_candidate(current_pane, my_family)
+    # Compute intended peer spawn first. When droid.selfPeer is on and the
+    # lead is droid with a cross-family custom model available, the user has
+    # explicitly asked for a droid peer — discovering an idle non-droid pane
+    # would silently override that intent. Skip discovery in that case and
+    # fall straight through to spawn.
+    my_profile = detect_profile_for_pane(current_pane)
+    my_cli = my_profile.name if my_profile else ""
+    peer_cli, peer_model = resolve_peer_spawn(my_cli=my_cli, my_family=my_family)
+    skip_discovery = peer_cli == "droid" and bool(peer_model)
+
+    candidate = None if skip_discovery else _discover_peer_candidate(current_pane, my_family)
     if candidate is not None:
         peer_name = _derive_agent_name(seen_names)
         profile = detect_profile_for_pane(candidate.pane_id)
@@ -1305,7 +1316,7 @@ def _attach_peer_to_team(
         }
 
     # Spawn fallback: create an anti-family peer pane in the current window.
-    peer_cli = peer_cli_for_family(my_family)
+    # peer_cli / peer_model resolved above (see skip_discovery comment).
     peer_name = _derive_agent_name(seen_names)
     peer_cwd = tmux.display_value(current_pane, "#{pane_current_path}") or os.getcwd()
     from . import layout as layout_mod
@@ -1320,6 +1331,7 @@ def _attach_peer_to_team(
         cwd=peer_cwd,
         split_horizontal=layout_mod.split_horizontal(peer_window, pane_count_after),
         cli=peer_cli,
+        model=peer_model,
         skill="hive",
     )
     t.agents[peer_name] = peer_agent
@@ -1931,6 +1943,66 @@ def workflow_load(agent_name: str, workflow_name: str, prompt: str):
     click.echo(f"Workflow '{workflow_name}' loaded into {agent_name}.")
 
 
+@cli.group("config")
+def config_cmd():
+    """Read / write user-level settings (~/.hive/settings.json)."""
+    pass
+
+
+def _parse_config_value(raw: str):
+    lowered = raw.strip().lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+    try:
+        return float(raw)
+    except ValueError:
+        pass
+    return raw
+
+
+@config_cmd.command("get")
+@click.argument("key")
+def config_get(key: str):
+    """Print the value at KEY (dot-path). Exit 1 when unset."""
+    from . import settings as user_settings
+    value = user_settings.get_setting(key, _SENTINEL_CONFIG)
+    if value is _SENTINEL_CONFIG:
+        sys.exit(1)
+    if isinstance(value, (dict, list)):
+        click.echo(json.dumps(value, indent=2, sort_keys=True))
+    else:
+        click.echo(json.dumps(value))
+
+
+@config_cmd.command("set")
+@click.argument("key")
+@click.argument("value")
+def config_set(key: str, value: str):
+    """Set KEY to VALUE (true/false/int/float/string)."""
+    from . import settings as user_settings
+    parsed = _parse_config_value(value)
+    user_settings.set_setting(key, parsed)
+    click.echo(json.dumps(parsed))
+
+
+@config_cmd.command("unset")
+@click.argument("key")
+def config_unset(key: str):
+    """Remove KEY. Exit 1 when KEY was not set."""
+    from . import settings as user_settings
+    if not user_settings.unset_setting(key):
+        sys.exit(1)
+
+
+_SENTINEL_CONFIG = object()
+
+
 @cli.command("wait-status", hidden=True, context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
 @click.argument("legacy_args", nargs=-1, type=click.UNPROCESSED)
 def wait_status(legacy_args: tuple[str, ...]):
@@ -2432,7 +2504,15 @@ def gang_init_cmd(peer_cli: str | None, gang_name: str | None):
     ws = _resolve_workspace(t, required=True)
 
     orch_cli = _resolve_spawn_cli_name(None)
-    peer_cli_name = peer_cli or anti_peer_cli(orch_cli)
+    if peer_cli:
+        peer_cli_name, peer_model_id = peer_cli, ""
+    else:
+        peer_cli_name, peer_model_id = resolve_peer_spawn(
+            my_cli=orch_cli,
+            my_family=family_for_pane(current_pane),
+        )
+        if not peer_cli_name:
+            peer_cli_name = anti_peer_cli(orch_cli)
 
     orch_cwd = tmux.display_value(current_pane, "#{pane_current_path}") or ws
 
@@ -2486,6 +2566,7 @@ def gang_init_cmd(peer_cli: str | None, gang_name: str | None):
         split_size="50%",
         skill="gang-skeptic",
         cli=peer_cli_name,
+        model=peer_model_id,
     )
 
     tmux.set_pane_option(skeptic_agent.pane_id, "hive-group", gang_name)

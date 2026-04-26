@@ -250,6 +250,78 @@ def test_init_skips_busy_panes_in_discovery(
     assert len(spawn_calls) == 1
 
 
+def test_droid_self_peer_skips_idle_anti_family_candidate(
+    runner, configure_hive_home, monkeypatch, mock_tmux_send, tmp_path,
+):
+    """When droid.selfPeer is on and a cross-family customModel exists, the
+    spawn must run even if an idle non-droid anti-family pane is sitting
+    nearby — discovery would otherwise silently override user intent."""
+    configure_hive_home(current_pane="%10", session_name="dev")
+    _install_common_mocks(monkeypatch, current_pane="%10", window_target="dev:0")
+
+    other_pane = "%20"
+    panes_all = [
+        PaneInfo("%10", "", command="droid"),
+        PaneInfo(other_pane, "", command="codex"),
+    ]
+    monkeypatch.setattr("hive.cli.tmux.list_panes_full", lambda _target: [panes_all[0]])
+    monkeypatch.setattr("hive.cli.tmux.list_panes_all", lambda: panes_all)
+    monkeypatch.setattr("hive.team.tmux.list_panes_all", lambda: panes_all)
+
+    from hive.agent_cli import PROFILES
+
+    def _profile(pane_id):
+        if pane_id == "%10":
+            return PROFILES["droid"]
+        if pane_id == other_pane:
+            return PROFILES["codex"]
+        return None
+
+    monkeypatch.setattr("hive.cli.detect_profile_for_pane", _profile)
+    monkeypatch.setattr("hive.agent_cli.detect_profile_for_pane", _profile)
+    monkeypatch.setattr(
+        "hive.agent_cli.resolve_model_for_pane",
+        lambda *_a, **_kw: "claude-opus-4-7",
+    )
+    monkeypatch.setattr("hive.sidecar._agent_runtime_payload", lambda _pane: {"alive": True, "turnPhase": "turn_closed"})
+    monkeypatch.setattr("hive.cli.tmux.display_value", lambda pane_id, fmt: "100" if fmt == "#{pane_last_activity}" else "/repo")
+    monkeypatch.setattr("hive.cli._ensure_team_sidecar", lambda *_a, **_kw: None)
+
+    monkeypatch.setattr("hive.agent_cli.user_settings.get_setting", lambda key, default=None: True if key == "droid.selfPeer" else default)
+    monkeypatch.setattr(
+        "hive.agent_cli._load_factory_custom_models",
+        lambda: [
+            {"id": "custom:Claude-Opus-4.7-0", "model": "claude-opus-4-7", "provider": "anthropic"},
+            {"id": "custom:GPT-5.4-1", "model": "gpt-5.4", "provider": "openai"},
+        ],
+    )
+
+    spawn_calls: list[dict] = []
+
+    class _FakeAgent:
+        def __init__(self, **kwargs):
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+            self.pane_id = "%99"
+
+    def _fake_spawn(**kwargs):
+        spawn_calls.append(kwargs)
+        return _FakeAgent(name=kwargs["name"], team_name=kwargs["team_name"], cli=kwargs.get("cli", "claude"))
+
+    monkeypatch.setattr("hive.cli.Agent.spawn", classmethod(lambda cls, **kw: _fake_spawn(**kw)))
+    monkeypatch.setattr("hive.cli._attach_peer_to_team", _real_attach_peer_to_team)
+
+    workspace = tmp_path / "ws"
+    result = runner.invoke(cli, ["init", "--name", "team-droid-self", "--workspace", str(workspace), "--no-notify"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["peer"]["mode"] == "spawned"
+    assert payload["peer"]["cli"] == "droid"
+    assert spawn_calls and spawn_calls[0]["cli"] == "droid"
+    assert spawn_calls[0]["model"] == "custom:GPT-5.4-1"
+
+
 def test_init_portrait_window_applies_even_vertical_layout(
     runner, configure_hive_home, monkeypatch, mock_tmux_send, tmp_path,
 ):
