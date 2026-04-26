@@ -75,3 +75,16 @@ When bumping, scan all commits since the last version bump commit and determine 
 
 Do not hardcode secrets, session IDs, or local machine paths. Hive depends on `tmux` and Factory `droid`; e2e tests assume tmux is available and use a fake droid binary for isolation.
 The sidecar is a long-lived workspace process. When validating sidecar-related runtime changes manually, restart it from the current workspace before trusting `doctor`, delivery, or activity output.
+
+## Debug Log Locations
+
+`hive doctor` includes the current workspace `runDir` and `logs` map. Prefer those paths when debugging a specific team:
+- `<workspace>/run/notify.jsonl` — notify UI and idle watcher state-machine events.
+- `<workspace>/run/sidecar.stderr` — sidecar stderr and uncaught process-level failures.
+- `<workspace>/run/cvim/` — per-run JSONL logs for `hive cvim` / `hive vim`; `latest` points to the newest run.
+
+When no workspace can be resolved, logs fall back under `${XDG_CACHE_HOME:-~/.cache}/hive/`:
+- `notify.jsonl`
+- `cvim/`
+
+Log verbosity defaults from install mode: source checkout/editable installs use `dev`, while `site-packages` / `dist-packages` installs use `normal`. `normal` only filters low-information sidecar heartbeat events; business-path notify and cvim events are still recorded. Use `HIVE_LOG_VERBOSITY=dev|normal` only as a temporary debugging escape hatch.
