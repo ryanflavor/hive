@@ -294,6 +294,58 @@ def test_control_mode_monitor_is_busy_uses_threshold():
     assert monitor.is_busy("%9", threshold_seconds=3.0) is False
 
 
+def test_control_mode_payload_activity_ignores_pure_repaint_sequence():
+    repaint = (
+        "\033[?2026h"
+        "\033[49;2H\033[0m\033[49m\033[K"
+        "\033[50;2H\033[0m\033[48;2;244;244;244m\033[K"
+        "\033[51;28H\033[0m\033[48;2;244;244;244m\033[K"
+        "\033[52;2H\033[0m\033[48;2;244;244;244m\033[K"
+        "\033[53;52H\033[0m\033[49m\033[K"
+        "\033[39m\033[49m\033[0m\033[?25h\033[51;3H\033[?2026l"
+    )
+
+    assert tmux._control_mode_payload_has_activity(repaint) is False
+
+
+def test_control_mode_payload_activity_accepts_visible_text_inside_styles():
+    assert tmux._control_mode_payload_has_activity("\033[2mhello\033[0m") is True
+
+
+def test_control_mode_payload_activity_keeps_text_between_st_terminated_osc_sequences():
+    payload = "\033]0;a\033\\hello\033]0;b\033\\"
+
+    assert tmux._control_mode_payload_has_activity(payload) is True
+
+
+def test_control_mode_payload_activity_ignores_pure_dcs_sequence():
+    assert tmux._control_mode_payload_has_activity("\033P1;2;3payload\033\\") is False
+
+
+def test_control_mode_payload_activity_accepts_visible_text_between_dcs_and_osc():
+    payload = "\033Pignored\033\\hello\033]0;title\033\\"
+
+    assert tmux._control_mode_payload_has_activity(payload) is True
+
+
+def test_control_mode_monitor_keeps_buffer_but_does_not_mark_repaint_busy():
+    monitor = tmux.ControlModeOutputMonitor("613")
+    payload = "\033[?2026h\033[49;2H\033[K\033[?2026l"
+
+    monitor._record_control_mode_output("%9", payload)
+
+    assert monitor.is_busy("%9", threshold_seconds=3.0) is False
+    assert monitor._output_buffer["%9"] == payload
+
+
+def test_control_mode_monitor_marks_visible_text_busy():
+    monitor = tmux.ControlModeOutputMonitor("613")
+
+    monitor._record_control_mode_output("%9", "\033[2mhello\033[0m")
+
+    assert monitor.is_busy("%9", threshold_seconds=3.0) is True
+
+
 def test_window_option_helpers_and_flash(monkeypatch):
     calls = []
 

@@ -34,6 +34,16 @@ _CONTROL_MODE_OUTPUT_RE = re.compile(
 _CONTROL_MODE_RESTART_DELAY = 1.0
 _OUTPUT_BUFFER_MAX = 64 * 1024
 _OCTAL_DIGITS = frozenset("01234567")
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1b(?:"
+    r"\[[0-?]*[ -/]*[@-~]|"
+    r"\][^\x07]*?(?:\x07|\x1b\\)|"
+    r"P.*?(?:\x1b\\)|"
+    r"[@-Z\\-_]"
+    r")",
+    re.DOTALL,
+)
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 def _decode_output_payload(raw: str) -> str:
@@ -73,6 +83,15 @@ def parse_control_mode_output_pane(line: str) -> str | None:
     """Return the pane id for a control mode output line, if any."""
     pane_id, _ = parse_control_mode_output(line)
     return pane_id or None
+
+
+def _control_mode_payload_has_activity(payload: str) -> bool:
+    """Return true when payload contains visible text, not only terminal repaint codes."""
+    if not payload:
+        return False
+    visible = _ANSI_ESCAPE_RE.sub("", payload)
+    visible = _CONTROL_CHARS_RE.sub("", visible)
+    return bool(visible.strip())
 
 
 class ControlModeOutputMonitor:
@@ -140,6 +159,16 @@ class ControlModeOutputMonitor:
             if len(combined) > _OUTPUT_BUFFER_MAX:
                 combined = combined[-_OUTPUT_BUFFER_MAX:]
             self._output_buffer[pane_id] = combined
+
+    def _record_control_mode_output(self, pane_id: str, payload: str) -> None:
+        if not pane_id:
+            return
+        if payload:
+            self._append_output(pane_id, payload)
+        if not _control_mode_payload_has_activity(payload):
+            return
+        with self._lock:
+            self._last_output_at[pane_id] = time.monotonic()
 
     def _request_detach(self) -> None:
         with self._lock:
@@ -225,10 +254,7 @@ class ControlModeOutputMonitor:
                     decoded = raw_line.decode(errors="ignore").rstrip("\r")
                     pane_id, payload = parse_control_mode_output(decoded)
                     if pane_id:
-                        with self._lock:
-                            self._last_output_at[pane_id] = time.monotonic()
-                        if payload:
-                            self._append_output(pane_id, payload)
+                        self._record_control_mode_output(pane_id, payload)
         finally:
             if proc is not None and proc.poll() is None:
                 try:
