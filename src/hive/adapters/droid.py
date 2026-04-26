@@ -116,7 +116,7 @@ class DroidAdapter:
             title=str_or_none(payload.get("sessionTitle") or payload.get("title")),
             started_at=None,
             jsonl_path=path,
-            model=str_or_none(payload.get("model")),
+            model=_read_settings_model(path),
         )
 
     def iter_messages(self, path: Path) -> Iterator[Message]:
@@ -140,6 +140,23 @@ class DroidAdapter:
             timestamp=parse_iso_timestamp(payload.get("timestamp")),
             raw=payload,
         )
+
+
+def _read_settings_model(jsonl_path: Path) -> str | None:
+    """Read model from the companion ``<id>.settings.json`` next to the jsonl.
+
+    Droid writes the active model to a sidecar JSON file rather than into the
+    transcript itself, so the model isn't visible from the jsonl alone.
+    """
+    settings_path = jsonl_path.with_suffix(".settings.json")
+    try:
+        text = settings_path.read_text()
+    except OSError:
+        return None
+    payload = safe_json_loads(text)
+    if not isinstance(payload, dict):
+        return None
+    return str_or_none(payload.get("model"))
 
 
 def _droid_message_iter(handle) -> Iterator[Message]:

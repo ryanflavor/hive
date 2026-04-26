@@ -47,13 +47,14 @@ def test_droid_read_meta_parses_session_start(tmp_path):
                 "title": "demo",
                 "sessionTitle": "demo title",
                 "cwd": "/work",
-                "model": "gpt-5.2",
             }
         )
         + "\n"
         + json.dumps({"type": "message", "message": {"role": "user", "content": []}})
         + "\n"
     )
+    settings = tmp_path / "droid.settings.json"
+    settings.write_text(json.dumps({"model": "custom:Claude-Opus-4.7-0"}))
     adapter = adapters.get("droid")
     meta = adapter.read_meta(path)
     assert meta is not None
@@ -62,7 +63,18 @@ def test_droid_read_meta_parses_session_start(tmp_path):
     assert meta.cwd == "/work"
     assert meta.title == "demo title"
     assert meta.jsonl_path == path
-    assert meta.model == "gpt-5.2"
+    assert meta.model == "custom:Claude-Opus-4.7-0"
+
+
+def test_droid_read_meta_missing_settings_returns_meta_without_model(tmp_path):
+    path = tmp_path / "droid.jsonl"
+    path.write_text(
+        json.dumps({"type": "session_start", "id": "sess-2", "cwd": "/work"}) + "\n"
+    )
+    meta = adapters.get("droid").read_meta(path)
+    assert meta is not None
+    assert meta.session_id == "sess-2"
+    assert meta.model is None
 
 
 def test_droid_read_meta_returns_none_for_bad_file(tmp_path):
