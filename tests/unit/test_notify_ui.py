@@ -18,8 +18,18 @@ def test_emit_falls_back_to_global_log_when_no_workspace(isolated_global_log):
     notify_debug.emit("", "global.event", payload="x")
     record = json.loads(isolated_global_log.read_text().splitlines()[0])
     assert record["event"] == "global.event"
+    assert record["component"] == "notify"
+    assert record["workspace"] == "<global>"
     assert record["payload"] == "x"
     assert record["pid"] == os.getpid()
+
+
+def test_emit_filters_heartbeat_events_in_normal_mode(isolated_global_log, monkeypatch):
+    monkeypatch.setenv("HIVE_LOG_VERBOSITY", "normal")
+
+    notify_debug.emit("", "tick.summary", team="team-a")
+
+    assert not isolated_global_log.exists()
 
 
 def test_emit_writes_workspace_log_when_workspace_known(tmp_path):
@@ -28,6 +38,8 @@ def test_emit_writes_workspace_log_when_workspace_known(tmp_path):
     log = workspace / "run" / "notify.jsonl"
     record = json.loads(log.read_text().splitlines()[0])
     assert record["event"] == "ws.event"
+    assert record["component"] == "notify"
+    assert record["workspace"] == str(workspace)
     assert record["a"] == 1
 
 

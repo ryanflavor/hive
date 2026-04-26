@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from . import bus
+from . import devlog
 from . import notify_ui
 from .agent_cli import detect_profile_for_pane
 from .runtime_state import (
@@ -138,7 +139,7 @@ def _saw_msg_id(pane_id: str, msg_id: str) -> bool:
 
 
 def _run_dir(workspace: str) -> Path:
-    return Path(workspace) / "run"
+    return devlog.run_dir(workspace)
 
 
 def _socket_path(workspace: str) -> Path:
@@ -912,6 +913,8 @@ def _doctor_payload(
         if "_safetyEvidence" in runtime:
             diag["safetyEvidence"] = runtime["_safetyEvidence"]
         diag["workspace"] = str(workspace)
+        diag["runDir"] = str(devlog.run_dir(workspace))
+        diag["logs"] = devlog.log_paths(workspace)
         diag["eventCount"] = bus.count_events(workspace)
     return diag
 
@@ -1500,12 +1503,18 @@ def _start_sidecar(workspace: str, team: str, tmux_window: str, tmux_window_id: 
         tmux_window,
         tmux_window_id,
     ]
-    with open(os.devnull, "rb") as stdin_devnull, open(os.devnull, "ab") as output_devnull:
+    stderr_path = devlog.sidecar_stderr_path(workspace)
+    stderr_path.parent.mkdir(parents=True, exist_ok=True)
+    with (
+        open(os.devnull, "rb") as stdin_devnull,
+        open(os.devnull, "ab") as stdout_devnull,
+        open(stderr_path, "ab") as stderr_log,
+    ):
         process = subprocess.Popen(
             command,
             stdin=stdin_devnull,
-            stdout=output_devnull,
-            stderr=output_devnull,
+            stdout=stdout_devnull,
+            stderr=stderr_log,
             start_new_session=True,
             close_fds=True,
         )

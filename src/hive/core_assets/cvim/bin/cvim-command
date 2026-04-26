@@ -60,6 +60,7 @@ src_pane_pid="$(tmux display-message -p -t "$src_pane" '#{pane_pid}')"
 src_pane_tty="$(tmux display-message -p -t "$src_pane" '#{pane_tty}')"
 src_client_tty="$(tmux display-message -p -t "$src_pane" '#{client_tty}')"
 src_client_pid="$(tmux display-message -p -t "$src_pane" '#{client_pid}')"
+src_workspace="$(tmux display-message -p -t "$src_pane" '#{@hive-workspace}' 2>/dev/null || true)"
 script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 resources_dir="$(CDPATH= cd -- "$script_dir/../resources" && pwd 2>/dev/null || true)"
 seed_helper="$script_dir/cvim-seed"
@@ -71,14 +72,68 @@ tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/cvim.XXXXXX")"
 msg_file="$tmpdir/message.md"
 orig_file="$tmpdir/original.md"
 helper_file="$tmpdir/run.sh"
-debug_root="${CVIM_DEBUG_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/cvim/debug}"
-mkdir -p "$debug_root" >/dev/null 2>&1 || true
-debug_log_file="$(mktemp "${debug_root}/cvim.XXXXXX" 2>/dev/null || true)"
-if [[ -z "$debug_log_file" ]]; then
-  debug_log_file="$debug_root/latest.log"
-  : > "$debug_log_file" 2>/dev/null || true
+debug_lib="$tmpdir/debug.sh"
+if [[ -n "$src_workspace" ]]; then
+  debug_root="$src_workspace/run/cvim"
+else
+  debug_root="${XDG_CACHE_HOME:-$HOME/.cache}/hive/cvim"
 fi
+mkdir -p "$debug_root" >/dev/null 2>&1 || true
+find "$debug_root" -type f \( -name '*.jsonl' -o -name 'cvim.*' \) -mtime +7 -exec rm -f {} + >/dev/null 2>&1 || true
+debug_run_id="$(date -u '+%Y%m%dT%H%M%SZ').$$.${RANDOM:-0}"
+debug_log_file="$debug_root/$debug_run_id.jsonl"
+: > "$debug_log_file" 2>/dev/null || true
 printf '%s\n' "$debug_log_file" > "$debug_root/latest" 2>/dev/null || true
+
+cat > "$debug_lib" <<'EOF'
+cvim_json_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\t'/\\t}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\n'/\\n}"
+  printf '%s' "$value"
+}
+
+cvim_debug_log() {
+  local log_file="$1"
+  local workspace="$2"
+  local run_id="$3"
+  local pid="$4"
+  local raw="$5"
+  local event=""
+  local message=""
+  local ts=""
+
+  case "$raw" in
+    *" "*)
+      event="${raw%% *}"
+      message="${raw#* }"
+      ;;
+    *)
+      event="$raw"
+      message=""
+      ;;
+  esac
+  if [[ -n "${EPOCHREALTIME:-}" ]]; then
+    ts="$(TZ=UTC printf '%(%Y-%m-%dT%H:%M:%S)T.%sZ' "${EPOCHREALTIME%.*}" "${EPOCHREALTIME#*.}")"
+    ts="${ts:0:23}Z"
+  else
+    ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  fi
+  workspace="${workspace:-<global>}"
+  printf '{"ts":"%s","pid":%s,"component":"cvim","workspace":"%s","runId":"%s","event":"%s","message":"%s"}\n' \
+    "$(cvim_json_escape "$ts")" \
+    "$pid" \
+    "$(cvim_json_escape "$workspace")" \
+    "$(cvim_json_escape "$run_id")" \
+    "$(cvim_json_escape "$event")" \
+    "$(cvim_json_escape "$message")" \
+    >> "$log_file" 2>/dev/null || true
+}
+EOF
+. "$debug_lib"
 
 paste_delay_default="${CVIM_PASTE_DELAY:-0.60}"
 interrupt_before_paste_default="${CVIM_INTERRUPT_BEFORE_PASTE:-1}"
@@ -89,9 +144,7 @@ clear_input_before_paste_default="${CVIM_CLEAR_INPUT_BEFORE_PASTE:-auto}"
 
 debug_log() {
   local message="$1"
-  {
-    printf '%s pid=%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$$" "$message"
-  } >> "$debug_log_file" 2>/dev/null || true
+  cvim_debug_log "$debug_log_file" "$src_workspace" "$debug_run_id" "$$" "$message"
 }
 
 resolve_current_droid_process_info() {
@@ -178,7 +231,7 @@ case "$(printf '%s' "$clear_input_before_paste_default" | tr '[:upper:]' '[:lowe
 esac
 
 build_helper_cmd() {
-  printf '%q ' "$helper_file" "$reply_pane" "$editor_bin" "$msg_file" "$orig_file" "$tmpdir" "$output_mode" "$paste_delay_default" "$interrupt_before_paste_default" "$interrupt_after_paste_default" "$interrupt_settle_delay_default" "$submit_delay_default" "$clear_input_before_paste_default" "$cursor_mode" "$payload_builder" "$src_profile" "$debug_log_file"
+  printf '%q ' "$helper_file" "$reply_pane" "$editor_bin" "$msg_file" "$orig_file" "$tmpdir" "$output_mode" "$paste_delay_default" "$interrupt_before_paste_default" "$interrupt_after_paste_default" "$interrupt_settle_delay_default" "$submit_delay_default" "$clear_input_before_paste_default" "$cursor_mode" "$payload_builder" "$src_profile" "$debug_log_file" "$src_workspace" "$debug_run_id" "$debug_lib"
 }
 
 queue_post_run() {
@@ -205,7 +258,7 @@ queue_post_run() {
   fi
 
   debug_log "queue_post_run.enqueue tmpdir=$tmpdir content_changed=$content_changed send_exists=$send_exists send_bytes=$send_bytes"
-  printf -v post_cmd '%q ' "$post_file" "$reply_pane" "$send_file" "$tmpdir" "$paste_delay_default" "$content_changed" "$interrupt_before_paste_default" "$interrupt_after_paste_default" "$interrupt_settle_delay_default" "$submit_delay_default" "$clear_input_before_paste_default" "$src_profile" "$debug_log_file"
+  printf -v post_cmd '%q ' "$post_file" "$reply_pane" "$send_file" "$tmpdir" "$paste_delay_default" "$content_changed" "$interrupt_before_paste_default" "$interrupt_after_paste_default" "$interrupt_settle_delay_default" "$submit_delay_default" "$clear_input_before_paste_default" "$src_profile" "$debug_log_file" "$src_workspace" "$debug_run_id" "$debug_lib"
   tmux run-shell -b "$post_cmd"
 }
 
@@ -422,17 +475,19 @@ cursor_mode="${13}"
 payload_builder="${14}"
 reply_profile="${15}"
 debug_log_file="${16}"
+debug_workspace="${17}"
+debug_run_id="${18}"
+debug_lib="${19}"
 send_file="$tmpdir/send.txt"
 post_file="$tmpdir/post.sh"
 content_state_file="$tmpdir/content_changed"
 content_changed="0"
 retain_tmpdir="0"
+. "$debug_lib"
 
 debug_log() {
   local message="$1"
-  {
-    printf '%s pid=%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$$" "$message"
-  } >> "$debug_log_file" 2>/dev/null || true
+  cvim_debug_log "$debug_log_file" "$debug_workspace" "$debug_run_id" "$$" "$message"
 }
 
 cleanup() {
@@ -519,13 +574,15 @@ submit_delay="$9"
 clear_input_before_paste="${10}"
 reply_profile="${11}"
 debug_log_file="${12}"
+debug_workspace="${13}"
+debug_run_id="${14}"
+debug_lib="${15}"
 did_pre_interrupt="0"
+. "$debug_lib"
 
 debug_log() {
   local message="$1"
-  {
-    printf '%s pid=%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$$" "$message"
-  } >> "$debug_log_file" 2>/dev/null || true
+  cvim_debug_log "$debug_log_file" "$debug_workspace" "$debug_run_id" "$$" "$message"
 }
 
 capture_reply_pane_snapshot() {

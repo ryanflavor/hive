@@ -144,6 +144,7 @@ if cmd == "display-message":
         "#{pane_tty}": pane.get("tty", "/dev/ttys001"),
         "#{client_tty}": pane.get("client_tty", "/dev/ttys010"),
         "#{client_pid}": pane.get("client_pid", 4321),
+        "#{@hive-workspace}": state.get("workspace", ""),
         "#{pane_left}": pane["left"],
         "#{pane_top}": pane["top"],
         "#{pane_width}": pane["width"],
@@ -292,6 +293,7 @@ def _run_command_actions(
     panes: list[dict[str, object]],
     extra_env: dict[str, str] | None = None,
     use_default_delays: bool = False,
+    workspace: Path | None = None,
 ) -> list[dict[str, object]]:
     _write_fake_tmux(tmp_path)
     command = _materialize_cvim_bundle(tmp_path)
@@ -304,6 +306,8 @@ def _run_command_actions(
         "client_height": 100,
         "panes": panes,
     }
+    if workspace is not None:
+        state["workspace"] = str(workspace)
     env = os.environ.copy()
     env["PATH"] = f"{tmp_path}:{env.get('PATH', '')}"
     env["TMUX"] = "/tmp/tmux-test"
@@ -324,6 +328,12 @@ def _run_command_actions(
 
     subprocess.run(["bash", str(command), "vim"], check=True, env=env, cwd=ROOT)
     return [json.loads(line) for line in actions_path.read_text().splitlines() if line.strip()]
+
+
+def _read_latest_cvim_records(cache_dir: Path) -> list[dict[str, object]]:
+    latest_file = cache_dir / "hive" / "cvim" / "latest"
+    log_path = Path(latest_file.read_text().strip())
+    return [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
 
 
 def _popup_geometry(log_record: dict[str, object]) -> tuple[int, int, int, int]:
@@ -565,16 +575,14 @@ def test_claude_profile_accepts_pasted_placeholder_before_submit(tmp_path):
         use_default_delays=True,
     )
 
-    latest_file = cache_dir / "cvim" / "debug" / "latest"
-    log_path = Path(latest_file.read_text().strip())
-    log_text = log_path.read_text()
+    records = _read_latest_cvim_records(cache_dir)
 
     assert any(event["cmd"] == "paste-buffer" for event in actions)
     assert any(
         event["cmd"] == "send-keys" and event["args"][-1] == "Enter"
         for event in actions
     )
-    assert "matcher=claude_pasted_placeholder" in log_text
+    assert any("matcher=claude_pasted_placeholder" in str(record.get("message", "")) for record in records)
 
 
 def test_claude_profile_clears_input_even_when_editor_content_is_unchanged(tmp_path):
@@ -683,9 +691,8 @@ def test_edited_save_skips_submit_when_probe_never_finds_structured_input(tmp_pa
         use_default_delays=True,
     )
 
-    latest_file = cache_dir / "cvim" / "debug" / "latest"
-    log_path = Path(latest_file.read_text().strip())
-    log_text = log_path.read_text()
+    records = _read_latest_cvim_records(cache_dir)
+    events = [record["event"] for record in records]
 
     assert any(event["cmd"] == "paste-buffer" for event in actions)
     assert len([event for event in actions if event["cmd"] == "capture-pane"]) == 5
@@ -693,9 +700,22 @@ def test_edited_save_skips_submit_when_probe_never_finds_structured_input(tmp_pa
         event["cmd"] == "send-keys" and event["args"][-1] == "Enter"
         for event in actions
     )
-    assert "post.probe.failed label=after_paste attempts=4" in log_text
-    assert "post.submit_skipped reason=missing_submit_ready_input_after_paste" in log_text
-    assert "post.capture.after_paste_failed > still empty" in log_text
+    assert "post.probe.failed" in events
+    assert any(
+        record.get("event") == "post.probe.failed"
+        and "attempts=4" in str(record.get("message", ""))
+        for record in records
+    )
+    assert any(
+        record.get("event") == "post.submit_skipped"
+        and "reason=missing_submit_ready_input_after_paste" in str(record.get("message", ""))
+        for record in records
+    )
+    assert any(
+        record.get("event") == "post.capture.after_paste_failed"
+        and record.get("message") == "> still empty"
+        for record in records
+    )
 
 
 def test_popup_debug_log_records_sendback_stages(tmp_path):
@@ -715,18 +735,49 @@ def test_popup_debug_log_records_sendback_stages(tmp_path):
         use_default_delays=True,
     )
 
-    latest_file = cache_dir / "cvim" / "debug" / "latest"
-    log_path = Path(latest_file.read_text().strip())
-    log_text = log_path.read_text()
+    records = _read_latest_cvim_records(cache_dir)
+    events = [record["event"] for record in records]
 
     assert any(event["cmd"] == "paste-buffer" for event in actions)
     assert len([event for event in actions if event["cmd"] == "capture-pane"]) == 1
-    assert "command.start" in log_text
-    assert "popup.open" in log_text
-    assert "helper.payload_ready" in log_text
-    assert "queue_post_run.enqueue" in log_text
-    assert "post.probe.ready label=after_paste attempt=1" in log_text
-    assert "post.submit" in log_text
+    assert "command.start" in events
+    assert "popup.open" in events
+    assert "helper.payload_ready" in events
+    assert "queue_post_run.enqueue" in events
+    assert any(
+        record.get("event") == "post.probe.ready"
+        and "attempt=1" in str(record.get("message", ""))
+        for record in records
+    )
+    assert "post.submit" in events
+
+
+def test_popup_debug_log_uses_workspace_run_dir(tmp_path):
+    workspace = tmp_path / "ws"
+    actions = _run_command_actions(
+        tmp_path,
+        current_pane="%1",
+        panes=[
+            {"id": "%1", "left": 0, "top": 0, "width": 200, "height": 100},
+        ],
+        extra_env={
+            "FAKE_EDITOR_APPEND_TEXT": "new line added",
+            "FAKE_TMUX_CAPTURE_PANE_TEXT": "ready for input\n> pasted",
+        },
+        workspace=workspace,
+    )
+
+    latest_file = workspace / "run" / "cvim" / "latest"
+    log_path = Path(latest_file.read_text().strip())
+    records = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
+
+    assert any(event["cmd"] == "paste-buffer" for event in actions)
+    assert log_path.parent == workspace / "run" / "cvim"
+    assert records[0]["workspace"] == str(workspace)
+    assert records[0]["component"] == "cvim"
+    assert records[0]["ts"].endswith("Z")
+    if "." in records[0]["ts"]:
+        assert len(records[0]["ts"].rsplit(".", 1)[1]) == 4
 
 
 def _write_capturing_fake_vim(tmp_path: Path, log_path: Path) -> Path:

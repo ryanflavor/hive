@@ -1,9 +1,9 @@
 """Notify debug tracing.
 
 Always-on JSONL log of notify state-machine transitions, covering both the
-sidecar idle watcher and the notify_ui delivery path. Modeled after cvim's
-debug log: write transition-level events to a known cache path so
-post-incident review has the full chain in one place.
+sidecar idle watcher and the notify_ui delivery path. Business-path events are
+always recorded; low-information sidecar heartbeat events are only recorded
+when Hive is running from a source checkout or ``HIVE_LOG_VERBOSITY=dev``.
 
 Logs go to ``<workspace>/run/notify.jsonl`` when the workspace is known
 (sidecar paths, select-hook cleanup with ``@hive-workspace``) and fall back
@@ -16,30 +16,28 @@ Sidecar callers already know their workspace and pass it explicitly via
 fall back to the global log silently.
 
 Multiple processes (sidecar loop, select-hook cleanup) write to the same log
-via a single ``os.write`` call on an ``O_APPEND`` fd, which the kernel
-guarantees is atomic for sub-``PIPE_BUF`` payloads.
+via a single ``os.write`` call on an ``O_APPEND`` fd.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import time
 from pathlib import Path
 from typing import Any
 
+from . import devlog
 from . import tmux
 
 
-_RUN_DIR = "run"
 _LOG_NAME = "notify.jsonl"
 
-_GLOBAL_DIR = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "hive"
-_GLOBAL_LOG = _GLOBAL_DIR / "notify.jsonl"
+_GLOBAL_DIR = devlog.GLOBAL_HIVE_DIR
+_GLOBAL_LOG = devlog.global_notify_log_path()
 
 
 def log_path(workspace: str) -> Path:
-    return Path(workspace) / _RUN_DIR / _LOG_NAME
+    return devlog.notify_log_path(workspace)
 
 
 def workspace_for_window(window_target: str) -> str:
@@ -66,9 +64,13 @@ def emit_for_window(
 
 
 def emit(workspace: str, event: str, **fields: Any) -> None:
+    if not devlog.should_emit(event):
+        return
     record: dict[str, Any] = {
-        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "ts": devlog.utc_timestamp_ms(),
         "pid": os.getpid(),
+        "component": "notify",
+        "workspace": workspace or "<global>",
         "event": event,
     }
     for key, value in fields.items():

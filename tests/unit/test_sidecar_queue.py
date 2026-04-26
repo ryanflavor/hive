@@ -158,6 +158,7 @@ def test_handle_request_ping_returns_sidecar_identity():
 
 def test_start_sidecar_spawns_fresh_python_process(monkeypatch):
     captured: dict[str, object] = {}
+    workspace = "/tmp/ws"
 
     class _FakeProcess:
         pid = 4321
@@ -174,7 +175,7 @@ def test_start_sidecar_spawns_fresh_python_process(monkeypatch):
     monkeypatch.setattr(sidecar.sys, "executable", "/tmp/fake-python")
     monkeypatch.setattr(sidecar.subprocess, "Popen", _fake_popen)
 
-    pid = sidecar._start_sidecar("/tmp/ws", "team-a", "dev:3", "@99")
+    pid = sidecar._start_sidecar(workspace, "team-a", "dev:3", "@99")
 
     assert pid == 4321
     assert captured["command"] == [
@@ -182,14 +183,14 @@ def test_start_sidecar_spawns_fresh_python_process(monkeypatch):
         "-m",
         "hive.sidecar",
         "--sidecar",
-        "/tmp/ws",
+        workspace,
         "team-a",
         "dev:3",
         "@99",
     ]
     assert captured["stdin_name"] == sidecar.os.devnull
     assert captured["stdout_name"] == sidecar.os.devnull
-    assert captured["stderr_name"] == sidecar.os.devnull
+    assert captured["stderr_name"] == str(sidecar.devlog.sidecar_stderr_path(workspace))
     assert captured["start_new_session"] is True
     assert captured["close_fds"] is True
 

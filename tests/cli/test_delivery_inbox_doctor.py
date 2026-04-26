@@ -402,6 +402,43 @@ def test_doctor_requests_verbose_detail_by_default(runner, configure_hive_home, 
     assert payload["transcriptSize"] == 1234
 
 
+def test_doctor_payload_includes_log_paths(configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+
+    class _FakeAgent:
+        pane_id = "%99"
+
+        def is_alive(self):
+            return True
+
+    class _FakeTeam:
+        name = "team-x"
+        agents = {"gpt": _FakeAgent()}
+
+        def get(self, name):
+            if name == "gpt":
+                return _FakeAgent()
+            raise KeyError(name)
+
+    monkeypatch.setattr("hive.team.Team.load", lambda _team_name: _FakeTeam())
+    monkeypatch.setattr(
+        sidecar,
+        "_member_runtime_payload",
+        lambda _pane_id, role="agent": {"alive": True, "inputState": "ready"},
+    )
+
+    payload = sidecar._doctor_payload(str(workspace), "team-x", "gpt", verbose=True)
+
+    assert payload["runDir"] == str(workspace / "run")
+    assert payload["logs"] == {
+        "notify": str(workspace / "run" / "notify.jsonl"),
+        "sidecar_stderr": str(workspace / "run" / "sidecar.stderr"),
+        "cvim_dir": str(workspace / "run" / "cvim"),
+    }
+
+
 def test_doctor_includes_sidecar_metadata(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"
