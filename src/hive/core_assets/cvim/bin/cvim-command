@@ -819,7 +819,14 @@ maybe_prepare_menu() {
     return 0
   fi
   cp "$menu_vim_template" "$tmpdir/menu.vim"
-  : > "$msg_file"
+  # Seed the buffer with the newest assistant message as a fallback. If the
+  # vim popup_menu fails to render (e.g. nested tmux popup + alt-screen
+  # parents), the user still sees the most-recent message instead of an
+  # empty buffer. When popup_menu does come up and the user picks an entry,
+  # menu.vim's HiveCvimMenuPick rewrites both msg_file and orig_file before
+  # `:edit!`, so this seed is harmlessly overwritten.
+  python3 "$seed_helper" "$src_cwd" "$msg_file" "$transcript_path" "0" \
+    || : > "$msg_file"
   menu_mode=1
   debug_log "seed.menu transcript_path=$transcript_path entries=$entry_count"
 }

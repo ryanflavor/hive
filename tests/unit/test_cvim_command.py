@@ -794,6 +794,11 @@ menu = None
 if menu_json and os.path.isfile(menu_json):
     with open(menu_json) as fh:
         menu = json.load(fh)
+msg_file = sys.argv[-1] if len(sys.argv) > 1 else ""
+msg_content = ""
+if msg_file and os.path.isfile(msg_file):
+    with open(msg_file) as fh:
+        msg_content = fh.read()
 record = {{
     "argv": sys.argv,
     "env": {{k: os.environ.get(k, "") for k in (
@@ -803,6 +808,7 @@ record = {{
     "menu": menu,
     "seeds": sorted(os.listdir(os.environ.get("CVIM_SEEDS_DIR", "") or "."))
         if os.environ.get("CVIM_SEEDS_DIR") and os.path.isdir(os.environ["CVIM_SEEDS_DIR"]) else [],
+    "msg_content": msg_content,
 }}
 with open(log_path, "w") as fh:
     json.dump(record, fh)
@@ -891,6 +897,10 @@ def test_cvim_menu_mode_activates_with_session_seed_and_no_offset(tmp_path):
     assert "answer B" in record["menu"][0]["label"]
     assert "answer A" in record["menu"][1]["label"]
     assert set(record["seeds"]) == {"0.md", "1.md"}
+    # menu mode pre-seeds msg_file with offset=0 (newest assistant message)
+    # so popup_menu rendering failures (e.g. nested tmux popup + claude
+    # alt-screen) leave a usable buffer instead of an empty one.
+    assert "answer B" in record["msg_content"]
 
 
 def test_cvim_menu_mode_skipped_when_offset_flag_present(tmp_path):
