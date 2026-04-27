@@ -1,3 +1,8 @@
+import fcntl
+import os
+
+import pytest
+
 import hive.sidecar as sidecar
 
 
@@ -212,3 +217,164 @@ def test_run_spawned_sidecar_ignores_sigint_and_runs_loop(monkeypatch):
     assert exit_code == 0
     assert captured["signal"] == (sidecar.signal.SIGINT, sidecar.signal.SIG_IGN)
     assert captured["loop_args"] == ("/tmp/ws", "team-a", "dev:3", "@99")
+
+
+def test_stale_disk_build_hash_requires_stable_changed_hash(monkeypatch):
+    values = iter(["new-hash", "new-hash"])
+    monkeypatch.setattr(sidecar, "_compute_build_hash", lambda: next(values))
+    state: dict[str, object] = {}
+
+    assert sidecar._stale_disk_build_hash_for_reexec(state, now=10.0, pending_empty=True) is None
+    assert state["candidate_hash"] == "new-hash"
+    assert sidecar._stale_disk_build_hash_for_reexec(state, now=14.9, pending_empty=True) is None
+    assert sidecar._stale_disk_build_hash_for_reexec(state, now=15.0, pending_empty=True) == "new-hash"
+
+
+def test_stale_disk_build_hash_does_not_trigger_while_pending(monkeypatch):
+    monkeypatch.setattr(sidecar, "_compute_build_hash", lambda: "new-hash")
+    state: dict[str, object] = {}
+
+    assert sidecar._stale_disk_build_hash_for_reexec(state, now=10.0, pending_empty=False) is None
+    assert state == {}
+
+
+def test_stale_disk_build_hash_clears_candidate_when_code_matches(monkeypatch):
+    state: dict[str, object] = {"candidate_hash": "new-hash"}
+    monkeypatch.setattr(sidecar, "_compute_build_hash", lambda: sidecar.SIDECAR_BUILD_HASH)
+
+    assert sidecar._stale_disk_build_hash_for_reexec(state, now=10.0, pending_empty=True) is None
+    assert "candidate_hash" not in state
+
+
+def test_try_acquire_reexec_lock_returns_inheritable_lock_fd(tmp_path):
+    lock_fd = sidecar._try_acquire_reexec_lock(str(tmp_path))
+    try:
+        assert lock_fd is not None
+        assert os.get_inheritable(lock_fd) is True
+    finally:
+        sidecar._release_reexec_lock_fd(lock_fd)
+
+
+def test_try_acquire_reexec_lock_returns_none_when_lock_is_busy(tmp_path):
+    lock_path = sidecar._lock_path(str(tmp_path))
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    held_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(held_fd, fcntl.LOCK_EX)
+        assert sidecar._try_acquire_reexec_lock(str(tmp_path)) is None
+    finally:
+        fcntl.flock(held_fd, fcntl.LOCK_UN)
+        os.close(held_fd)
+
+
+def test_reexec_sidecar_stops_monitor_closes_socket_and_execs(monkeypatch, tmp_path):
+    calls: list[tuple] = []
+
+    class _Server:
+        def close(self):
+            calls.append(("server.close",))
+
+    class _Monitor:
+        def stop(self):
+            calls.append(("monitor.stop",))
+
+    def _execv(executable, argv):
+        calls.append(("execv", executable, argv, sidecar.os.environ.get(sidecar._SIDECAR_REEXEC_LOCK_ENV)))
+        raise SystemExit(0)
+
+    monkeypatch.delenv(sidecar._SIDECAR_REEXEC_LOCK_ENV, raising=False)
+    monkeypatch.setattr(sidecar.sys, "executable", "/tmp/fake-python")
+    monkeypatch.setattr(sidecar.os, "execv", _execv)
+    monkeypatch.setattr(
+        sidecar,
+        "_try_acquire_reexec_lock",
+        lambda workspace: calls.append(("lock", workspace)) or 42,
+    )
+    monkeypatch.setattr(sidecar, "_release_reexec_lock_fd", lambda fd: calls.append(("release", fd)))
+    monkeypatch.setattr(sidecar, "_cleanup_socket", lambda workspace: calls.append(("cleanup", workspace)))
+
+    with pytest.raises(SystemExit):
+        sidecar._reexec_sidecar(
+            workspace=str(tmp_path),
+            team="team-a",
+            tmux_window="dev:3",
+            tmux_window_id="@99",
+            server=_Server(),
+            busy_monitor=_Monitor(),
+        )
+
+    assert calls == [
+        ("lock", str(tmp_path)),
+        ("monitor.stop",),
+        ("server.close",),
+        ("cleanup", str(tmp_path)),
+        (
+            "execv",
+            "/tmp/fake-python",
+            [
+                "/tmp/fake-python",
+                "-m",
+                "hive.sidecar",
+                "--sidecar",
+                str(tmp_path),
+                "team-a",
+                "dev:3",
+                "@99",
+            ],
+            "42",
+        ),
+        ("release", 42),
+    ]
+    assert sidecar._SIDECAR_REEXEC_LOCK_ENV not in sidecar.os.environ
+
+
+def test_reexec_sidecar_skips_when_reexec_lock_is_busy(monkeypatch, tmp_path):
+    calls: list[str] = []
+
+    class _Server:
+        def close(self):
+            calls.append("server.close")
+
+    class _Monitor:
+        def stop(self):
+            calls.append("monitor.stop")
+
+    monkeypatch.setattr(sidecar, "_try_acquire_reexec_lock", lambda _workspace: None)
+    monkeypatch.setattr(sidecar.os, "execv", lambda *_args: calls.append("execv"))
+
+    did_reexec = sidecar._reexec_sidecar(
+        workspace=str(tmp_path),
+        team="team-a",
+        tmux_window="dev:3",
+        tmux_window_id="@99",
+        server=_Server(),
+        busy_monitor=_Monitor(),
+    )
+
+    assert did_reexec is False
+    assert calls == []
+
+
+def test_sidecar_loop_releases_inherited_reexec_lock_after_socket_ready(monkeypatch, tmp_path):
+    calls: list[tuple] = []
+
+    class _Server:
+        def close(self):
+            calls.append(("server.close",))
+
+    monkeypatch.setenv(sidecar._SIDECAR_REEXEC_LOCK_ENV, "77")
+    monkeypatch.setattr(sidecar, "_open_server_socket", lambda workspace: calls.append(("open", workspace)) or _Server())
+    monkeypatch.setattr(sidecar, "_release_reexec_lock_fd", lambda fd: calls.append(("release", fd)))
+    monkeypatch.setattr(sidecar, "_cleanup_socket", lambda workspace: calls.append(("cleanup", workspace)))
+    monkeypatch.setattr(sidecar, "_is_tmux_window_alive", lambda _tmux_window_id: False)
+
+    sidecar._sidecar_loop(str(tmp_path), "team-a", "", "")
+
+    assert calls == [
+        ("open", str(tmp_path)),
+        ("release", 77),
+        ("release", None),
+        ("server.close",),
+        ("cleanup", str(tmp_path)),
+    ]
+    assert sidecar._SIDECAR_REEXEC_LOCK_ENV not in sidecar.os.environ

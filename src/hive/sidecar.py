@@ -39,6 +39,8 @@ IDLE_NOTIFY_THRESHOLD_SECONDS = 5.0
 IDLE_NOTIFY_MESSAGE = "Window idle 5s+ (all agents stopped). Return to review."
 IDLE_NOTIFY_MISSING_PRUNE_TICKS = 5
 NOTIFY_DEBUG_HEARTBEAT_SECONDS = 30.0
+SIDECAR_CODE_CHECK_SECONDS = 5.0
+_SIDECAR_REEXEC_LOCK_ENV = "HIVE_SIDECAR_REEXEC_LOCK_FD"
 OBSERVATION_TIMEOUT = 60.0
 POST_EXCEPTION_FOLLOWUP_TIMEOUT = 10.0
 SOCKET_READY_TIMEOUT = 2.0
@@ -68,6 +70,125 @@ def _compute_build_hash() -> str:
 
 
 SIDECAR_BUILD_HASH = _compute_build_hash()
+
+
+def _sidecar_reexec_argv(workspace: str, team: str, tmux_window: str, tmux_window_id: str) -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "hive.sidecar",
+        "--sidecar",
+        workspace,
+        team,
+        tmux_window,
+        tmux_window_id,
+    ]
+
+
+def _stale_disk_build_hash_for_reexec(
+    state: dict[str, Any],
+    *,
+    now: float,
+    pending_empty: bool,
+) -> str | None:
+    """Return a stable changed build hash that should trigger sidecar reexec."""
+    if not pending_empty:
+        return None
+
+    last_check = float(state.get("last_code_check_at", 0.0))
+    if now - last_check < SIDECAR_CODE_CHECK_SECONDS:
+        return None
+    state["last_code_check_at"] = now
+
+    disk_hash = _compute_build_hash()
+    if disk_hash == "unknown" or disk_hash == SIDECAR_BUILD_HASH:
+        state.pop("candidate_hash", None)
+        return None
+
+    if state.get("candidate_hash") == disk_hash:
+        return disk_hash
+    state["candidate_hash"] = disk_hash
+    return None
+
+
+def _release_reexec_lock_fd(lock_fd: int | None) -> None:
+    if lock_fd is None:
+        return
+    try:
+        import fcntl
+
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        os.close(lock_fd)
+    except OSError:
+        pass
+
+
+def _try_acquire_reexec_lock(workspace: str) -> int | None:
+    lock_path = _lock_path(workspace)
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    except OSError:
+        return None
+
+    try:
+        import fcntl
+
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        os.set_inheritable(lock_fd, True)
+    except OSError:
+        _release_reexec_lock_fd(lock_fd)
+        return None
+    return lock_fd
+
+
+def _take_reexec_lock_fd_from_env() -> int | None:
+    raw_fd = os.environ.pop(_SIDECAR_REEXEC_LOCK_ENV, "")
+    if not raw_fd:
+        return None
+    try:
+        return int(raw_fd)
+    except ValueError:
+        return None
+
+
+def _reexec_sidecar(
+    *,
+    workspace: str,
+    team: str,
+    tmux_window: str,
+    tmux_window_id: str,
+    server: socket.socket,
+    busy_monitor: Any,
+    on_reexec: Any = None,
+) -> bool:
+    lock_fd = _try_acquire_reexec_lock(workspace)
+    if lock_fd is None:
+        return False
+
+    previous_lock_env = os.environ.get(_SIDECAR_REEXEC_LOCK_ENV)
+    try:
+        os.environ[_SIDECAR_REEXEC_LOCK_ENV] = str(lock_fd)
+        if busy_monitor is not None:
+            busy_monitor.stop()
+        _set_output_busy_monitor(None)
+        server.close()
+        _cleanup_socket(workspace)
+        if on_reexec is not None:
+            on_reexec()
+        argv = _sidecar_reexec_argv(workspace, team, tmux_window, tmux_window_id)
+        os.execv(sys.executable, argv)
+    finally:
+        if previous_lock_env is None:
+            os.environ.pop(_SIDECAR_REEXEC_LOCK_ENV, None)
+        else:
+            os.environ[_SIDECAR_REEXEC_LOCK_ENV] = previous_lock_env
+        _release_reexec_lock_fd(lock_fd)
+    return True
+
 
 
 def _now_iso() -> str:
@@ -1751,6 +1872,7 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
     pending: dict[str, dict[str, Any]] = {}
     idle_notify: dict[str, dict[str, Any]] = {}
     notify_debug_state: dict[str, Any] = {}
+    code_reexec_state: dict[str, Any] = {}
     last_window_check = 0.0
     notify_debug.emit(
         workspace,
@@ -1760,7 +1882,10 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
         tmux_window_id=tmux_window_id,
         startedAt=sidecar_started_at,
     )
+    inherited_reexec_lock_fd = _take_reexec_lock_fd_from_env()
     server = _open_server_socket(workspace)
+    _release_reexec_lock_fd(inherited_reexec_lock_fd)
+    inherited_reexec_lock_fd = None
     session_target = (tmux_window.split(":", 1)[0] if ":" in tmux_window else tmux_window).strip()
     busy_monitor = tmux.ControlModeOutputMonitor(session_target) if session_target else None
     _set_output_busy_monitor(busy_monitor)
@@ -1777,6 +1902,33 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                 last_window_check = now
                 if not _is_tmux_window_alive(tmux_window_id):
                     return
+
+            stale_hash = _stale_disk_build_hash_for_reexec(
+                code_reexec_state,
+                now=now,
+                pending_empty=not pending,
+            )
+            if stale_hash:
+                def _emit_reexec() -> None:
+                    notify_debug.emit(
+                        workspace,
+                        "sidecar.reexec",
+                        team=team,
+                        tmux_window=tmux_window,
+                        tmux_window_id=tmux_window_id,
+                        oldHash=SIDECAR_BUILD_HASH,
+                        newHash=stale_hash,
+                    )
+
+                _reexec_sidecar(
+                    workspace=workspace,
+                    team=team,
+                    tmux_window=tmux_window,
+                    tmux_window_id=tmux_window_id,
+                    server=server,
+                    busy_monitor=busy_monitor,
+                    on_reexec=_emit_reexec,
+                )
 
             if not _serve_requests(
                 server=server,
@@ -1823,6 +1975,7 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                     continue
                 pending.pop(message_id, None)
     finally:
+        _release_reexec_lock_fd(inherited_reexec_lock_fd)
         if busy_monitor is not None:
             busy_monitor.stop()
         _set_output_busy_monitor(None)
