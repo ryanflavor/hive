@@ -6,11 +6,17 @@ WINDOW_B = "team-a:2"
 
 
 class _BusyMonitor:
-    def __init__(self, *busy_panes: str):
+    def __init__(self, *busy_panes: str, last_output_ages: dict[str, float] | None = None):
         self.busy_panes = set(busy_panes)
+        self.last_output_ages = last_output_ages or {}
 
     def is_busy(self, pane_id: str, *, threshold_seconds: float) -> bool:
+        if pane_id in self.last_output_ages:
+            return self.last_output_ages[pane_id] <= threshold_seconds
         return pane_id in self.busy_panes
+
+    def last_output_age(self, pane_id: str) -> float | None:
+        return self.last_output_ages.get(pane_id)
 
 
 def _setup(
@@ -357,6 +363,98 @@ def test_idle_notify_skips_and_clears_state_when_plugin_disabled(monkeypatch):
 
     assert calls == []
     assert state == {}
+
+
+def test_active_window_switch_does_not_rearm_for_seen_output(monkeypatch):
+    """Output the user already saw on the active window must not be treated
+    as fresh activity right after they switch away. Without the inactive_at
+    boundary check, the inactive-window branch reads ``is_busy=True`` (the
+    output is still within the 3s monitor threshold), rearms ``notified``,
+    and fires a spurious idle notification ~5s later.
+    """
+    other_window = "team-a:99"
+    pane_windows = {"%1": WINDOW}
+    calls = _setup(
+        monkeypatch,
+        panes=["%1"],
+        active_window=WINDOW,
+        pane_windows=pane_windows,
+    )
+    state: dict[str, dict[str, object]] = {}
+    debug_state: dict[str, object] = {}
+
+    # t=100: WINDOW is active and saw real output 0.5s ago.
+    monitor = _BusyMonitor(last_output_ages={"%1": 0.5})
+    sidecar._idle_notify_tick(
+        team_name="team-a", session_name="dev",
+        idle_notify=state, busy_monitor=monitor,
+        now=100.0, debug_state=debug_state,
+    )
+    assert state[WINDOW]["notified"] is True
+
+    # t=101: user switches to OTHER. Same output now 1.5s old; monitor still
+    # reports busy because it's within the 3s threshold.
+    monkeypatch.setattr("hive.tmux.get_most_recent_client_window", lambda _session: other_window)
+    monitor = _BusyMonitor(last_output_ages={"%1": 1.5})
+    sidecar._idle_notify_tick(
+        team_name="team-a", session_name="dev",
+        idle_notify=state, busy_monitor=monitor,
+        now=101.0, debug_state=debug_state,
+    )
+    assert state[WINDOW]["notified"] is True, "seen output must not rearm notified"
+
+    # t=106.5: 5s past last_busy_ts and beyond the busy threshold; no fire
+    # because the boundary check prevented the rearm above.
+    monitor = _BusyMonitor(last_output_ages={"%1": 6.5})
+    sidecar._idle_notify_tick(
+        team_name="team-a", session_name="dev",
+        idle_notify=state, busy_monitor=monitor,
+        now=106.5, debug_state=debug_state,
+    )
+    assert calls == []
+
+
+def test_active_window_switch_still_rearms_for_post_switch_output(monkeypatch):
+    """Dual of the regression above: real new output produced AFTER the
+    user switches away must still flag busy and rearm idle notify."""
+    other_window = "team-a:99"
+    pane_windows = {"%1": WINDOW}
+    calls = _setup(
+        monkeypatch,
+        panes=["%1"],
+        active_window=WINDOW,
+        pane_windows=pane_windows,
+    )
+    state: dict[str, dict[str, object]] = {}
+    debug_state: dict[str, object] = {}
+
+    # Active and quiet — set up baseline.
+    monitor = _BusyMonitor(last_output_ages={"%1": 5.0})
+    sidecar._idle_notify_tick(
+        team_name="team-a", session_name="dev",
+        idle_notify=state, busy_monitor=monitor,
+        now=100.0, debug_state=debug_state,
+    )
+
+    # User switches to OTHER at t=101. inactive_at[WINDOW] = 101.
+    monkeypatch.setattr("hive.tmux.get_most_recent_client_window", lambda _session: other_window)
+    monitor = _BusyMonitor(last_output_ages={"%1": 6.0})  # quiet, not busy
+    sidecar._idle_notify_tick(
+        team_name="team-a", session_name="dev",
+        idle_notify=state, busy_monitor=monitor,
+        now=101.0, debug_state=debug_state,
+    )
+
+    # t=104: claude emits brand-new output 0.5s old. Inactive_age=3.0,
+    # output_age=0.5 — fresh post-switch activity, must rearm.
+    monitor = _BusyMonitor(last_output_ages={"%1": 0.5})
+    sidecar._idle_notify_tick(
+        team_name="team-a", session_name="dev",
+        idle_notify=state, busy_monitor=monitor,
+        now=104.0, debug_state=debug_state,
+    )
+    assert state[WINDOW]["notified"] is False, "post-switch output must rearm"
+    assert state[WINDOW]["last_busy_pane"] == "%1"
 
 
 def test_idle_notify_agent_panes_filters_to_live_agent_roles(monkeypatch):

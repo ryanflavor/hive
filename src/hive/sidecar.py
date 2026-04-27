@@ -98,10 +98,30 @@ def _busy_output_payload(pane_id: str) -> dict[str, Any]:
     }
 
 
-def _is_output_busy(pane_id: str, monitor: Any) -> bool:
+def _is_output_busy(
+    pane_id: str,
+    monitor: Any,
+    *,
+    inactive_age: float | None = None,
+) -> bool:
+    """Return True when the pane has had visible output recently.
+
+    When ``inactive_age`` is given (window has been inactive for that many
+    seconds), ignore output that predates the inactive transition — the
+    user already saw it while the window was active. Without this check
+    the idle-notify state machine rearms on already-seen output and fires
+    a spurious notification ~5s after every window switch.
+    """
     if monitor is None:
         return False
-    return bool(monitor.is_busy(pane_id, threshold_seconds=BUSY_OUTPUT_THRESHOLD_SECONDS))
+    if not monitor.is_busy(pane_id, threshold_seconds=BUSY_OUTPUT_THRESHOLD_SECONDS):
+        return False
+    if inactive_age is None:
+        return True
+    output_age = monitor.last_output_age(pane_id)
+    if output_age is None:
+        return False
+    return output_age < inactive_age
 
 
 def _most_recent_output_pane(panes: list[str], monitor: Any) -> str:
@@ -1119,6 +1139,7 @@ def _idle_notify_tick(
         windows.setdefault(window_target, []).append(pane_id)
 
     prev_active = debug_state.get("active_window", "__init__")
+    inactive_at: dict[str, float] = debug_state.setdefault("inactive_at", {})
     if prev_active != active_window:
         notify_debug.emit(
             workspace,
@@ -1127,6 +1148,13 @@ def _idle_notify_tick(
             old=prev_active if prev_active != "__init__" else None,
             new=active_window or None,
         )
+        # Stamp the moment the previous active window became inactive so the
+        # busy check can ignore output that the user already saw while it was
+        # active. The newly-active window has no inactive boundary.
+        if prev_active and prev_active != "__init__":
+            inactive_at[prev_active] = now
+        if active_window:
+            inactive_at.pop(active_window, None)
         debug_state["active_window"] = active_window
 
     prev_keys = debug_state.get("windows_keys", "__init__")
@@ -1192,6 +1220,7 @@ def _idle_notify_tick(
             )
             idle_notify.pop(window_target, None)
             per_window.pop(window_target, None)
+            inactive_at.pop(window_target, None)
 
     for window_target in sorted(windows):
         panes = sorted(windows[window_target])
@@ -1273,7 +1302,12 @@ def _idle_notify_tick(
             )
             win_dbg["observed_token"] = None
 
-        busy_panes = [p for p in panes if _is_output_busy(p, busy_monitor)]
+        inactive_at_ts = inactive_at.get(window_target)
+        inactive_age = (now - inactive_at_ts) if inactive_at_ts is not None else None
+        busy_panes = [
+            p for p in panes
+            if _is_output_busy(p, busy_monitor, inactive_age=inactive_age)
+        ]
         prev_busy = bool(win_dbg.get("busy_observed", False))
         is_busy = bool(busy_panes)
         if busy_panes:
