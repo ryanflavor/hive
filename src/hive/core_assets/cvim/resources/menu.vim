@@ -40,15 +40,16 @@ endif
 " menu row changes (live preview).
 let s:main_winid = 0
 
+" Set to 1 in HiveCvimMenuPick when the user actually picks an entry.
+" HiveCvimMenuRestoreOnAbort (VimLeavePre) reads this to decide whether
+" the in-progress preview should be rolled back so the post-script's
+" ``cmp -s msg_file orig_file`` skips sendback. Covers any exit path
+" the popup callback doesn't see (``:q``, ``:qa!``, abrupt pane close).
+let s:selection_committed = 0
+
 function! HiveCvimMenuPick(id, result) abort
   if a:result < 1 || a:result > len(s:menu)
-    " Cancel (Esc). Restore msg_file = orig_file so the post-script's
-    " ``cmp -s`` finds them equal and skips sendback. Without this, a
-    " mid-navigation preview would leak into msg_file and look like a
-    " real edit.
-    if filereadable(s:orig_file)
-      call writefile(readfile(s:orig_file), s:msg_file)
-    endif
+    " Cancel (Esc). VimLeavePre rolls msg_file back from orig_file.
     silent quitall!
     return
   endif
@@ -63,8 +64,18 @@ function! HiveCvimMenuPick(id, result) abort
   call writefile(l:content, s:msg_file)
   call writefile([string(l:entry.offset)], s:offset_file)
   call writefile(['1'], s:selected_file)
+  let s:selection_committed = 1
   silent execute 'edit!'
   normal! gg
+endfunction
+
+function! HiveCvimMenuRestoreOnAbort() abort
+  if s:selection_committed
+    return
+  endif
+  if filereadable(s:orig_file)
+    call writefile(readfile(s:orig_file), s:msg_file)
+  endif
 endfunction
 
 function! HiveCvimSyncPreview(popup_winid) abort
@@ -118,4 +129,5 @@ endfunction
 augroup HiveCvimMenu
   autocmd!
   autocmd VimEnter * call HiveCvimMenuShow()
+  autocmd VimLeavePre * call HiveCvimMenuRestoreOnAbort()
 augroup END
