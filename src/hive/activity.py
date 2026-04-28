@@ -64,6 +64,13 @@ def _timestamp_at_or_after(value: str, baseline: str) -> bool:
 
 def _content_blocks(message: dict[str, Any]) -> list[dict[str, Any]]:
     content = message.get("content")
+    if isinstance(content, str):
+        # Anthropic legacy: ``message.content`` can be a plain string for
+        # user records typed straight into the CLI. Treat it as a single
+        # text block so downstream detectors (real_user_text, has_text)
+        # see it; otherwise turnPhase falls back to ``turn_closed`` and
+        # idle-notify mistakes a queued user prompt for an idle turn.
+        return [{"type": "text", "text": content}]
     if not isinstance(content, list):
         return []
     return [block for block in content if isinstance(block, dict)]

@@ -172,6 +172,43 @@ def test_probe_transcript_turn_phase_codex_task_close_is_safe(tmp_path):
     assert payload["turnPhase"] == "task_closed"
 
 
+def test_probe_transcript_turn_phase_claude_user_prompt_with_string_content_is_active(tmp_path):
+    """Anthropic legacy format: when a user types a prompt straight into
+    the CLI, ``message.content`` is a plain string (not a list of blocks).
+    Probe must still report ``user_prompt_pending`` so idle-notify doesn't
+    mistake a queued prompt awaiting reply for an idle turn."""
+    path = tmp_path / "claude-string-prompt.jsonl"
+    path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "system",
+                        "subtype": "turn_duration",
+                        "timestamp": "2026-04-28T11:00:00Z",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "user",
+                        "timestamp": "2026-04-28T11:11:39Z",
+                        "message": {
+                            "role": "user",
+                            "content": "调查一下为何只有 status bar 通知",
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    payload = probe_transcript_turn_phase("claude", path)
+
+    assert payload["turnPhase"] == "user_prompt_pending"
+    assert payload["phaseObservedAt"] == "2026-04-28T11:11:39Z"
+
+
 def test_probe_transcript_turn_phase_droid_assistant_text_stays_unknown(tmp_path):
     path = tmp_path / "droid.jsonl"
     path.write_text(
