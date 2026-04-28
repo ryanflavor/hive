@@ -24,6 +24,7 @@ from . import notify_ui
 from . import plugin_manager
 from . import skill_sync
 from . import tmux
+from .activity import ACTIVE_TURN_PHASES
 from .agent import AGENT_STARTUP_TIMEOUT, Agent
 from .agent_cli import AGENT_CLI_NAMES, anti_peer_cli, detect_profile_for_pane, family_for_pane, member_role_for_pane, normalize_command, peer_cli_for_family, resolve_peer_spawn, resolve_session_id_for_pane
 from .team import HIVE_HOME, LEAD_AGENT_NAME, Team, Terminal
@@ -1030,11 +1031,7 @@ def _maybe_route_busy_root_send(
         sender_owner = tmux.get_pane_option(sender_pane, "hive-owner") or ""
         if sender_owner and target_agent == sender_owner:
             return target_agent, {}
-    if not bool(runtime.get("busy")) and reason not in {
-        "user_prompt_pending",
-        "tool_result_pending_reply",
-        "tool_open",
-    }:
+    if not bool(runtime.get("busy")) and reason not in ACTIVE_TURN_PHASES:
         return target_agent, {}
 
     clone_name = _next_busy_fork_name(t, target_agent)

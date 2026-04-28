@@ -13,6 +13,20 @@ from .adapters.base import safe_json_loads
 _INITIAL_TAIL_BYTES = 8 * 1024
 _MAX_TAIL_BYTES = 128 * 1024
 
+# Phases that mean "the agent is in the middle of (or about to start) a turn":
+# - tool_open: assistant has opened a tool_use, no result yet
+# - tool_result_pending_reply: tool result arrived, assistant has not continued
+# - user_prompt_pending: user prompt arrived, assistant has not acknowledged
+# - input_backlog: unresolved queue enqueue is the newest decisive evidence
+#   (a new prompt is waiting in the queue for the assistant to pick up)
+# Used by both root-send active-turn fork routing and idle-notify fire suppression.
+ACTIVE_TURN_PHASES = frozenset({
+    "tool_open",
+    "tool_result_pending_reply",
+    "user_prompt_pending",
+    "input_backlog",
+})
+
 
 def _format_timestamp(value: datetime | None) -> str:
     if value is None:
@@ -190,29 +204,35 @@ def _assistant_has_text(message: dict[str, Any]) -> bool:
     return any(block.get("type") == "text" and str(block.get("text") or "").strip() for block in _content_blocks(message))
 
 
-def _probe_claude_turn_phase(records: list[dict[str, Any]]) -> dict[str, Any]:
-    tail = [_raw_record_summary(record) for record in records]
+def _claude_input_backlog_candidate(records: list[dict[str, Any]]) -> tuple[int, dict[str, Any]] | None:
     backlog = 0
-    for record in records:
+    latest_enqueue: tuple[int, dict[str, Any]] | None = None
+    for index, record in enumerate(records):
         if record.get("type") != "queue-operation":
             continue
         operation = str(record.get("operation") or "")
         if operation == "enqueue":
             backlog += 1
+            latest_enqueue = (index, record)
         elif operation in {"dequeue", "remove"} and backlog > 0:
             backlog -= 1
-    if backlog > 0:
-        queue_record = next(
-            (record for record in reversed(records) if record.get("type") == "queue-operation" and str(record.get("operation") or "") == "enqueue"),
-            records[-1] if records else {},
-        )
-        return _phase_payload(
-            reason="input_backlog",
-            observed_at=_raw_timestamp(queue_record),
-            evidence_tail=tail,
-        )
+    if backlog <= 0:
+        return None
+    return latest_enqueue
 
-    for record in reversed(records):
+
+def _probe_claude_turn_phase(records: list[dict[str, Any]]) -> dict[str, Any]:
+    tail = [_raw_record_summary(record) for record in records]
+    backlog_candidate = _claude_input_backlog_candidate(records)
+
+    for index, record in reversed(list(enumerate(records))):
+        if backlog_candidate is not None and index == backlog_candidate[0]:
+            queue_record = backlog_candidate[1]
+            return _phase_payload(
+                reason="input_backlog",
+                observed_at=_raw_timestamp(queue_record),
+                evidence_tail=tail,
+            )
         record_type = str(record.get("type") or "")
         if record_type == "system":
             subtype = str(record.get("subtype") or "")
@@ -447,4 +467,3 @@ def probe_transcript_turn_phase(
         reason="unknown_evidence",
         evidence_tail=[_raw_record_summary(record) for record in records],
     )
-

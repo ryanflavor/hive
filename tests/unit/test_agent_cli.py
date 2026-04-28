@@ -72,21 +72,24 @@ def test_resolve_session_id_for_pane_dispatches_to_adapter(monkeypatch):
     assert calls == ["%138"]
 
 
-def test_resolve_session_id_for_pane_resolves_newer_claude_project_session(monkeypatch, tmp_path):
+def test_resolve_session_id_for_pane_returns_pid_mapped_session(monkeypatch, tmp_path):
+    """Adapter is a pure PID mapping reader — newer jsonls in the same
+    project_dir belong to other panes (or other processes) and must not
+    override ``sessions/<pid>.json``."""
     sessions_dir = tmp_path / "sessions"
     projects_dir = tmp_path / "projects" / "-repo"
     sessions_dir.mkdir(parents=True)
     projects_dir.mkdir(parents=True)
     (sessions_dir / "42424.json").write_text(json.dumps({"sessionId": "sess-old"}))
 
-    stale = projects_dir / "sess-old.jsonl"
-    stale.write_text(json.dumps({"sessionId": "sess-old", "cwd": "/repo"}) + "\n")
-    fresh = projects_dir / "sess-new.jsonl"
-    fresh.write_text(json.dumps({"sessionId": "sess-new", "cwd": "/repo"}) + "\n")
-    stale_ns = 1_700_000_000_000_000_000
-    fresh_ns = stale_ns + 5_000
-    os.utime(stale, ns=(stale_ns, stale_ns))
-    os.utime(fresh, ns=(fresh_ns, fresh_ns))
+    own = projects_dir / "sess-old.jsonl"
+    own.write_text(json.dumps({"sessionId": "sess-old", "cwd": "/repo"}) + "\n")
+    other = projects_dir / "sess-other.jsonl"
+    other.write_text(json.dumps({"sessionId": "sess-other", "cwd": "/repo"}) + "\n")
+    own_ns = 1_700_000_000_000_000_000
+    other_ns = own_ns + 5_000
+    os.utime(own, ns=(own_ns, own_ns))
+    os.utime(other, ns=(other_ns, other_ns))
 
     monkeypatch.setenv("CLAUDE_HOME", str(tmp_path))
     monkeypatch.setattr("hive.agent_cli.tmux.get_pane_current_command", lambda _pane: "claude")
@@ -94,12 +97,11 @@ def test_resolve_session_id_for_pane_resolves_newer_claude_project_session(monke
     monkeypatch.setattr("hive.agent_cli.tmux.get_pane_tty", lambda _pane: "/dev/ttys001")
     monkeypatch.setattr("hive.agent_cli.tmux.list_tty_processes", lambda _tty: [])
     monkeypatch.setattr("hive.adapters.claude.tmux.get_pane_tty", lambda _pane: "/dev/ttys001")
-    monkeypatch.setattr("hive.adapters.claude.tmux.display_value", lambda _pane, _fmt: "/repo")
     monkeypatch.setattr("hive.adapters.claude.tmux.list_tty_processes", lambda _tty: [
         tmux.TTYProcessInfo(pid="42424", command="claude", argv="claude --verbose"),
     ])
 
-    assert agent_cli.resolve_session_id_for_pane("%138") == "sess-new"
+    assert agent_cli.resolve_session_id_for_pane("%138") == "sess-old"
 
 
 def test_resolve_session_id_for_pane_returns_none_when_no_profile(monkeypatch):

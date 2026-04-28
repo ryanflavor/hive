@@ -9,19 +9,25 @@ It exists to answer a narrow question:
 - Which events count as open/close/read signals in current code?
 
 It does not define tmux output activity. `busy` is documented separately in
-`docs/runtime-model.md` because `busy` does not come from transcript parsing.
+`docs/runtime-model.md`; `busy` is primarily an output-activity signal and
+uses transcript jsonl mtime only as a phantom-redraw gate, not as a primary
+source.
 
 ## Important Clarification
 
-Hive currently does **not** compute `busy` from transcript/JCL.
+`busy` has two source branches that are OR'd together:
 
-Current split:
+1. tmux control-mode output activity, gated by transcript jsonl mtime to
+   suppress TUI repaint phantoms
+2. transcript `turnPhase` ∈ active-turn set
+   (`tool_open` / `tool_result_pending_reply` / `user_prompt_pending` /
+   `input_backlog`)
 
-- `busy` comes from tmux control-mode output activity
-- `turnPhase` come from transcript/JCL
+The transcript layer therefore *can* drive `busy` directly when the
+turn-phase probe says the agent is mid-flight — branch 2 catches the
+streaming-gap case where the output branch alone would flap to false.
 
-So if someone remembers an earlier “JSONL busy” discussion, that was design
-reasoning, not the shipped public field.
+`turnPhase` itself comes from transcript/JCL parsing.
 
 ## Concepts
 
@@ -57,7 +63,7 @@ It reports a single token describing the transcript tail. Consumers choose their
 own subsets (see `docs/runtime-model.md`):
 
 - `tool_open` — hard-busy (tool_use open)
-- `input_backlog` — strategy-level busy (queue has unprocessed enqueues)
+- `input_backlog` — strategy-level busy (an unresolved queue enqueue is the newest decisive evidence)
 - `task_closed` / `turn_closed` — turn collapsed
 - `tool_result_pending_reply` — tool result observed, assistant hasn't continued
 - `user_prompt_pending` — user prompt observed, assistant hasn't acked
@@ -82,7 +88,7 @@ Hive expects Claude transcript records in JSONL form and looks at:
 - queue backlog from `queue-operation`
   - `enqueue` increments backlog
   - `dequeue` / `remove` decrement backlog
-  - backlog > 0 => `turnPhase=input_backlog`
+  - backlog > 0 and not superseded by later turn evidence => `turnPhase=input_backlog`
 - `assistant` with:
   - `stop_reason=tool_use`
   - or any `content[*].type == tool_use`
@@ -161,12 +167,15 @@ Hive treats Droid transcript as message-oriented JSONL and looks at:
 
 ## What Does Not Count
 
-The following do not count as transcript-derived `busy`:
+The following do not count as transcript-derived `busy` triggers:
 
-- any transcript tail heuristic on its own
+- any transcript tail heuristic outside the recognised `turnPhase` set
 - any single “there was output” observation
+- the transcript jsonl mtime alone — that's the phantom-redraw gate on
+  the output branch, not a standalone source
 
-That is why `busy` remains tmux-based rather than transcript-based.
+`busy=true` requires either the output branch (with mtime gate) or a
+`turnPhase` in the active-turn set; nothing else.
 
 ## Why Two Docs
 

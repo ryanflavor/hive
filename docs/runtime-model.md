@@ -42,7 +42,8 @@ Field:
 
 Question answered:
 
-- Has this pane produced tmux-visible output in the last 3 seconds?
+- Has this pane produced tmux-visible output in the last 3 seconds, and
+  is that output corroborated by recent transcript jsonl mtime advance?
 
 What it is good for:
 
@@ -78,21 +79,41 @@ What it is not:
 
 ### `busy`
 
-Source:
+Source — `busy=true` when **either** of two branches holds:
 
-- tmux control mode output stream
-- implementation: `tmux.ControlModeOutputMonitor`
+1. **Output branch** — tmux control-mode output stream
+   (`tmux.ControlModeOutputMonitor`) reported visible output within the
+   last `3s`, AND the agent transcript jsonl mtime advanced within the
+   same window. The mtime check is a phantom-redraw gate that suppresses
+   TUI frame-redraw spikes (Ink / ratatui re-printing on-screen characters
+   during idle).
+2. **Active-turn branch** — transcript ``turnPhase`` ∈
+   :data:`activity.ACTIVE_TURN_PHASES` (``tool_open`` /
+   ``tool_result_pending_reply`` / ``user_prompt_pending`` /
+   ``input_backlog``). This branch catches the streaming-gap case where
+   tmux visible-text payloads space out beyond `3s` mid-tool, and it
+   bypasses the output branch's gates: an agent in mid-turn is busy
+   regardless of monitor activity or transcript mtime.
 
-Current rule:
+Combined into ``sidecar._pane_is_truly_busy``.
 
-- `busy=true` when Hive observed pane output within the last `3s`
-- `busy=false` otherwise
+Fail-open: if the transcript path can't be resolved (non-agent pane, no
+session yet, stat error), the output branch returns true on monitor
+activity alone — idle-notify must never silently disappear for panes the
+gate can't introspect.
 
 Notes:
 
-- `busy` is output-based
-- it is intentionally fast and shallow
-- it does not come from transcript/JCL parsing
+- the active-turn branch is what makes idle-notify safe under streaming
+  agents (Claude/Codex tool loops): the public `busy` field tracks
+  "agent in mid-turn", not just "tmux output in the last 3s"
+- the active-turn set is shared with root-send fork routing
+  (cli.py active_turn_fork) so both layers agree on what counts as
+  "in-flight"
+- known limitation: a CLI that emits visible output for longer than the
+  threshold without writing the transcript jsonl AND whose `turnPhase`
+  the probe can't recognise can be gated as a false negative; the
+  threshold is intentionally conservative
 
 ### `inputState`
 
@@ -177,7 +198,7 @@ Each row maps a transcript/JCL observation to the emitted `turnPhase` value.
 ### Claude
 
 - `tool_open` — `tool_use` open
-- `input_backlog` — queue backlog observed
+- `input_backlog` — unresolved queue backlog is the newest decisive evidence
 - `turn_closed` — `turn_duration` or `stop_hook_summary` with `preventedContinuation=false`
 - `tool_result_pending_reply` — tool result arrived but assistant has not clearly continued
 - `user_prompt_pending` — real user prompt pending
@@ -228,11 +249,12 @@ limits.
 ## Active-Turn Fork Routing
 
 When a root send's target is in an active turn — `busy=true`, or
-`turnPhase ∈ {tool_open, user_prompt_pending, tool_result_pending_reply}`
+`turnPhase ∈ {tool_open, user_prompt_pending, tool_result_pending_reply, input_backlog}`
 even when `busy=false` — Hive automatically forks a clone pane (named
 `<target>-c1`, `-c2`, ...) and routes the message there. The clone is
 spawned with a boundary system block; the original target is never
-interrupted.
+interrupted. The same set blocks idle-notify fire so a pane mid-flight
+(or with a queued prompt about to be picked up) is not treated as idle.
 
 Three bypass exemptions skip the fork and deliver to the original target
 directly:

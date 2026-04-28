@@ -50,7 +50,9 @@ SEND_REQUEST_TIMEOUT = SEND_GRACE_TIMEOUT + 2.0
 SIDECAR_API_VERSION = 5
 _FINALIZE_PENDING = "__finalize__"
 BUSY_OUTPUT_THRESHOLD_SECONDS = 3.0
+_TRANSCRIPT_PATH_CACHE_TTL = 60.0
 _OUTPUT_BUSY_MONITOR = None
+_TRANSCRIPT_PATH_CACHE: dict[str, tuple[str, float]] = {}
 _AGENT_NOTIFY_ROLES = {"agent", "lead", "orchestrator"}
 
 
@@ -210,13 +212,137 @@ def _set_output_busy_monitor(monitor: Any) -> None:
     _OUTPUT_BUSY_MONITOR = monitor
 
 
+def _resolve_transcript_path_cached(pane_id: str, *, force: bool = False) -> str | None:
+    """Resolve the agent transcript jsonl path for a pane, with TTL cache.
+
+    Returns the absolute path string, or None when the pane has no
+    associated transcript (non-agent pane, no resolved session, etc.).
+    The cache is keyed by pane_id with a coarse TTL so the underlying
+    rglob in ``adapter.find_session_file`` does not fire on every tick.
+
+    When ``force=True`` the cache is bypassed and re-populated. Callers use
+    this to recover from a session switch (e.g. ``/new``) where the cached
+    path points at the previous session's jsonl that no longer advances.
+    """
+    now = time.monotonic()
+    if not force:
+        cached = _TRANSCRIPT_PATH_CACHE.get(pane_id)
+        if cached is not None and now < cached[1]:
+            return cached[0] or None
+
+    from . import adapters, tmux as tmux_mod
+
+    path_str = ""
+    if pane_id and tmux_mod.is_pane_alive(pane_id):
+        profile = detect_profile_for_pane(pane_id)
+        if profile:
+            adapter = adapters.get(profile.name)
+            if adapter:
+                sid = adapter.resolve_current_session_id(pane_id)
+                if sid:
+                    cwd_hint = tmux_mod.display_value(pane_id, "#{pane_current_path}")
+                    transcript = adapter.find_session_file(sid, cwd=cwd_hint)
+                    if transcript:
+                        path_str = str(transcript)
+
+    _TRANSCRIPT_PATH_CACHE[pane_id] = (path_str, now + _TRANSCRIPT_PATH_CACHE_TTL)
+    return path_str or None
+
+
+def _check_mtime_within(path: str, threshold_seconds: float) -> bool | None:
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return None
+    return (time.time() - mtime) <= threshold_seconds
+
+
+def _transcript_progressed_recently(pane_id: str, threshold_seconds: float) -> bool | None:
+    """Three-state phantom-redraw gate based on transcript jsonl mtime.
+
+    Returns:
+        True  — jsonl mtime advanced within ``threshold_seconds`` (real activity)
+        False — jsonl mtime is older than threshold (phantom TUI redraw)
+        None  — path could not be determined or stat failed; caller falls back
+                to the underlying control-mode signal so notify never silently
+                disappears for panes we can't introspect.
+
+    On a stale cache hit the path is re-resolved once to recover from in-pane
+    session switches (Claude ``/new``): if the new resolution yields a fresh
+    path the gate returns True so real new-session output isn't suppressed.
+    """
+    path = _resolve_transcript_path_cached(pane_id)
+    if not path:
+        return None
+    progressed = _check_mtime_within(path, threshold_seconds)
+    if progressed is not False:
+        return progressed
+    # Stale: cached path may be from a previous session. Re-resolve once.
+    fresh = _resolve_transcript_path_cached(pane_id, force=True)
+    if not fresh or fresh == path:
+        return False
+    return _check_mtime_within(fresh, threshold_seconds)
+
+
+def _pane_active_turn_phase(pane_id: str) -> str | None:
+    """Probe transcript jsonl tail and return the current ``turnPhase`` token.
+
+    Returns None when the transcript path can't be resolved or the probe
+    fails — callers should treat that as "phase unknown" and not gate.
+    """
+    from .activity import probe_transcript_turn_phase
+
+    path = _resolve_transcript_path_cached(pane_id)
+    if not path:
+        return None
+    profile = detect_profile_for_pane(pane_id)
+    if not profile:
+        return None
+    try:
+        result = probe_transcript_turn_phase(profile.name, Path(path))
+    except Exception:
+        return None
+    if not isinstance(result, dict):
+        return None
+    phase = result.get("turnPhase")
+    return str(phase) if phase else None
+
+
+def _pane_in_active_turn(pane_id: str) -> bool:
+    """Helper: pane's transcript turnPhase is in :data:`ACTIVE_TURN_PHASES`."""
+    from .activity import ACTIVE_TURN_PHASES
+
+    return _pane_active_turn_phase(pane_id) in ACTIVE_TURN_PHASES
+
+
+def _pane_is_truly_busy(pane_id: str, monitor: Any) -> bool:
+    """Public ``busy`` signal: true when the agent is in mid-turn.
+
+    OR of two signal sources:
+        A. tmux control-mode reports recent visible output (with phantom-redraw
+           gate via transcript jsonl mtime).
+        B. transcript turnPhase is in :data:`activity.ACTIVE_TURN_PHASES`.
+
+    Source B catches the streaming-gap case where tmux visible-text payloads
+    happen to space out beyond ``BUSY_OUTPUT_THRESHOLD_SECONDS`` mid-tool.
+    """
+    if not pane_id:
+        return False
+
+    monitor_busy = (
+        monitor is not None
+        and monitor.is_busy(pane_id, threshold_seconds=BUSY_OUTPUT_THRESHOLD_SECONDS)
+    )
+    if monitor_busy:
+        progressed = _transcript_progressed_recently(pane_id, BUSY_OUTPUT_THRESHOLD_SECONDS)
+        if progressed is not False:
+            return True
+
+    return _pane_in_active_turn(pane_id)
+
+
 def _busy_output_payload(pane_id: str) -> dict[str, Any]:
-    monitor = _OUTPUT_BUSY_MONITOR
-    if monitor is None or not pane_id:
-        return {"busy": False}
-    return {
-        "busy": bool(monitor.is_busy(pane_id, threshold_seconds=BUSY_OUTPUT_THRESHOLD_SECONDS)),
-    }
+    return {"busy": _pane_is_truly_busy(pane_id, _OUTPUT_BUSY_MONITOR)}
 
 
 def _is_output_busy(
@@ -225,24 +351,32 @@ def _is_output_busy(
     *,
     inactive_age: float | None = None,
 ) -> bool:
-    """Return True when the pane has had visible output recently.
+    """idle-notify variant of :func:`_pane_is_truly_busy`.
 
-    When ``inactive_age`` is given (window has been inactive for that many
-    seconds), ignore output that predates the inactive transition — the
-    user already saw it while the window was active. Without this check
-    the idle-notify state machine rearms on already-seen output and fires
-    a spurious notification ~5s after every window switch.
+    Same OR signal as ``_pane_is_truly_busy`` but the monitor source is
+    additionally clamped by an ``inactive_age`` sub-gate: when the window
+    has been inactive for ``inactive_age`` seconds, ignore monitor output
+    that predates that transition (the user already saw it while the
+    window was active — without the clamp, idle-notify rearms ~5s after
+    every window switch).
+
+    The active-turn (turnPhase) source intentionally **bypasses**
+    ``inactive_age``: an agent mid-tool is busy regardless of when the
+    user last looked at the window.
     """
-    if monitor is None:
+    if not pane_id:
         return False
-    if not monitor.is_busy(pane_id, threshold_seconds=BUSY_OUTPUT_THRESHOLD_SECONDS):
-        return False
-    if inactive_age is None:
-        return True
-    output_age = monitor.last_output_age(pane_id)
-    if output_age is None:
-        return False
-    return output_age < inactive_age
+
+    if monitor is not None and monitor.is_busy(pane_id, threshold_seconds=BUSY_OUTPUT_THRESHOLD_SECONDS):
+        progressed = _transcript_progressed_recently(pane_id, BUSY_OUTPUT_THRESHOLD_SECONDS)
+        if progressed is not False:
+            if inactive_age is None:
+                return True
+            output_age = monitor.last_output_age(pane_id)
+            if output_age is not None and output_age < inactive_age:
+                return True
+
+    return _pane_in_active_turn(pane_id)
 
 
 def _most_recent_output_pane(panes: list[str], monitor: Any) -> str:
@@ -1472,6 +1606,7 @@ def _idle_notify_tick(
         last_busy_ts = float(record.get("last_busy_ts", now))
         if now - last_busy_ts >= IDLE_NOTIFY_THRESHOLD_SECONDS and not bool(record.get("notified", False)):
             target_pane = _idle_notify_target_pane(panes, record, busy_monitor)
+            phase_snapshot = {p: _pane_active_turn_phase(p) for p in panes}
             notify_debug.emit(
                 workspace,
                 "fire.attempt",
@@ -1479,6 +1614,7 @@ def _idle_notify_tick(
                 window=window_target,
                 target_pane=target_pane,
                 idle_seconds=now - last_busy_ts,
+                pane_phases=phase_snapshot,
                 state_before={
                     "notified": record.get("notified"),
                     "seen_since_fire": record.get("seen_since_fire"),

@@ -1,17 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime
 import json
 
-from hive.activity import (
-
-    probe_transcript_turn_phase,
-)
-from hive.adapters.base import Message, MessagePart
-
-
-def _ts(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+from hive.activity import probe_transcript_turn_phase
 
 
 def test_probe_transcript_turn_phase_claude_turn_closed_is_safe(tmp_path):
@@ -56,8 +47,42 @@ def test_probe_transcript_turn_phase_claude_turn_closed_is_safe(tmp_path):
     assert payload["phaseObservedAt"] == "2026-04-16T05:00:02Z"
 
 
-def test_probe_transcript_turn_phase_claude_backlog_is_unsafe(tmp_path):
+def test_probe_transcript_turn_phase_claude_latest_backlog_is_unsafe(tmp_path):
     path = tmp_path / "claude-backlog.jsonl"
+    path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "timestamp": "2026-04-16T05:00:00Z",
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "done"}],
+                            "stop_reason": "end_turn",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "queue-operation",
+                        "operation": "enqueue",
+                        "timestamp": "2026-04-16T05:00:01Z",
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    payload = probe_transcript_turn_phase("claude", path)
+
+    assert payload["turnPhase"] == "input_backlog"
+    assert payload["phaseObservedAt"] == "2026-04-16T05:00:01Z"
+
+
+def test_probe_transcript_turn_phase_claude_later_turn_close_overrides_backlog(tmp_path):
+    path = tmp_path / "claude-stale-backlog.jsonl"
     path.write_text(
         "\n".join(
             [
@@ -74,9 +99,16 @@ def test_probe_transcript_turn_phase_claude_backlog_is_unsafe(tmp_path):
                         "timestamp": "2026-04-16T05:00:01Z",
                         "message": {
                             "role": "assistant",
-                            "content": [{"type": "tool_use", "name": "Bash"}],
-                            "stop_reason": "tool_use",
+                            "content": [{"type": "text", "text": "done"}],
+                            "stop_reason": "end_turn",
                         },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "system",
+                        "subtype": "turn_duration",
+                        "timestamp": "2026-04-16T05:00:02Z",
                     }
                 ),
             ]
@@ -86,7 +118,8 @@ def test_probe_transcript_turn_phase_claude_backlog_is_unsafe(tmp_path):
 
     payload = probe_transcript_turn_phase("claude", path)
 
-    assert payload["turnPhase"] == "input_backlog"
+    assert payload["turnPhase"] == "turn_closed"
+    assert payload["phaseObservedAt"] == "2026-04-16T05:00:02Z"
 
 
 def test_probe_transcript_turn_phase_claude_tool_result_is_unknown(tmp_path):
@@ -158,5 +191,3 @@ def test_probe_transcript_turn_phase_droid_assistant_text_stays_unknown(tmp_path
     payload = probe_transcript_turn_phase("droid", path)
 
     assert payload["turnPhase"] == "assistant_text_idle"
-
-

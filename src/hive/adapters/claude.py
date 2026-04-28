@@ -40,9 +40,14 @@ class ClaudeAdapter:
     # --- discovery ---
 
     def resolve_current_session_id(self, pane_id: str) -> str | None:
+        # ``sessions/<pid>.json`` is the PID-bound source of truth Claude
+        # writes for the active session of each running process. Adapter
+        # stays a pure mapping reader: any "did /new happen?" handling
+        # belongs in the sidecar cache layer (stale-bypass force resolve),
+        # not in a cross-PID jsonl-mtime heuristic that confuses panes
+        # sharing a project_dir.
         sessions_dir = _claude_home() / "sessions"
         tty = tmux.get_pane_tty(pane_id) or ""
-        cwd = tmux.display_value(pane_id, "#{pane_current_path}") or None
         for process in tmux.list_tty_processes(tty):
             if not _is_claude_process(process.command, process.argv):
                 continue
@@ -51,13 +56,6 @@ class ClaudeAdapter:
                 continue
             session_id = str_or_none(payload.get("sessionId"))
             if session_id:
-                newer_session_id = self._resolve_newer_project_session_id(
-                    session_id,
-                    cwd=cwd,
-                    pane_id=pane_id,
-                )
-                if newer_session_id:
-                    return newer_session_id
                 return session_id
         return None
 
@@ -164,68 +162,6 @@ class ClaudeAdapter:
             raw=payload,
         )
 
-    def _resolve_newer_project_session_id(
-        self,
-        session_id: str,
-        *,
-        cwd: str | None = None,
-        pane_id: str = "",
-    ) -> str | None:
-        current_path = self.find_session_file(session_id, cwd=cwd)
-        if current_path is None:
-            return None
-
-        current_mtime_ns = safe_mtime_ns(current_path)
-        if current_mtime_ns < 0:
-            return None
-
-        project_dir = current_path.parent
-        try:
-            candidates = sorted(project_dir.glob("*.jsonl"), key=safe_mtime_ns, reverse=True)
-        except OSError:
-            return None
-
-        for candidate in candidates:
-            if candidate == current_path:
-                continue
-            if safe_mtime_ns(candidate) <= current_mtime_ns:
-                break
-            meta = self.read_meta(candidate)
-            if meta and meta.session_id:
-                if pane_id and self._session_claimed_by_other_window_pane(
-                    pane_id,
-                    meta.session_id,
-                ):
-                    return None
-                return meta.session_id
-        return None
-
-    def _session_claimed_by_other_window_pane(self, pane_id: str, session_id: str) -> bool:
-        window_target = tmux.get_pane_window_target(pane_id) or ""
-        if not window_target:
-            return False
-        for pane in tmux.list_panes_full(window_target):
-            if pane.pane_id == pane_id:
-                continue
-            other_session_id = self._read_pid_mapped_session_id(pane.pane_id)
-            if other_session_id == session_id:
-                return True
-        return False
-
-    def _read_pid_mapped_session_id(self, pane_id: str) -> str | None:
-        sessions_dir = _claude_home() / "sessions"
-        tty = tmux.get_pane_tty(pane_id) or ""
-        for process in tmux.list_tty_processes(tty):
-            if not _is_claude_process(process.command, process.argv):
-                continue
-            payload = _read_json_file(sessions_dir / f"{process.pid}.json")
-            if not payload:
-                continue
-            session_id = str_or_none(payload.get("sessionId"))
-            if session_id:
-                return session_id
-        return None
-
 
 _META_SCAN_LIMIT = 20
 
@@ -308,11 +244,3 @@ def _is_claude_process(command: str, argv: str) -> bool:
 
 def _cwd_slug(cwd: str) -> str:
     return cwd.replace("/", "-")
-
-
-def safe_mtime_ns(path: Path) -> int:
-    try:
-        return path.stat().st_mtime_ns
-    except OSError:
-        return -1
-
