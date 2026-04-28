@@ -55,7 +55,7 @@ def test_spawn_loads_specified_skill(monkeypatch):
         skill="code-review",
     )
 
-    assert "/code-review" in calls
+    assert "/code-review" in calls[0]
     # Should NOT send hive bootstrap message
     assert not any("hive teammate" in c for c in calls)
 
@@ -110,8 +110,10 @@ def test_spawn_hive_loads_skill_and_sends_prompt(monkeypatch):
         prompt="Please check your inbox.",
     )
 
-    assert "/hive" in calls
-    assert "Please check your inbox." in calls
+    # Skill activation + user prompt are passed as the [prompt] positional arg.
+    startup_cmd = calls[0]
+    assert "/hive" in startup_cmd
+    assert "Please check your inbox." in startup_cmd
 
 
 def test_spawn_codex_hive_loads_skill_and_sends_prompt(monkeypatch):

@@ -236,23 +236,18 @@ class Agent:
             elif cli == "codex":
                 cmd_parts = ["exec", _shell_escape(bin_path), "-c", "check_for_update_on_startup=false", "fork", _shell_escape(session_id)]
 
-        # Codex accepts a [PROMPT] positional arg (also on `codex fork`). Pass
-        # the skill activation (and optional user prompt) here so codex auto-
-        # submits at startup — bypasses the TUI keystroke race that drops
-        # Enter when typed/pressed before the skill picker chip has rendered.
-        codex_initial_prompt = ""
-        if cli == "codex":
-            if skill and skill != "none":
-                _skill_profile = profile
-                codex_initial_prompt = (
-                    _skill_profile.skill_cmd.format(name=skill) if _skill_profile else f"/{skill}"
-                )
-            if prompt:
-                codex_initial_prompt = (
-                    f"{codex_initial_prompt}\n\n{prompt}" if codex_initial_prompt else prompt
-                )
-            if codex_initial_prompt:
-                cmd_parts.append(_shell_escape(codex_initial_prompt))
+        # All three CLIs accept a positional [prompt] arg (codex/claude/droid,
+        # also on resume/fork). Pass skill activation + optional user prompt
+        # here so the CLI auto-submits at startup, bypassing TUI keystroke
+        # injection entirely (avoids the codex picker race and any analogous
+        # races for claude/droid).
+        initial_prompt = ""
+        if skill and skill != "none":
+            initial_prompt = profile.skill_cmd.format(name=skill) if profile else f"/{skill}"
+        if prompt:
+            initial_prompt = f"{initial_prompt}\n\n{prompt}" if initial_prompt else prompt
+        if initial_prompt:
+            cmd_parts.append(_shell_escape(initial_prompt))
 
         env_parts: list[str] = []
         if extra_env:
@@ -286,15 +281,9 @@ class Agent:
 
             time.sleep(1)
 
-            if cli == "codex":
-                # Skill + user prompt were embedded in the [PROMPT] arg.
-                if skill == "hive":
-                    skill_sync.maybe_warn_hive_skill_drift(cli)
-            else:
-                if skill and skill != "none":
-                    agent.load_skill(skill)
-                if prompt:
-                    _submit_interactive_text(pane_id, prompt, cli)
+            # Skill + user prompt were embedded in the [prompt] arg above.
+            if skill == "hive":
+                skill_sync.maybe_warn_hive_skill_drift(cli)
 
         return agent
 
