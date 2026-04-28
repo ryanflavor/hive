@@ -355,6 +355,58 @@ def test_reexec_sidecar_skips_when_reexec_lock_is_busy(monkeypatch, tmp_path):
     assert calls == []
 
 
+def test_cleanup_socket_if_owner_skips_foreign_owner(monkeypatch, tmp_path):
+    calls: list[tuple] = []
+    sidecar._write_sidecar_owner(
+        str(tmp_path),
+        pid=os.getpid() + 1000,
+        started_at="2026-04-28T00:00:00Z",
+        token="foreign",
+    )
+    monkeypatch.setattr(sidecar, "_cleanup_socket", lambda workspace: calls.append(("cleanup", workspace)))
+
+    sidecar._cleanup_socket_if_owner(str(tmp_path), "mine")
+
+    assert calls == []
+
+
+def test_sidecar_loop_retires_orphan_before_idle_tick(monkeypatch, tmp_path):
+    calls: list[tuple] = []
+    real_write_owner = sidecar._write_sidecar_owner
+
+    class _Server:
+        def close(self):
+            calls.append(("server.close",))
+
+    def _write_then_steal(workspace: str, *, pid: int, started_at: str, token: str) -> None:
+        real_write_owner(workspace, pid=pid, started_at=started_at, token=token)
+        real_write_owner(workspace, pid=pid + 1, started_at=started_at, token="foreign")
+
+    def _emit(_workspace, event, **kwargs):
+        calls.append(("emit", event, kwargs))
+
+    monkeypatch.setattr(sidecar, "_open_server_socket", lambda workspace: calls.append(("open", workspace)) or _Server())
+    monkeypatch.setattr(sidecar, "_write_sidecar_owner", _write_then_steal)
+    monkeypatch.setattr(sidecar, "_release_reexec_lock_fd", lambda fd: calls.append(("release", fd)))
+    monkeypatch.setattr(sidecar, "_is_tmux_window_alive", lambda _tmux_window_id: True)
+    monkeypatch.setattr(sidecar, "_stale_disk_build_hash_for_reexec", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sidecar, "_serve_requests", lambda **_kwargs: calls.append(("serve",)) or True)
+    monkeypatch.setattr(sidecar, "_idle_notify_tick", lambda **_kwargs: calls.append(("idle",)))
+    monkeypatch.setattr(sidecar, "_cleanup_socket", lambda workspace: calls.append(("cleanup", workspace)))
+    monkeypatch.setattr("hive.notify_debug.emit", _emit)
+
+    sidecar._sidecar_loop(str(tmp_path), "team-a", "dev:3", "@99")
+
+    retire_events = [call for call in calls if call[0] == "emit" and call[1] == "sidecar.retire_orphan"]
+    assert retire_events
+    assert retire_events[0][2]["currentPid"] == os.getpid()
+    assert retire_events[0][2]["socketPid"] == os.getpid() + 1
+    assert ("idle",) not in calls
+    assert ("serve",) not in calls
+    assert ("cleanup", str(tmp_path)) not in calls
+    assert ("server.close",) in calls
+
+
 def test_sidecar_loop_releases_inherited_reexec_lock_after_socket_ready(monkeypatch, tmp_path):
     calls: list[tuple] = []
 

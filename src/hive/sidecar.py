@@ -40,6 +40,7 @@ IDLE_NOTIFY_MESSAGE = "Window idle 5s+ (all agents stopped). Return to review."
 IDLE_NOTIFY_MISSING_PRUNE_TICKS = 5
 NOTIFY_DEBUG_HEARTBEAT_SECONDS = 30.0
 SIDECAR_CODE_CHECK_SECONDS = 5.0
+SIDECAR_OWNER_CHECK_SECONDS = 5.0
 _SIDECAR_REEXEC_LOCK_ENV = "HIVE_SIDECAR_REEXEC_LOCK_FD"
 OBSERVATION_TIMEOUT = 60.0
 POST_EXCEPTION_FOLLOWUP_TIMEOUT = 10.0
@@ -423,6 +424,81 @@ def _socket_path(workspace: str) -> Path:
 
 def _lock_path(workspace: str) -> Path:
     return _run_dir(workspace) / "sidecar.lock"
+
+
+def _owner_path(workspace: str) -> Path:
+    return _run_dir(workspace) / "sidecar.owner.json"
+
+
+def _write_sidecar_owner(
+    workspace: str,
+    *,
+    pid: int,
+    started_at: str,
+    token: str,
+) -> None:
+    path = _owner_path(workspace)
+    tmp = path.with_name(f"{path.name}.{pid}.tmp")
+    payload = {
+        "pid": pid,
+        "startedAt": started_at,
+        "token": token,
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(payload, ensure_ascii=False))
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def _read_sidecar_owner(workspace: str) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(_owner_path(workspace).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _owner_matches_current_process(owner: dict[str, Any] | None, owner_token: str) -> bool:
+    if not owner:
+        return True
+    try:
+        owner_pid = int(owner.get("pid", 0))
+    except (TypeError, ValueError):
+        return True
+    return owner_pid == os.getpid() and owner.get("token") == owner_token
+
+
+def _foreign_owner_pid(workspace: str, owner_token: str) -> int | None:
+    owner = _read_sidecar_owner(workspace)
+    if _owner_matches_current_process(owner, owner_token):
+        return None
+    try:
+        return int(owner.get("pid", 0)) if owner else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _cleanup_owner_if_current(workspace: str, owner_token: str) -> None:
+    owner = _read_sidecar_owner(workspace)
+    if not owner or not _owner_matches_current_process(owner, owner_token):
+        return
+    try:
+        _owner_path(workspace).unlink()
+    except OSError:
+        pass
+
+
+def _cleanup_socket_if_owner(workspace: str, owner_token: str) -> None:
+    owner = _read_sidecar_owner(workspace)
+    if owner and not _owner_matches_current_process(owner, owner_token):
+        return
+    _cleanup_socket(workspace)
+    _cleanup_owner_if_current(workspace, owner_token)
 
 
 def _write_observation(
@@ -2010,6 +2086,8 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
     notify_debug_state: dict[str, Any] = {}
     code_reexec_state: dict[str, Any] = {}
     last_window_check = 0.0
+    last_owner_check = 0.0
+    owner_token = f"{os.getpid()}:{time.monotonic_ns()}"
     notify_debug.emit(
         workspace,
         "sidecar.start",
@@ -2020,6 +2098,12 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
     )
     inherited_reexec_lock_fd = _take_reexec_lock_fd_from_env()
     server = _open_server_socket(workspace)
+    _write_sidecar_owner(
+        workspace,
+        pid=os.getpid(),
+        started_at=sidecar_started_at,
+        token=owner_token,
+    )
     _release_reexec_lock_fd(inherited_reexec_lock_fd)
     inherited_reexec_lock_fd = None
     session_target = (tmux_window.split(":", 1)[0] if ":" in tmux_window else tmux_window).strip()
@@ -2037,6 +2121,21 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
             if now - last_window_check >= 30.0:
                 last_window_check = now
                 if not _is_tmux_window_alive(tmux_window_id):
+                    return
+
+            if now - last_owner_check >= SIDECAR_OWNER_CHECK_SECONDS:
+                last_owner_check = now
+                foreign_pid = _foreign_owner_pid(workspace, owner_token)
+                if foreign_pid is not None:
+                    notify_debug.emit(
+                        workspace,
+                        "sidecar.retire_orphan",
+                        team=team,
+                        tmux_window=tmux_window,
+                        tmux_window_id=tmux_window_id,
+                        currentPid=os.getpid(),
+                        socketPid=foreign_pid,
+                    )
                     return
 
             stale_hash = _stale_disk_build_hash_for_reexec(
@@ -2119,7 +2218,7 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
             server.close()
         except OSError:
             pass
-        _cleanup_socket(workspace)
+        _cleanup_socket_if_owner(workspace, owner_token)
 
 
 def _check_pending(record: dict[str, Any]) -> str | None:
