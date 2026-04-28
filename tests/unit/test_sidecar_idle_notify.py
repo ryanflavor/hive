@@ -49,7 +49,7 @@ def _setup(
     monkeypatch.setattr(
         sidecar.notify_ui,
         "clear_stale_notify",
-        lambda window_target, agent_panes, **_kwargs: cleanups_sink.append((window_target, tuple(agent_panes))),
+        lambda window_target, agent_panes, **kwargs: cleanups_sink.append((window_target, tuple(agent_panes), kwargs)),
     )
     monkeypatch.setattr("hive.plugin_manager.is_plugin_enabled", lambda name: plugin_enabled)
     return calls
@@ -278,7 +278,7 @@ def test_idle_notify_existing_window_flash_keeps_rebuilt_state_locked(monkeypatc
 
 
 def test_idle_notify_clears_notify_when_target_window_is_selected(monkeypatch):
-    stale_cleanups: list[tuple[str, tuple[str, ...]]] = []
+    stale_cleanups: list[tuple[str, tuple[str, ...], dict[str, object]]] = []
     calls = _setup(
         monkeypatch,
         active_window=WINDOW,
@@ -292,13 +292,24 @@ def test_idle_notify_clears_notify_when_target_window_is_selected(monkeypatch):
     _tick(state, _BusyMonitor(), now=100.0)
 
     assert calls == []
-    assert stale_cleanups == [(WINDOW, ("%1",))]
+    assert stale_cleanups == [
+        (
+            WINDOW,
+            ("%1",),
+            {
+                "token": "%1:selected-fire",
+                "remove_attention": False,
+                "source": "sidecar.active_window",
+                "workspace": "",
+            },
+        )
+    ]
     assert state[WINDOW]["notified"] is True
     assert state[WINDOW]["seen_since_fire"] is True
 
 
 def test_idle_notify_reconciles_selected_notify_even_when_plugin_disabled(monkeypatch):
-    stale_cleanups: list[tuple[str, tuple[str, ...]]] = []
+    stale_cleanups: list[tuple[str, tuple[str, ...], dict[str, object]]] = []
     calls = _setup(
         monkeypatch,
         active_window=WINDOW,
@@ -311,7 +322,18 @@ def test_idle_notify_reconciles_selected_notify_even_when_plugin_disabled(monkey
     _tick(state, _BusyMonitor(), now=100.0)
 
     assert calls == []
-    assert stale_cleanups == [(WINDOW, ("%1",))]
+    assert stale_cleanups == [
+        (
+            WINDOW,
+            ("%1",),
+            {
+                "token": "%1:selected-fire",
+                "remove_attention": False,
+                "source": "sidecar.active_window",
+                "workspace": "",
+            },
+        )
+    ]
     assert state == {}
 
 

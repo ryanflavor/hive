@@ -1515,6 +1515,7 @@ def _idle_notify_tick(
                 active_window,
                 sorted(windows[active_window]),
                 token=token,
+                remove_attention=False,
                 source="sidecar.active_window",
                 workspace=workspace,
             )
