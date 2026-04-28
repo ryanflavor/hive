@@ -123,11 +123,13 @@ def test_spawn_codex_hive_loads_skill_and_sends_prompt(monkeypatch):
         prompt="Please check your inbox.", cli="codex",
     )
 
-    assert "$hive" in calls
-    assert "Please check your inbox." in calls
-    # 4 Enters: initial `cd ... && exec codex`; skill load is 2 Enters for
-    # codex (picker select + submit); then user prompt.
-    assert calls.count("<Enter>") == 4
+    # Skill activation + user prompt are passed as the [PROMPT] positional
+    # arg (avoids TUI keystroke race against the codex skill picker).
+    startup_cmd = calls[0]
+    assert "$hive" in startup_cmd
+    assert "Please check your inbox." in startup_cmd
+    # Only the initial `cd ... && exec codex` Enter — no follow-up TUI inject.
+    assert calls.count("<Enter>") == 1
 
 
 def test_load_skill_sends_slash_command(monkeypatch):

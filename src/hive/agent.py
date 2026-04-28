@@ -236,6 +236,24 @@ class Agent:
             elif cli == "codex":
                 cmd_parts = ["exec", _shell_escape(bin_path), "-c", "check_for_update_on_startup=false", "fork", _shell_escape(session_id)]
 
+        # Codex accepts a [PROMPT] positional arg (also on `codex fork`). Pass
+        # the skill activation (and optional user prompt) here so codex auto-
+        # submits at startup — bypasses the TUI keystroke race that drops
+        # Enter when typed/pressed before the skill picker chip has rendered.
+        codex_initial_prompt = ""
+        if cli == "codex":
+            if skill and skill != "none":
+                _skill_profile = profile
+                codex_initial_prompt = (
+                    _skill_profile.skill_cmd.format(name=skill) if _skill_profile else f"/{skill}"
+                )
+            if prompt:
+                codex_initial_prompt = (
+                    f"{codex_initial_prompt}\n\n{prompt}" if codex_initial_prompt else prompt
+                )
+            if codex_initial_prompt:
+                cmd_parts.append(_shell_escape(codex_initial_prompt))
+
         env_parts: list[str] = []
         if extra_env:
             for k, v in extra_env.items():
@@ -268,11 +286,15 @@ class Agent:
 
             time.sleep(1)
 
-            if skill and skill != "none":
-                agent.load_skill(skill)
-
-            if prompt:
-                _submit_interactive_text(pane_id, prompt, cli)
+            if cli == "codex":
+                # Skill + user prompt were embedded in the [PROMPT] arg.
+                if skill == "hive":
+                    skill_sync.maybe_warn_hive_skill_drift(cli)
+            else:
+                if skill and skill != "none":
+                    agent.load_skill(skill)
+                if prompt:
+                    _submit_interactive_text(pane_id, prompt, cli)
 
         return agent
 
