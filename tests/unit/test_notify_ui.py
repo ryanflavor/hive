@@ -158,7 +158,7 @@ def test_show_window_flash_renames_sets_reverse_bold_and_hook(monkeypatch):
 
     notify_ui.show_window_flash("Agent finished", "%9", "dev:1", "dev", agent_name="orch")
 
-    assert rename_calls == [("dev:1", "[!] orch · dev")]
+    assert rename_calls == [("dev:1", "dev · 🤖 orch")]
     token_value = [v for (_, opt, v) in option_calls if opt == "@hive-notify-token"][0]
     assert token_value.startswith("%9:")
     assert pane_option_calls == [("%9", "hive-notify-active", token_value)]
@@ -195,7 +195,7 @@ def test_show_window_flash_can_skip_arrival_animation(monkeypatch):
     )
 
     token_value = [v for (_, opt, v) in option_calls if opt == "@hive-notify-token"][0]
-    assert rename_calls == [("dev:1", "[!] orch · dev")]
+    assert rename_calls == [("dev:1", "dev · 🤖 orch")]
     assert token_value.startswith("%9:")
     assert pane_option_calls == []
     assert attention_args == []
@@ -208,18 +208,18 @@ def test_show_window_flash_without_agent_name_uses_bare_flag(monkeypatch):
 
     notify_ui.show_window_flash("Agent finished", "%9", "dev:1", "dev")
 
-    assert rename_calls == [("dev:1", "[!] dev")]
+    assert rename_calls == [("dev:1", "dev · 🤖")]
 
 
 def test_double_notify_preserves_original_and_does_not_rewrite_original_option(monkeypatch):
     rename_calls, option_calls, _, _, _ = _mock_show_flash_side_effects(monkeypatch)
 
     notify_ui.show_window_flash("m1", "%9", "dev:1", "dev", agent_name="orch")
-    notify_ui.show_window_flash("m2", "%9", "dev:1", "[!] orch · dev", agent_name="orch")
+    notify_ui.show_window_flash("m2", "%9", "dev:1", "dev · 🤖 orch", agent_name="orch")
 
     assert rename_calls == [
-        ("dev:1", "[!] orch · dev"),
-        ("dev:1", "[!] orch · dev"),
+        ("dev:1", "dev · 🤖 orch"),
+        ("dev:1", "dev · 🤖 orch"),
     ]
     original_writes = [v for (_, opt, v) in option_calls if opt == "@hive-notify-original-name"]
     assert original_writes == ["dev"]

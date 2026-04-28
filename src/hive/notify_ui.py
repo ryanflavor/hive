@@ -28,6 +28,7 @@ ATTENTION_SCRIPT_OPTION = "@hive-notify-attention"
 ATTENTION_SCRIPT_KEY = "hive-notify-attention"
 PANE_NOTIFY_ACTIVE_KEY = "hive-notify-active"
 FLASH_STYLE = "reverse,bold"
+NOTIFY_BADGE = "🤖"
 # Use one stable high-index hook so each notify refreshes the same fast-path
 # instead of installing per-notify hook/script pairs that can go stale.
 SELECT_HOOK_NAME = "after-select-window[900001]"
@@ -445,8 +446,7 @@ def show_window_flash(
         original = window_name
         tmux.set_window_option(window_target, ORIGINAL_NAME_OPTION, original)
 
-    body = f"{agent_name} · {original}" if agent_name else original
-    flash_name = f"[!] {body}"
+    flash_name = f"{original} · {NOTIFY_BADGE} {agent_name}" if agent_name else f"{original} · {NOTIFY_BADGE}"
     tmux.rename_window(window_target, flash_name)
 
     hook_idx = int(time.time() * 1000) % 1_000_000_000
