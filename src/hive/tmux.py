@@ -547,6 +547,13 @@ def enable_pane_border_status(target: str) -> None:
     ], check=False)
 
 
+def configure_hive_window(target: str) -> None:
+    """Apply tmux window options expected for Hive-managed panes."""
+    enable_pane_border_status(target)
+    set_window_option(target, "monitor-activity", "off")
+    set_window_option(target, "monitor-bell", "off")
+
+
 def set_window_option(target: str, option: str, value: str) -> None:
     _run(["set-window-option", "-t", target, option, value], check=False)
 

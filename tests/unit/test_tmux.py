@@ -280,6 +280,25 @@ def test_enable_pane_border_status_uses_hive_member_format(monkeypatch):
     assert "#[fg=colour220]#[bold][!]" in tmux._HIVE_PANE_BORDER_FORMAT
 
 
+def test_configure_hive_window_disables_native_tmux_alerts(monkeypatch):
+    calls = []
+
+    def _fake_run(args, check=False, timeout=5):
+        calls.append(tuple(args))
+        return subprocess.CompletedProcess(["tmux", *args], 0, "", "")
+
+    monkeypatch.setattr("hive.tmux._run", _fake_run)
+
+    tmux.configure_hive_window("dev:1")
+
+    assert calls == [
+        ("set-window-option", "-t", "dev:1", "pane-border-status", "top"),
+        ("set-window-option", "-t", "dev:1", "pane-border-format", tmux._HIVE_PANE_BORDER_FORMAT),
+        ("set-window-option", "-t", "dev:1", "monitor-activity", "off"),
+        ("set-window-option", "-t", "dev:1", "monitor-bell", "off"),
+    ]
+
+
 def test_parse_control_mode_output_pane_matches_output_notifications():
     assert tmux.parse_control_mode_output_pane("%output %2772 hello") == "%2772"
     assert tmux.parse_control_mode_output_pane("%extended-output %2773 12 : world") == "%2773"

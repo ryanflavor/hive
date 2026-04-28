@@ -29,6 +29,8 @@ def test_team_create_inside_tmux_tags_lead_and_detects_session(configure_hive_ho
     assert team.tmux_window_id == "@0"
     assert tagged == [("%7", "agent", "orch", "team-a")]
     assert borders == ["dev:0"]
+    assert _tmux.get_window_option("dev:0", "monitor-activity") == "off"
+    assert _tmux.get_window_option("dev:0", "monitor-bell") == "off"
 
 
 def test_team_create_rejects_outside_tmux(configure_hive_home):
@@ -311,7 +313,7 @@ def test_team_spawn_portrait_window_applies_even_vertical(configure_hive_home, m
 
     assert ("layout", "dev:1", "even-vertical") in layouts
     # Portrait must not set main-pane-width.
-    assert not any(call[0] == "opt" for call in layouts)
+    assert not any(call[0] == "opt" and call[1][1] == "main-pane-width" for call in layouts)
     # Pre-spawn split should also follow portrait orientation (vertical = False).
     assert spawned[0]["split_horizontal"] is False
 

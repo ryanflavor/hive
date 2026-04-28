@@ -2539,6 +2539,7 @@ def gang_init_cmd(peer_cli: str | None, gang_name: str | None):
     tmux.set_window_option(gang_window, "@hive-workspace", t.workspace or ws)
     tmux.set_window_option(gang_window, "@hive-gang-name", gang_name)
     tmux.set_window_option(gang_window, "@hive-gang-base", str(range_base))
+    tmux.configure_hive_window(gang_window)
     if t.description:
         tmux.set_window_option(gang_window, "@hive-desc", t.description)
     tmux.set_window_option(gang_window, "@hive-created", str(t.created_at or time.time()))
@@ -2785,6 +2786,7 @@ def gang_spawn_peer_cmd(feature_id: str, task_artifact: str, val_artifact: str):
     tmux.set_window_option(peer_window, "@hive-workspace", workspace)
     tmux.set_window_option(peer_window, "@hive-gang-name", gang_name)
     tmux.set_window_option(peer_window, "@hive-created", str(time.time()))
+    tmux.configure_hive_window(peer_window)
 
     peer_team = Team(
         name=peer_team_name,
