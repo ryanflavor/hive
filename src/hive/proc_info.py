@@ -1,6 +1,6 @@
 """Native process introspection helpers.
 
-The Darwin implementation uses ``proc_pidinfo`` directly so callers can
+Darwin uses ``proc_pidinfo`` and Linux uses ``/proc/<pid>/fd`` so callers can
 inspect short-lived open file handles without paying ``lsof`` process-spawn
 latency on the hot path.
 """
@@ -8,8 +8,10 @@ latency on the hot path.
 from __future__ import annotations
 
 import ctypes
+import os
 import sys
 from functools import lru_cache
+from pathlib import Path
 
 
 class ProcInfoError(RuntimeError):
@@ -27,6 +29,8 @@ PROC_PIDLISTFD_SIZE = 8
 VNODEPATHINFO_SIZE = 1200
 VNODEPATHINFO_PATH_OFFSET = 176
 MAXPATHLEN = 1024
+PROC_ROOT = Path("/proc")
+LINUX_DELETED_SUFFIX = " (deleted)"
 
 
 class _ProcFdInfo(ctypes.Structure):
@@ -115,10 +119,56 @@ def _vnode_path(pid: int, fd: int, libproc: ctypes.CDLL) -> str:
     return _extract_c_path(bytearray(buffer))
 
 
-def list_open_files(pid: int | str) -> list[str]:
-    """Return vnode-backed file paths currently held open by *pid*.
+def _list_open_files_darwin(pid: int) -> list[str]:
+    libproc = _libproc()
+    paths: list[str] = []
+    seen: set[str] = set()
+    for fd_info in _list_fds(pid, libproc):
+        if fd_info.proc_fdtype != PROX_FDTYPE_VNODE:
+            continue
+        path = _vnode_path(pid, int(fd_info.proc_fd), libproc)
+        if path and path.startswith("/") and path not in seen:
+            seen.add(path)
+            paths.append(path)
+    return paths
 
-    Raises ``ProcInfoUnavailable`` on non-Darwin platforms so callers can fall
+
+def _list_open_files_linux(pid: int) -> list[str]:
+    fd_dir = PROC_ROOT / str(pid) / "fd"
+    try:
+        entries = sorted(fd_dir.iterdir(), key=lambda path: path.name)
+    except FileNotFoundError:
+        return []
+    except PermissionError as exc:
+        raise ProcInfoError(f"cannot inspect /proc fd entries for pid {pid}: {exc}") from exc
+    except OSError as exc:
+        raise ProcInfoError(f"cannot inspect /proc fd entries for pid {pid}: {exc}") from exc
+
+    paths: list[str] = []
+    seen: set[str] = set()
+    for entry in entries:
+        try:
+            target = os.readlink(entry)
+        except FileNotFoundError:
+            continue
+        except PermissionError as exc:
+            raise ProcInfoError(f"cannot inspect fd {entry.name} for pid {pid}: {exc}") from exc
+        except OSError:
+            continue
+        if not target.startswith("/"):
+            continue
+        if target.endswith(LINUX_DELETED_SUFFIX):
+            continue
+        if target not in seen:
+            seen.add(target)
+            paths.append(target)
+    return paths
+
+
+def list_open_files(pid: int | str) -> list[str]:
+    """Return file paths currently held open by *pid*.
+
+    Raises ``ProcInfoUnavailable`` on unsupported platforms so callers can fall
     back to portable tools such as ``lsof``.
     """
 
@@ -129,14 +179,8 @@ def list_open_files(pid: int | str) -> list[str]:
     if pid_int <= 0:
         raise ProcInfoError(f"invalid pid: {pid_int}")
 
-    libproc = _libproc()
-    paths: list[str] = []
-    seen: set[str] = set()
-    for fd_info in _list_fds(pid_int, libproc):
-        if fd_info.proc_fdtype != PROX_FDTYPE_VNODE:
-            continue
-        path = _vnode_path(pid_int, int(fd_info.proc_fd), libproc)
-        if path and path.startswith("/") and path not in seen:
-            seen.add(path)
-            paths.append(path)
-    return paths
+    if sys.platform == "darwin":
+        return _list_open_files_darwin(pid_int)
+    if sys.platform.startswith("linux"):
+        return _list_open_files_linux(pid_int)
+    raise ProcInfoUnavailable(f"native process introspection is unavailable on {sys.platform}")
