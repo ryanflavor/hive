@@ -314,6 +314,25 @@ def test_resolve_transcript_path_for_hive_pane_uses_runtime_snapshot(monkeypatch
     ) == str(transcript)
 
 
+def test_resolve_hive_runtime_session_id_rejects_stale_snapshot(monkeypatch):
+    shared = _import_shared()
+
+    monkeypatch.setattr("hive.tmux.display_value", lambda _pane_id, _fmt: "/tmp/ws")
+    monkeypatch.setattr(
+        "hive.sidecar.request_runtime_snapshot",
+        lambda workspace, *, pane_id: {
+            "ok": True,
+            "pane": pane_id,
+            "snapshot": {
+                "sessionId": "sid-old",
+                "_sessionIdFresh": False,
+            },
+        },
+    )
+
+    assert shared._resolve_hive_runtime_session_id("%42") == (True, None)
+
+
 def test_resolve_transcript_path_for_non_droid_pane_returns_none_without_resume(monkeypatch, tmp_path):
     shared = _import_shared()
 

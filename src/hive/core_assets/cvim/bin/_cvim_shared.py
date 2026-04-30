@@ -57,6 +57,8 @@ def _resolve_hive_runtime_session_id(pane_id: str) -> tuple[bool, str | None]:
         snapshot = payload.get("snapshot")
         if not isinstance(snapshot, dict):
             return True, None
+        if snapshot.get("_sessionIdFresh") is False:
+            return True, None
         session_id = snapshot.get("sessionId")
         if isinstance(session_id, str) and session_id and session_id != "unresolved":
             return True, session_id

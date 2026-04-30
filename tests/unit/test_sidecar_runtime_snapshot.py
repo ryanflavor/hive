@@ -41,10 +41,51 @@ def test_runtime_snapshot_tick_keeps_previous_value_on_miss(monkeypatch):
     previous = store.update_session_id("%1", "sid-old", source="fd", observed_at=9.0)
     monkeypatch.setattr(sidecar, "_probe_session_id_from_open_files", lambda _pane_id, _cli_name, **_kwargs: None)
     monkeypatch.setattr(sidecar, "_probe_session_id_from_pidfile", lambda _pane_id, _cli_name: None)
+    monkeypatch.setattr(sidecar, "_pane_has_recent_output", lambda _pane_id: False)
 
     sidecar._runtime_snapshot_tick("team-x", store=store, now=10.0)
 
     assert store.get("%1") == previous
+
+
+def test_runtime_snapshot_tick_marks_previous_value_stale_on_recent_output_miss(monkeypatch):
+    _patch_team(monkeypatch)
+    store = RuntimeSnapshotStore()
+    store.update_session_id("%1", "sid-old", source="fd", observed_at=9.0)
+    monkeypatch.setattr(sidecar, "_probe_session_id_from_open_files", lambda _pane_id, _cli_name, **_kwargs: None)
+    monkeypatch.setattr(
+        sidecar,
+        "_probe_session_id_from_pidfile",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("pidfile should not refresh an existing snapshot")),
+    )
+    monkeypatch.setattr(sidecar, "_pane_has_recent_output", lambda _pane_id: True)
+
+    sidecar._runtime_snapshot_tick("team-x", store=store, now=10.0)
+
+    snapshot = store.get("%1")
+    assert snapshot is not None
+    assert snapshot.sessionId.value == "sid-old"
+    assert snapshot.sessionId.is_fresh(now=10.0) is False
+
+
+def test_runtime_snapshot_tick_refreshes_stale_snapshot_from_fd(monkeypatch):
+    _patch_team(monkeypatch)
+    store = RuntimeSnapshotStore()
+    store.update_session_id("%1", "sid-old", source="fd", observed_at=9.0)
+    store.mark_session_stale("%1", observed_at=10.0)
+    monkeypatch.setattr(
+        sidecar,
+        "_probe_session_id_from_open_files",
+        lambda pane_id, cli_name, **_kwargs: "sid-new" if (pane_id, cli_name) == ("%1", "claude") else None,
+    )
+    monkeypatch.setattr(sidecar, "_pane_has_recent_output", lambda _pane_id: False)
+
+    sidecar._runtime_snapshot_tick("team-x", store=store, now=11.0)
+
+    snapshot = store.get("%1")
+    assert snapshot is not None
+    assert snapshot.sessionId.value == "sid-new"
+    assert snapshot.sessionId.is_fresh(now=11.0) is True
 
 
 def test_probe_session_id_filters_process_profile(monkeypatch, tmp_path):
@@ -103,6 +144,21 @@ def test_probe_session_id_samples_until_short_lived_fd_appears(monkeypatch, tmp_
     assert calls["count"] == 2
 
 
+def test_probe_session_id_ignores_unexpected_proc_info_error(monkeypatch):
+    monkeypatch.setattr("hive.tmux.get_pane_tty", lambda _pane_id: "/dev/ttys001")
+    monkeypatch.setattr(
+        "hive.tmux.list_tty_processes",
+        lambda _tty: [tmux.TTYProcessInfo(pid="222", command="claude", argv="claude --verbose")],
+    )
+    monkeypatch.setattr(
+        proc_info,
+        "list_open_files",
+        lambda _pid: (_ for _ in ()).throw(RuntimeError("native provider bug")),
+    )
+
+    assert sidecar._probe_session_id_from_open_files("%1", "claude") is None
+
+
 def test_runtime_snapshot_tick_uses_short_window_for_missing_claude(monkeypatch):
     _patch_team(monkeypatch)
     store = RuntimeSnapshotStore()
@@ -138,6 +194,7 @@ def test_runtime_snapshot_tick_does_not_overwrite_existing_snapshot_with_pidfile
     store = RuntimeSnapshotStore()
     previous = store.update_session_id("%1", "sid-fd", source="fd", observed_at=9.0)
     monkeypatch.setattr(sidecar, "_probe_session_id_from_open_files", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sidecar, "_pane_has_recent_output", lambda _pane_id: False)
     monkeypatch.setattr(
         sidecar,
         "_probe_session_id_from_pidfile",
@@ -191,6 +248,19 @@ def test_runtime_snapshot_payload_reads_store_without_live_probe(monkeypatch):
     assert payload["snapshot"]["_sessionIdSource"] == "fd"
 
 
+def test_runtime_snapshot_payload_reports_stale_snapshot(monkeypatch):
+    store = RuntimeSnapshotStore()
+    store.update_session_id("%1", "sid-old", source="fd", observed_at=10.0)
+    store.mark_session_stale("%1", observed_at=11.0)
+    monkeypatch.setattr(sidecar, "_RUNTIME_SNAPSHOTS", store)
+
+    payload = sidecar._runtime_snapshot_payload("%1")
+
+    assert payload["ok"] is True
+    assert payload["snapshot"]["sessionId"] == "sid-old"
+    assert payload["snapshot"]["_sessionIdFresh"] is False
+
+
 def test_runtime_snapshot_payload_returns_none_when_snapshot_missing(monkeypatch):
     monkeypatch.setattr(sidecar, "_RUNTIME_SNAPSHOTS", RuntimeSnapshotStore())
 
@@ -199,3 +269,38 @@ def test_runtime_snapshot_payload_returns_none_when_snapshot_missing(monkeypatch
         "pane": "%1",
         "snapshot": None,
     }
+
+
+def test_agent_runtime_payload_does_not_consume_stale_snapshot_or_pidfile(monkeypatch):
+    store = RuntimeSnapshotStore()
+    store.update_session_id("%1", "sid-old", source="fd", observed_at=10.0)
+    stale = store.mark_session_stale("%1", observed_at=11.0)
+    assert stale is not None
+
+    fake_profile = SimpleNamespace(name="claude")
+
+    class FakeAdapter:
+        def resolve_current_session_id(self, pane_id: str) -> str | None:
+            assert pane_id == "%1"
+            return None
+
+        def find_session_file(self, session_id: str, *, cwd: str | None = None):
+            raise AssertionError("stale session should not be resolved")
+
+    monkeypatch.setattr("hive.tmux.is_pane_alive", lambda _pane_id: True)
+    monkeypatch.setattr(sidecar, "_busy_output_payload", lambda _pane_id: {"busy": False})
+    monkeypatch.setattr(sidecar, "detect_profile_for_pane", lambda _pane_id: fake_profile)
+    monkeypatch.setattr("hive.agent_cli.resolve_model_for_pane", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr("hive.adapters.get", lambda name: FakeAdapter() if name == "claude" else None)
+    monkeypatch.setattr(sidecar, "_probe_session_id_from_open_files", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        sidecar,
+        "_probe_session_id_from_pidfile",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("stale snapshot should not fall back to pidfile")),
+    )
+
+    runtime = sidecar._agent_runtime_payload("%1", runtime_snapshot=stale)
+
+    assert runtime["sessionId"] == "unresolved"
+    assert runtime["inputState"] == "unknown"
+    assert runtime["inputReason"] == "no_session"

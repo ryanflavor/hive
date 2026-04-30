@@ -273,7 +273,7 @@ def _probe_session_id_from_open_files(
         for process in processes:
             try:
                 open_files = proc_info.list_open_files(process.pid)
-            except proc_info.ProcInfoError:
+            except Exception:
                 continue
             for fpath in open_files:
                 session_id = _session_id_from_open_file(cli_name, fpath)
@@ -323,8 +323,11 @@ def _runtime_snapshot_tick(
         if not _requires_tick_session_capture(cli_name):
             continue
         snapshot = snapshot_store.get(pane_id)
+        recent_output = _pane_has_recent_output(pane_id)
         should_sample = cli_name == "claude" and (
-            snapshot is None or _pane_has_recent_output(pane_id)
+            snapshot is None
+            or not snapshot.sessionId.is_fresh(now=observed_at)
+            or recent_output
         )
         session_id = _probe_session_id_from_open_files(
             pane_id,
@@ -342,6 +345,8 @@ def _runtime_snapshot_tick(
                 source=source,
                 observed_at=observed_at,
             )
+        elif snapshot is not None and recent_output:
+            snapshot_store.mark_session_stale(pane_id, observed_at=observed_at)
 
 
 def _resolve_transcript_path_cached(pane_id: str, *, force: bool = False) -> str | None:
@@ -1460,7 +1465,11 @@ def _agent_runtime_payload(
         runtime["inputReason"] = "no_session"
         return runtime
 
-    if runtime_snapshot is not None and runtime_snapshot.sessionId.value:
+    if (
+        runtime_snapshot is not None
+        and runtime_snapshot.sessionId.value
+        and runtime_snapshot.sessionId.is_fresh()
+    ):
         runtime.update(runtime_snapshot.to_runtime_fields())
         session_id = str(runtime_snapshot.sessionId.value)
     else:
@@ -1478,7 +1487,7 @@ def _agent_runtime_payload(
         if not session_id:
             session_id = adapter.resolve_current_session_id(pane_id)
             source = "adapter" if session_id else ""
-        if not session_id:
+        if not session_id and runtime_snapshot is None:
             session_id = _probe_session_id_from_pidfile(pane_id, profile.name)
             source = "pidfile"
         runtime["sessionId"] = session_id or "unresolved"
