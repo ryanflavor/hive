@@ -332,7 +332,7 @@ def _runtime_snapshot_tick(
             duration_s=RUNTIME_SESSION_PROBE_WINDOW_SECONDS if should_sample else 0.0,
         )
         source = "fd"
-        if not session_id:
+        if not session_id and snapshot is None:
             session_id = _probe_session_id_from_pidfile(pane_id, cli_name)
             source = "pidfile"
         if session_id:
@@ -899,6 +899,18 @@ def request_team_runtime(
     return _request_sidecar(
         workspace,
         {"action": "team-runtime", "team": team},
+        timeout=SOCKET_READY_TIMEOUT,
+    )
+
+
+def request_runtime_snapshot(
+    workspace: str,
+    *,
+    pane_id: str,
+) -> dict[str, Any] | None:
+    return _request_sidecar(
+        workspace,
+        {"action": "runtime-snapshot", "pane": pane_id},
         timeout=SOCKET_READY_TIMEOUT,
     )
 
@@ -1571,6 +1583,17 @@ def _team_runtime_payload(team_name: str) -> dict[str, Any]:
     return payload
 
 
+def _runtime_snapshot_payload(pane_id: str) -> dict[str, Any]:
+    if not pane_id:
+        return {"ok": False, "error": "pane required"}
+    snapshot = _RUNTIME_SNAPSHOTS.get(pane_id)
+    return {
+        "ok": True,
+        "pane": pane_id,
+        "snapshot": snapshot.to_runtime_fields() if snapshot is not None else None,
+    }
+
+
 def _team_member_bindings(team_name: str) -> dict[str, dict[str, Any]]:
     from .team import Team
     from .agent_cli import member_role_for_pane
@@ -2160,6 +2183,12 @@ def _handle_request(
     if action == "team-runtime":
         try:
             response = _team_runtime_payload(str(request.get("team") or team))
+        except Exception as exc:
+            response = {"ok": False, "error": str(exc)}
+        return response, True
+    if action == "runtime-snapshot":
+        try:
+            response = _runtime_snapshot_payload(str(request.get("pane") or ""))
         except Exception as exc:
             response = {"ok": False, "error": str(exc)}
         return response, True

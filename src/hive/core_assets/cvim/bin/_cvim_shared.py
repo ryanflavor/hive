@@ -38,6 +38,57 @@ def _detect_profile_for_pane(pane_id: str):
     return detect_profile_for_pane(pane_id)
 
 
+def _resolve_hive_runtime_session_id(pane_id: str) -> tuple[bool, str | None]:
+    try:
+        from hive import tmux
+        from hive.sidecar import request_runtime_snapshot
+    except Exception:
+        return False, None
+
+    try:
+        workspace = tmux.display_value(pane_id, "#{@hive-workspace}") or ""
+    except Exception:
+        return False, None
+    if not workspace:
+        return False, None
+
+    try:
+        payload = request_runtime_snapshot(workspace, pane_id=pane_id) or {}
+        snapshot = payload.get("snapshot")
+        if not isinstance(snapshot, dict):
+            return True, None
+        session_id = snapshot.get("sessionId")
+        if isinstance(session_id, str) and session_id and session_id != "unresolved":
+            return True, session_id
+    except Exception:
+        return True, None
+    return True, None
+
+
+def _resolve_claude_pidfile_session_id(pane_id: str, cwd: str) -> str | None:
+    try:
+        from hive import tmux
+        from hive.adapters.claude import _is_claude_process, resolve_session_id_from_pidfile
+    except Exception:
+        return None
+
+    try:
+        tty = tmux.get_pane_tty(pane_id) or ""
+        processes = tmux.list_tty_processes(tty)
+    except Exception:
+        return None
+    for process in processes:
+        if not _is_claude_process(process.command, process.argv):
+            continue
+        try:
+            session_id = resolve_session_id_from_pidfile(process.pid, cwd=cwd)
+        except Exception:
+            session_id = None
+        if session_id:
+            return session_id
+    return None
+
+
 def iter_candidate_files(path: str):
     seen: set[str] = set()
     root = sessions_root()
@@ -387,10 +438,14 @@ def resolve_transcript_path_for_pane(
         if profile is not None:
             adapter = _get_adapter(profile.name)
             if adapter is not None:
-                try:
-                    session_id = adapter.resolve_current_session_id(pane_id)
-                except Exception:
-                    session_id = None
+                hive_managed, session_id = _resolve_hive_runtime_session_id(pane_id)
+                if not hive_managed:
+                    try:
+                        session_id = adapter.resolve_current_session_id(pane_id)
+                    except Exception:
+                        session_id = None
+                    if not session_id and profile.name == "claude":
+                        session_id = _resolve_claude_pidfile_session_id(pane_id, cwd)
                 if session_id:
                     try:
                         transcript_path = adapter.find_session_file(session_id, cwd=cwd)

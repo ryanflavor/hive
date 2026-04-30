@@ -214,7 +214,7 @@ def test_claude_validated_pidfile_returns_session_when_transcript_is_current(mon
     projects_dir.mkdir(parents=True)
     (sessions_dir / "43434.json").write_text(json.dumps({
         "sessionId": "sess-idle",
-        "updatedAt": 1_700_000_000_000,
+        "updatedAt": 1_700_000_120_000,
         "cwd": "/repo",
     }))
     transcript = projects_dir / "sess-idle.jsonl"
@@ -236,7 +236,7 @@ def test_claude_validated_pidfile_rejects_stale_session(monkeypatch, tmp_path):
     projects_dir.mkdir(parents=True)
     (sessions_dir / "43434.json").write_text(json.dumps({
         "sessionId": "sess-stale",
-        "updatedAt": 1_700_000_001_000,
+        "updatedAt": 1_700_001_000_000,
         "cwd": "/repo",
     }))
     transcript = projects_dir / "sess-stale.jsonl"

@@ -154,6 +154,7 @@ class ClaudeAdapter:
 
 
 _META_SCAN_LIMIT = 20
+PIDFILE_TRANSCRIPT_STALE_AFTER_SECONDS = 15 * 60
 
 
 def _claude_message_iter(handle) -> Iterator[Message]:
@@ -256,10 +257,11 @@ def resolve_session_id_from_pidfile(pid: str | int, *, cwd: str | None = None) -
         transcript_mtime = transcript.stat().st_mtime
     except OSError:
         return None
-    # Claude can keep sessions/<pid>.json alive across /clear while the
-    # declared jsonl no longer advances. A pidfile timestamp newer than its
-    # declared transcript is stale evidence, so do not use it as a seed.
-    if updated_at > transcript_mtime:
+    # Claude can advance sessions/<pid>.json heartbeats while an idle
+    # transcript is not changing, so small positive drift is normal. Large
+    # drift is treated only as a bounded seed rejection, not as current-state
+    # authority.
+    if updated_at - transcript_mtime > PIDFILE_TRANSCRIPT_STALE_AFTER_SECONDS:
         return None
     return session_id
 

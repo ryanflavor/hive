@@ -133,6 +133,22 @@ def test_runtime_snapshot_tick_uses_validated_pidfile_after_fd_miss(monkeypatch)
     assert snapshot.sessionId.source == "pidfile"
 
 
+def test_runtime_snapshot_tick_does_not_overwrite_existing_snapshot_with_pidfile(monkeypatch):
+    _patch_team(monkeypatch)
+    store = RuntimeSnapshotStore()
+    previous = store.update_session_id("%1", "sid-fd", source="fd", observed_at=9.0)
+    monkeypatch.setattr(sidecar, "_probe_session_id_from_open_files", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        sidecar,
+        "_probe_session_id_from_pidfile",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("pidfile should only seed empty snapshots")),
+    )
+
+    sidecar._runtime_snapshot_tick("team-x", store=store, now=10.0)
+
+    assert store.get("%1") == previous
+
+
 def test_runtime_snapshot_tick_skips_codex_capture(monkeypatch):
     _patch_team(monkeypatch, cli="codex")
     store = RuntimeSnapshotStore()
@@ -150,3 +166,36 @@ def test_runtime_snapshot_tick_skips_codex_capture(monkeypatch):
     sidecar._runtime_snapshot_tick("team-x", store=store, now=10.0)
 
     assert store.get("%1") is None
+
+
+def test_runtime_snapshot_payload_reads_store_without_live_probe(monkeypatch):
+    store = RuntimeSnapshotStore()
+    store.update_session_id("%1", "sid-tick", source="fd", observed_at=10.0)
+    monkeypatch.setattr(sidecar, "_RUNTIME_SNAPSHOTS", store)
+    monkeypatch.setattr(
+        sidecar,
+        "_probe_session_id_from_open_files",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("snapshot read should not probe fd")),
+    )
+    monkeypatch.setattr(
+        sidecar,
+        "_probe_session_id_from_pidfile",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("snapshot read should not probe pidfile")),
+    )
+
+    payload = sidecar._runtime_snapshot_payload("%1")
+
+    assert payload["ok"] is True
+    assert payload["pane"] == "%1"
+    assert payload["snapshot"]["sessionId"] == "sid-tick"
+    assert payload["snapshot"]["_sessionIdSource"] == "fd"
+
+
+def test_runtime_snapshot_payload_returns_none_when_snapshot_missing(monkeypatch):
+    monkeypatch.setattr(sidecar, "_RUNTIME_SNAPSHOTS", RuntimeSnapshotStore())
+
+    assert sidecar._runtime_snapshot_payload("%1") == {
+        "ok": True,
+        "pane": "%1",
+        "snapshot": None,
+    }
