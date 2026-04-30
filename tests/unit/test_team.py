@@ -365,6 +365,9 @@ def test_team_status_and_is_tmux_alive(configure_hive_home, monkeypatch):
         "hive.team.tmux.get_pane_current_command",
         lambda pane: {"%0": "python3.12", "%1": "droid", "%2": "zsh"}.get(pane, ""),
     )
+    monkeypatch.setattr("hive.team.tmux.get_pane_title", lambda _pane: "")
+    monkeypatch.setattr("hive.team.tmux.get_pane_tty", lambda _pane: "")
+    monkeypatch.setattr("hive.team.tmux.list_tty_processes", lambda _tty: [])
     team = Team(name="team-a", workspace="/tmp/ws", lead_pane_id="%0", lead_session_id="sess-1", tmux_session="dev")
     team.agents["claude"] = Agent(name="claude", team_name="team-a", pane_id="%1", model="m1")
     team.terminals["shell"] = Terminal(name="shell", pane_id="%2")

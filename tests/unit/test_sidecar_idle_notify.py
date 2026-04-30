@@ -52,6 +52,8 @@ def _setup(
         lambda window_target, agent_panes, **kwargs: cleanups_sink.append((window_target, tuple(agent_panes), kwargs)),
     )
     monkeypatch.setattr("hive.plugin_manager.is_plugin_enabled", lambda name: plugin_enabled)
+    monkeypatch.setattr(sidecar, "_transcript_progressed_recently", lambda _pane_id, _threshold: None)
+    monkeypatch.setattr(sidecar, "_pane_in_active_turn", lambda _pane_id: False)
     return calls
 
 

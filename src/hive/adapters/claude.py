@@ -5,14 +5,13 @@ Every record carries ``sessionId``, ``cwd``, ``parentUuid``, ``timestamp`` and
 ``gitBranch``; the ``message.content`` field is an Anthropic-style list of blocks
 or (rarely) a plain string.
 
-The ``$CLAUDE_HOME/sessions/<pid>.json`` files only map running processes to the
-session they own; we keep using them to resolve the *current* session id of a
-pane but they are not the source of truth for history.
+Claude's ``$CLAUDE_HOME/sessions/<pid>.json`` PID map can become stale after
+``/clear``. Current-session resolution therefore uses PID-anchored open jsonl
+file handles and returns unresolved when no live handle is observed.
 """
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 from typing import Any, Iterable, Iterator
@@ -40,21 +39,11 @@ class ClaudeAdapter:
     # --- discovery ---
 
     def resolve_current_session_id(self, pane_id: str) -> str | None:
-        # ``sessions/<pid>.json`` is the PID-bound source of truth Claude
-        # writes for the active session of each running process. Adapter
-        # stays a pure mapping reader: any "did /new happen?" handling
-        # belongs in the sidecar cache layer (stale-bypass force resolve),
-        # not in a cross-PID jsonl-mtime heuristic that confuses panes
-        # sharing a project_dir.
-        sessions_dir = _claude_home() / "sessions"
         tty = tmux.get_pane_tty(pane_id) or ""
         for process in tmux.list_tty_processes(tty):
             if not _is_claude_process(process.command, process.argv):
                 continue
-            payload = _read_json_file(sessions_dir / f"{process.pid}.json")
-            if not payload:
-                continue
-            session_id = str_or_none(payload.get("sessionId"))
+            session_id = resolve_session_id_from_open_files(process.pid)
             if session_id:
                 return session_id
         return None
@@ -227,12 +216,23 @@ def _iter_claude_parts(content: Any) -> Iterator[MessagePart]:
             yield MessagePart(kind="unknown", raw=block)
 
 
-def _read_json_file(path: Path) -> dict[str, Any] | None:
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
+def session_id_from_open_file(fpath: str) -> str | None:
+    path = Path(fpath)
+    if path.suffix != ".jsonl":
         return None
-    return data if isinstance(data, dict) else None
+    try:
+        path.relative_to(_claude_home() / "projects")
+    except ValueError:
+        return None
+    return path.stem or None
+
+
+def resolve_session_id_from_open_files(pid: str | int) -> str | None:
+    for fpath in tmux.list_open_files(str(pid)):
+        session_id = session_id_from_open_file(fpath)
+        if session_id:
+            return session_id
+    return None
 
 
 def _is_claude_process(command: str, argv: str) -> bool:

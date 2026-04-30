@@ -32,6 +32,7 @@ from .runtime_state import (
     project_thread_event,
     send_guidance,
 )
+from .runtime_snapshot import RuntimeSnapshot, RuntimeSnapshotStore
 
 ACTIVE_SLEEP = 0.5
 IDLE_NOTIFY_TICK_SECONDS = 1.0
@@ -55,6 +56,7 @@ _TRANSCRIPT_PATH_CACHE_TTL = 60.0
 _OUTPUT_BUSY_MONITOR = None
 _TRANSCRIPT_PATH_CACHE: dict[str, tuple[str, float]] = {}
 _AGENT_NOTIFY_ROLES = {"agent", "lead", "orchestrator"}
+_RUNTIME_SNAPSHOTS = RuntimeSnapshotStore()
 
 
 def _compute_build_hash() -> str:
@@ -213,6 +215,70 @@ def _set_output_busy_monitor(monitor: Any) -> None:
     _OUTPUT_BUSY_MONITOR = monitor
 
 
+def _session_id_from_open_file(cli_name: str, fpath: str) -> str | None:
+    if cli_name == "claude":
+        from .adapters.claude import session_id_from_open_file
+
+        return session_id_from_open_file(fpath)
+    if cli_name == "codex":
+        from .adapters.codex import session_id_from_open_file
+
+        return session_id_from_open_file(fpath)
+    return None
+
+
+def _process_matches_cli(cli_name: str, command: str, argv: str) -> bool:
+    from .agent_cli import detect_profile_from_pane_command, detect_profile_from_text
+
+    profile = detect_profile_from_pane_command(command) or detect_profile_from_text(argv)
+    return bool(profile and profile.name == cli_name)
+
+
+def _probe_session_id_from_open_files(pane_id: str, cli_name: str) -> str | None:
+    from . import proc_info, tmux as tmux_mod
+
+    tty = tmux_mod.get_pane_tty(pane_id) or ""
+    if not tty:
+        return None
+    for process in tmux_mod.list_tty_processes(tty):
+        if not _process_matches_cli(cli_name, process.command, process.argv):
+            continue
+        try:
+            open_files = proc_info.list_open_files(process.pid)
+        except proc_info.ProcInfoError:
+            continue
+        for fpath in open_files:
+            session_id = _session_id_from_open_file(cli_name, fpath)
+            if session_id:
+                return session_id
+    return None
+
+
+def _runtime_snapshot_tick(
+    team_name: str,
+    *,
+    store: RuntimeSnapshotStore | None = None,
+    now: float | None = None,
+) -> None:
+    snapshot_store = _RUNTIME_SNAPSHOTS if store is None else store
+    observed_at = time.monotonic() if now is None else now
+    for member in _team_member_bindings(team_name).values():
+        if member.get("role") not in _AGENT_NOTIFY_ROLES:
+            continue
+        pane_id = str(member.get("pane") or "")
+        cli_name = str(member.get("cli") or "")
+        if not pane_id or not cli_name:
+            continue
+        session_id = _probe_session_id_from_open_files(pane_id, cli_name)
+        if session_id:
+            snapshot_store.update_session_id(
+                pane_id,
+                session_id,
+                source="fd",
+                observed_at=observed_at,
+            )
+
+
 def _resolve_transcript_path_cached(pane_id: str, *, force: bool = False) -> str | None:
     """Resolve the agent transcript jsonl path for a pane, with TTL cache.
 
@@ -239,7 +305,10 @@ def _resolve_transcript_path_cached(pane_id: str, *, force: bool = False) -> str
         if profile:
             adapter = adapters.get(profile.name)
             if adapter:
-                sid = adapter.resolve_current_session_id(pane_id)
+                snapshot = _RUNTIME_SNAPSHOTS.get(pane_id)
+                sid = str(snapshot.sessionId.value) if snapshot is not None and snapshot.sessionId.value else ""
+                if not sid:
+                    sid = adapter.resolve_current_session_id(pane_id) or ""
                 if sid:
                     cwd_hint = tmux_mod.display_value(pane_id, "#{pane_current_path}")
                     transcript = adapter.find_session_file(sid, cwd=cwd_hint)
@@ -797,7 +866,10 @@ def _resolve_ack_baseline(target) -> tuple[Path, int]:
     adapter = adapters.get(profile.name)
     if not adapter:
         raise RuntimeError(f"no adapter for CLI '{profile.name}'")
-    session_id = adapter.resolve_current_session_id(target.pane_id)
+    snapshot = _RUNTIME_SNAPSHOTS.get(target.pane_id)
+    session_id = str(snapshot.sessionId.value) if snapshot is not None and snapshot.sessionId.value else ""
+    if not session_id:
+        session_id = adapter.resolve_current_session_id(target.pane_id) or ""
     if not session_id:
         raise RuntimeError("cannot resolve session id for target pane")
     from . import tmux
@@ -1270,7 +1342,11 @@ def _doctor_payload(
     return diag
 
 
-def _agent_runtime_payload(pane_id: str) -> dict[str, Any]:
+def _agent_runtime_payload(
+    pane_id: str,
+    *,
+    runtime_snapshot: RuntimeSnapshot | None = None,
+) -> dict[str, Any]:
     from . import adapters, tmux
     from .adapters.base import check_input_gate, extract_pending_question
     from .activity import probe_transcript_turn_phase
@@ -1307,8 +1383,14 @@ def _agent_runtime_payload(pane_id: str) -> dict[str, Any]:
         runtime["inputReason"] = "no_session"
         return runtime
 
-    session_id = adapter.resolve_current_session_id(pane_id)
-    runtime["sessionId"] = session_id or "unresolved"
+    if runtime_snapshot is not None and runtime_snapshot.sessionId.value:
+        runtime.update(runtime_snapshot.to_runtime_fields())
+        session_id = str(runtime_snapshot.sessionId.value)
+    else:
+        session_id = adapter.resolve_current_session_id(pane_id)
+        runtime["sessionId"] = session_id or "unresolved"
+        if session_id:
+            runtime["_sessionIdSource"] = "probe"
     if not session_id:
         runtime["inputState"] = "unknown"
         runtime["inputReason"] = "no_session"
@@ -1360,7 +1442,10 @@ def _member_runtime_payload(pane_id: str, *, role: str) -> dict[str, Any]:
         payload = {"alive": tmux.is_pane_alive(pane_id)}
         payload.update(_busy_output_payload(pane_id))
         return payload
-    return _agent_runtime_payload(pane_id)
+    return _agent_runtime_payload(
+        pane_id,
+        runtime_snapshot=_RUNTIME_SNAPSHOTS.get(pane_id),
+    )
 
 
 def _team_runtime_payload(team_name: str) -> dict[str, Any]:
@@ -2165,6 +2250,8 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                     busy_monitor=busy_monitor,
                     on_reexec=_emit_reexec,
                 )
+
+            _runtime_snapshot_tick(team, now=now)
 
             if not _serve_requests(
                 server=server,
