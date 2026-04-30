@@ -5,11 +5,11 @@ from hive import proc_info, tmux
 from hive.runtime_snapshot import RuntimeSnapshotStore
 
 
-def _patch_team(monkeypatch):
+def _patch_team(monkeypatch, *, cli: str = "claude"):
     fake_team = SimpleNamespace(
         name="team-x",
         agents={
-            "orch": SimpleNamespace(name="orch", pane_id="%1", cli="claude"),
+            "orch": SimpleNamespace(name="orch", pane_id="%1", cli=cli),
         },
         terminals={},
         lead_agent=lambda: None,
@@ -131,3 +131,22 @@ def test_runtime_snapshot_tick_uses_validated_pidfile_after_fd_miss(monkeypatch)
     assert snapshot is not None
     assert snapshot.sessionId.value == "sid-pidfile"
     assert snapshot.sessionId.source == "pidfile"
+
+
+def test_runtime_snapshot_tick_skips_codex_capture(monkeypatch):
+    _patch_team(monkeypatch, cli="codex")
+    store = RuntimeSnapshotStore()
+    monkeypatch.setattr(
+        sidecar,
+        "_probe_session_id_from_open_files",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("codex should lazy-populate on query")),
+    )
+    monkeypatch.setattr(
+        sidecar,
+        "_probe_session_id_from_pidfile",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("codex should not use pidfile")),
+    )
+
+    sidecar._runtime_snapshot_tick("team-x", store=store, now=10.0)
+
+    assert store.get("%1") is None

@@ -236,6 +236,10 @@ def _process_matches_cli(cli_name: str, command: str, argv: str) -> bool:
     return bool(profile and profile.name == cli_name)
 
 
+def _requires_tick_session_capture(cli_name: str) -> bool:
+    return cli_name == "claude"
+
+
 def _pane_has_recent_output(pane_id: str) -> bool:
     monitor = _OUTPUT_BUSY_MONITOR
     if monitor is None:
@@ -315,6 +319,8 @@ def _runtime_snapshot_tick(
         pane_id = str(member.get("pane") or "")
         cli_name = str(member.get("cli") or "")
         if not pane_id or not cli_name:
+            continue
+        if not _requires_tick_session_capture(cli_name):
             continue
         snapshot = snapshot_store.get(pane_id)
         should_sample = cli_name == "claude" and (
