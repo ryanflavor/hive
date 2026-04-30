@@ -12,6 +12,7 @@ file handles and returns unresolved when no live handle is observed.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any, Iterable, Iterator
@@ -233,6 +234,58 @@ def resolve_session_id_from_open_files(pid: str | int) -> str | None:
         if session_id:
             return session_id
     return None
+
+
+def resolve_session_id_from_pidfile(pid: str | int, *, cwd: str | None = None) -> str | None:
+    payload = _read_json_file(_claude_home() / "sessions" / f"{pid}.json")
+    if not payload:
+        return None
+    session_id = str_or_none(payload.get("sessionId"))
+    if not session_id:
+        return None
+    updated_at = _timestamp_seconds(payload.get("updatedAt"))
+    if updated_at is None:
+        return None
+    transcript = ClaudeAdapter().find_session_file(
+        session_id,
+        cwd=cwd or str_or_none(payload.get("cwd")),
+    )
+    if not transcript:
+        return None
+    try:
+        transcript_mtime = transcript.stat().st_mtime
+    except OSError:
+        return None
+    # Claude can keep sessions/<pid>.json alive across /clear while the
+    # declared jsonl no longer advances. A pidfile timestamp newer than its
+    # declared transcript is stale evidence, so do not use it as a seed.
+    if updated_at > transcript_mtime:
+        return None
+    return session_id
+
+
+def _timestamp_seconds(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        timestamp = float(value)
+        return timestamp / 1000.0 if timestamp > 100_000_000_000 else timestamp
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            return _timestamp_seconds(float(stripped))
+        except ValueError:
+            parsed = parse_iso_timestamp(stripped)
+            return parsed.timestamp() if parsed is not None else None
+    return None
+
+
+def _read_json_file(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _is_claude_process(command: str, argv: str) -> bool:

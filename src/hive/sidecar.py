@@ -52,6 +52,8 @@ SEND_REQUEST_TIMEOUT = SEND_GRACE_TIMEOUT + 2.0
 SIDECAR_API_VERSION = 5
 _FINALIZE_PENDING = "__finalize__"
 BUSY_OUTPUT_THRESHOLD_SECONDS = 3.0
+RUNTIME_SESSION_PROBE_WINDOW_SECONDS = 0.25
+RUNTIME_SESSION_PROBE_INTERVAL_SECONDS = 0.005
 _TRANSCRIPT_PATH_CACHE_TTL = 60.0
 _OUTPUT_BUSY_MONITOR = None
 _TRANSCRIPT_PATH_CACHE: dict[str, tuple[str, float]] = {}
@@ -234,23 +236,68 @@ def _process_matches_cli(cli_name: str, command: str, argv: str) -> bool:
     return bool(profile and profile.name == cli_name)
 
 
-def _probe_session_id_from_open_files(pane_id: str, cli_name: str) -> str | None:
+def _pane_has_recent_output(pane_id: str) -> bool:
+    monitor = _OUTPUT_BUSY_MONITOR
+    if monitor is None:
+        return False
+    try:
+        return bool(monitor.is_busy(pane_id, threshold_seconds=BUSY_OUTPUT_THRESHOLD_SECONDS))
+    except Exception:
+        return False
+
+
+def _probe_session_id_from_open_files(
+    pane_id: str,
+    cli_name: str,
+    *,
+    duration_s: float = 0.0,
+    interval_s: float = RUNTIME_SESSION_PROBE_INTERVAL_SECONDS,
+) -> str | None:
     from . import proc_info, tmux as tmux_mod
 
     tty = tmux_mod.get_pane_tty(pane_id) or ""
     if not tty:
         return None
+    processes = [
+        process for process in tmux_mod.list_tty_processes(tty)
+        if _process_matches_cli(cli_name, process.command, process.argv)
+    ]
+    if not processes:
+        return None
+    deadline = time.monotonic() + max(0.0, duration_s)
+    while True:
+        for process in processes:
+            try:
+                open_files = proc_info.list_open_files(process.pid)
+            except proc_info.ProcInfoError:
+                continue
+            for fpath in open_files:
+                session_id = _session_id_from_open_file(cli_name, fpath)
+                if session_id:
+                    return session_id
+        remaining = deadline - time.monotonic()
+        if duration_s <= 0 or remaining <= 0:
+            return None
+        time.sleep(min(max(0.0, interval_s), remaining))
+    return None
+
+
+def _probe_session_id_from_pidfile(pane_id: str, cli_name: str) -> str | None:
+    if cli_name != "claude":
+        return None
+    from . import tmux as tmux_mod
+    from .adapters.claude import resolve_session_id_from_pidfile
+
+    tty = tmux_mod.get_pane_tty(pane_id) or ""
+    if not tty:
+        return None
+    cwd_hint = tmux_mod.display_value(pane_id, "#{pane_current_path}")
     for process in tmux_mod.list_tty_processes(tty):
         if not _process_matches_cli(cli_name, process.command, process.argv):
             continue
-        try:
-            open_files = proc_info.list_open_files(process.pid)
-        except proc_info.ProcInfoError:
-            continue
-        for fpath in open_files:
-            session_id = _session_id_from_open_file(cli_name, fpath)
-            if session_id:
-                return session_id
+        session_id = resolve_session_id_from_pidfile(process.pid, cwd=cwd_hint)
+        if session_id:
+            return session_id
     return None
 
 
@@ -269,12 +316,24 @@ def _runtime_snapshot_tick(
         cli_name = str(member.get("cli") or "")
         if not pane_id or not cli_name:
             continue
-        session_id = _probe_session_id_from_open_files(pane_id, cli_name)
+        snapshot = snapshot_store.get(pane_id)
+        should_sample = cli_name == "claude" and (
+            snapshot is None or _pane_has_recent_output(pane_id)
+        )
+        session_id = _probe_session_id_from_open_files(
+            pane_id,
+            cli_name,
+            duration_s=RUNTIME_SESSION_PROBE_WINDOW_SECONDS if should_sample else 0.0,
+        )
+        source = "fd"
+        if not session_id:
+            session_id = _probe_session_id_from_pidfile(pane_id, cli_name)
+            source = "pidfile"
         if session_id:
             snapshot_store.update_session_id(
                 pane_id,
                 session_id,
-                source="fd",
+                source=source,
                 observed_at=observed_at,
             )
 
@@ -1387,10 +1446,31 @@ def _agent_runtime_payload(
         runtime.update(runtime_snapshot.to_runtime_fields())
         session_id = str(runtime_snapshot.sessionId.value)
     else:
-        session_id = adapter.resolve_current_session_id(pane_id)
+        probe_window = (
+            RUNTIME_SESSION_PROBE_WINDOW_SECONDS
+            if profile.name == "claude" and bool(runtime.get("busy"))
+            else 0.0
+        )
+        session_id = _probe_session_id_from_open_files(
+            pane_id,
+            profile.name,
+            duration_s=probe_window,
+        )
+        source = "fd" if session_id else ""
+        if not session_id:
+            session_id = adapter.resolve_current_session_id(pane_id)
+            source = "adapter" if session_id else ""
+        if not session_id:
+            session_id = _probe_session_id_from_pidfile(pane_id, profile.name)
+            source = "pidfile"
         runtime["sessionId"] = session_id or "unresolved"
         if session_id:
-            runtime["_sessionIdSource"] = "probe"
+            snapshot = _RUNTIME_SNAPSHOTS.update_session_id(
+                pane_id,
+                session_id,
+                source=source,
+            )
+            runtime.update(snapshot.to_runtime_fields())
     if not session_id:
         runtime["inputState"] = "unknown"
         runtime["inputReason"] = "no_session"
