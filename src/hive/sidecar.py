@@ -256,6 +256,8 @@ def _probe_session_id_from_open_files(
     *,
     duration_s: float = 0.0,
     interval_s: float = RUNTIME_SESSION_PROBE_INTERVAL_SECONDS,
+    workspace: str = "",
+    team_name: str = "",
 ) -> str | None:
     from . import proc_info, tmux as tmux_mod
 
@@ -269,11 +271,26 @@ def _probe_session_id_from_open_files(
     if not processes:
         return None
     deadline = time.monotonic() + max(0.0, duration_s)
+    logged_errors: set[tuple[str, str]] = set()
     while True:
         for process in processes:
             try:
                 open_files = proc_info.list_open_files(process.pid)
-            except Exception:
+            except Exception as exc:
+                error_key = (str(process.pid), exc.__class__.__name__)
+                if workspace and error_key not in logged_errors:
+                    logged_errors.add(error_key)
+                    from . import notify_debug
+
+                    notify_debug.emit(
+                        workspace,
+                        "runtime.fd_probe_error",
+                        team=team_name,
+                        pane=pane_id,
+                        cliName=cli_name,
+                        processPid=str(process.pid),
+                        errorType=exc.__class__.__name__,
+                    )
                 continue
             for fpath in open_files:
                 session_id = _session_id_from_open_file(cli_name, fpath)
@@ -310,6 +327,7 @@ def _runtime_snapshot_tick(
     *,
     store: RuntimeSnapshotStore | None = None,
     now: float | None = None,
+    workspace: str = "",
 ) -> None:
     snapshot_store = _RUNTIME_SNAPSHOTS if store is None else store
     observed_at = time.monotonic() if now is None else now
@@ -329,11 +347,12 @@ def _runtime_snapshot_tick(
             or not snapshot.sessionId.is_fresh(now=observed_at)
             or recent_output
         )
-        session_id = _probe_session_id_from_open_files(
-            pane_id,
-            cli_name,
-            duration_s=RUNTIME_SESSION_PROBE_WINDOW_SECONDS if should_sample else 0.0,
-        )
+        probe_kwargs: dict[str, Any] = {
+            "duration_s": RUNTIME_SESSION_PROBE_WINDOW_SECONDS if should_sample else 0.0,
+        }
+        if workspace:
+            probe_kwargs.update(workspace=workspace, team_name=team_name)
+        session_id = _probe_session_id_from_open_files(pane_id, cli_name, **probe_kwargs)
         source = "fd"
         if not session_id and (snapshot is None or snapshot.sessionId.source == "pidfile"):
             session_id = _probe_session_id_from_pidfile(pane_id, cli_name)
@@ -346,6 +365,8 @@ def _runtime_snapshot_tick(
                 observed_at=observed_at,
             )
         elif snapshot is not None and recent_output:
+            # PTY output is a conservative invalidation signal: a false positive
+            # may blank cvim briefly, but reusing an old session would be worse.
             snapshot_store.mark_session_stale(pane_id, observed_at=observed_at)
 
 
@@ -2394,7 +2415,7 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                     on_reexec=_emit_reexec,
                 )
 
-            _runtime_snapshot_tick(team, now=now)
+            _runtime_snapshot_tick(team, now=now, workspace=workspace)
 
             if not _serve_requests(
                 server=server,

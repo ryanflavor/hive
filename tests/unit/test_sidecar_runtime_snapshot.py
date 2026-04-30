@@ -88,6 +88,37 @@ def test_runtime_snapshot_tick_refreshes_stale_snapshot_from_fd(monkeypatch):
     assert snapshot.sessionId.is_fresh(now=11.0) is True
 
 
+def test_runtime_snapshot_tick_marks_stale_then_refreshes_next_session(monkeypatch):
+    _patch_team(monkeypatch)
+    store = RuntimeSnapshotStore()
+    store.update_session_id("%1", "sid-old", source="fd", observed_at=9.0)
+    fd_results = iter([None, "sid-new"])
+    monkeypatch.setattr(
+        sidecar,
+        "_probe_session_id_from_open_files",
+        lambda pane_id, cli_name, **_kwargs: next(fd_results) if (pane_id, cli_name) == ("%1", "claude") else None,
+    )
+    monkeypatch.setattr(
+        sidecar,
+        "_probe_session_id_from_pidfile",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("pidfile should not override fd snapshot")),
+    )
+    monkeypatch.setattr(sidecar, "_pane_has_recent_output", lambda _pane_id: True)
+
+    sidecar._runtime_snapshot_tick("team-x", store=store, now=10.0)
+    stale = store.get("%1")
+    assert stale is not None
+    assert stale.sessionId.value == "sid-old"
+    assert stale.sessionId.is_fresh(now=10.0) is False
+
+    sidecar._runtime_snapshot_tick("team-x", store=store, now=11.0)
+    fresh = store.get("%1")
+    assert fresh is not None
+    assert fresh.sessionId.value == "sid-new"
+    assert fresh.sessionId.source == "fd"
+    assert fresh.sessionId.is_fresh(now=11.0) is True
+
+
 def test_probe_session_id_filters_process_profile(monkeypatch, tmp_path):
     claude_home = tmp_path / "claude-home"
     transcript = claude_home / "projects" / "-repo" / "sid-active.jsonl"
@@ -157,6 +188,42 @@ def test_probe_session_id_ignores_unexpected_proc_info_error(monkeypatch):
     )
 
     assert sidecar._probe_session_id_from_open_files("%1", "claude") is None
+
+
+def test_probe_session_id_logs_proc_info_error_when_workspace_known(monkeypatch):
+    emitted: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr("hive.tmux.get_pane_tty", lambda _pane_id: "/dev/ttys001")
+    monkeypatch.setattr(
+        "hive.tmux.list_tty_processes",
+        lambda _tty: [tmux.TTYProcessInfo(pid="222", command="claude", argv="claude --verbose")],
+    )
+    monkeypatch.setattr(
+        proc_info,
+        "list_open_files",
+        lambda _pid: (_ for _ in ()).throw(RuntimeError("native provider bug")),
+    )
+    monkeypatch.setattr(
+        "hive.notify_debug.emit",
+        lambda workspace, event, **fields: emitted.append((workspace, event, fields)),
+    )
+
+    assert sidecar._probe_session_id_from_open_files(
+        "%1",
+        "claude",
+        workspace="/tmp/ws",
+        team_name="team-x",
+    ) is None
+    assert emitted == [(
+        "/tmp/ws",
+        "runtime.fd_probe_error",
+        {
+            "team": "team-x",
+            "pane": "%1",
+            "cliName": "claude",
+            "processPid": "222",
+            "errorType": "RuntimeError",
+        },
+    )]
 
 
 def test_runtime_snapshot_tick_uses_short_window_for_missing_claude(monkeypatch):
