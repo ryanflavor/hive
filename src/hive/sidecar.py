@@ -56,7 +56,7 @@ RUNTIME_SESSION_PROBE_WINDOW_SECONDS = 0.25
 RUNTIME_SESSION_PROBE_INTERVAL_SECONDS = 0.005
 _TRANSCRIPT_PATH_CACHE_TTL = 60.0
 _OUTPUT_BUSY_MONITOR = None
-_TRANSCRIPT_PATH_CACHE: dict[str, tuple[str, float]] = {}
+_TRANSCRIPT_PATH_CACHE: dict[str, tuple[str, float, str]] = {}
 _AGENT_NOTIFY_ROLES = {"agent", "lead", "orchestrator"}
 _RUNTIME_SNAPSHOTS = RuntimeSnapshotStore()
 
@@ -335,7 +335,7 @@ def _runtime_snapshot_tick(
             duration_s=RUNTIME_SESSION_PROBE_WINDOW_SECONDS if should_sample else 0.0,
         )
         source = "fd"
-        if not session_id and snapshot is None:
+        if not session_id and (snapshot is None or snapshot.sessionId.source == "pidfile"):
             session_id = _probe_session_id_from_pidfile(pane_id, cli_name)
             source = "pidfile"
         if session_id:
@@ -347,6 +347,17 @@ def _runtime_snapshot_tick(
             )
         elif snapshot is not None and recent_output:
             snapshot_store.mark_session_stale(pane_id, observed_at=observed_at)
+
+
+def _fresh_snapshot_session_id(pane_id: str, *, now: float | None = None) -> str:
+    snapshot = _RUNTIME_SNAPSHOTS.get(pane_id)
+    if (
+        snapshot is not None
+        and snapshot.sessionId.value
+        and snapshot.sessionId.is_fresh(now=now)
+    ):
+        return str(snapshot.sessionId.value)
+    return ""
 
 
 def _resolve_transcript_path_cached(pane_id: str, *, force: bool = False) -> str | None:
@@ -362,21 +373,30 @@ def _resolve_transcript_path_cached(pane_id: str, *, force: bool = False) -> str
     path points at the previous session's jsonl that no longer advances.
     """
     now = time.monotonic()
+    snapshot = _RUNTIME_SNAPSHOTS.get(pane_id)
+    fresh_snapshot_session_id = _fresh_snapshot_session_id(pane_id, now=now)
     if not force:
         cached = _TRANSCRIPT_PATH_CACHE.get(pane_id)
-        if cached is not None and now < cached[1]:
+        if (
+            cached is not None
+            and now < cached[1]
+            and (
+                snapshot is None
+                or (fresh_snapshot_session_id and cached[2] == fresh_snapshot_session_id)
+            )
+        ):
             return cached[0] or None
 
     from . import adapters, tmux as tmux_mod
 
     path_str = ""
+    sid = ""
     if pane_id and tmux_mod.is_pane_alive(pane_id):
         profile = detect_profile_for_pane(pane_id)
         if profile:
             adapter = adapters.get(profile.name)
             if adapter:
-                snapshot = _RUNTIME_SNAPSHOTS.get(pane_id)
-                sid = str(snapshot.sessionId.value) if snapshot is not None and snapshot.sessionId.value else ""
+                sid = fresh_snapshot_session_id
                 if not sid:
                     sid = adapter.resolve_current_session_id(pane_id) or ""
                 if sid:
@@ -385,7 +405,7 @@ def _resolve_transcript_path_cached(pane_id: str, *, force: bool = False) -> str
                     if transcript:
                         path_str = str(transcript)
 
-    _TRANSCRIPT_PATH_CACHE[pane_id] = (path_str, now + _TRANSCRIPT_PATH_CACHE_TTL)
+    _TRANSCRIPT_PATH_CACHE[pane_id] = (path_str, now + _TRANSCRIPT_PATH_CACHE_TTL, sid)
     return path_str or None
 
 
@@ -948,8 +968,7 @@ def _resolve_ack_baseline(target) -> tuple[Path, int]:
     adapter = adapters.get(profile.name)
     if not adapter:
         raise RuntimeError(f"no adapter for CLI '{profile.name}'")
-    snapshot = _RUNTIME_SNAPSHOTS.get(target.pane_id)
-    session_id = str(snapshot.sessionId.value) if snapshot is not None and snapshot.sessionId.value else ""
+    session_id = _fresh_snapshot_session_id(target.pane_id)
     if not session_id:
         session_id = adapter.resolve_current_session_id(target.pane_id) or ""
     if not session_id:

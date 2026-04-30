@@ -305,6 +305,6 @@ def test_path_cache_refreshes_after_ttl(monkeypatch):
     sidecar._resolve_transcript_path_cached("%1")
     assert len(calls) == 1
 
-    sidecar._TRANSCRIPT_PATH_CACHE["%1"] = ("", time.monotonic() - 1.0)
+    sidecar._TRANSCRIPT_PATH_CACHE["%1"] = ("", time.monotonic() - 1.0, "")
     sidecar._resolve_transcript_path_cached("%1")
     assert len(calls) == 2

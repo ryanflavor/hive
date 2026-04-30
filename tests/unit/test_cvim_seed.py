@@ -282,7 +282,7 @@ def test_resolve_transcript_path_for_non_droid_pane_uses_adapter(monkeypatch, tm
 
     monkeypatch.setattr(shared, "_detect_profile_for_pane", lambda pane_id: SimpleNamespace(name="claude"))
     monkeypatch.setattr(shared, "_get_adapter", lambda name: FakeAdapter() if name == "claude" else None)
-    monkeypatch.setattr(shared, "_resolve_hive_runtime_session_id", lambda _pane_id: (False, None))
+    monkeypatch.setattr(shared, "_resolve_hive_runtime_session_id", lambda _pane_id, _cli_name="": (False, None))
 
     assert shared.resolve_transcript_path_for_pane(
         pane_id="%42",
@@ -306,7 +306,7 @@ def test_resolve_transcript_path_for_hive_pane_uses_runtime_snapshot(monkeypatch
 
     monkeypatch.setattr(shared, "_detect_profile_for_pane", lambda pane_id: SimpleNamespace(name="claude"))
     monkeypatch.setattr(shared, "_get_adapter", lambda name: SnapshotAdapter() if name == "claude" else None)
-    monkeypatch.setattr(shared, "_resolve_hive_runtime_session_id", lambda pane_id: (True, "sess-runtime"))
+    monkeypatch.setattr(shared, "_resolve_hive_runtime_session_id", lambda pane_id, _cli_name="": (True, "sess-runtime"))
 
     assert shared.resolve_transcript_path_for_pane(
         pane_id="%42",
@@ -330,7 +330,63 @@ def test_resolve_hive_runtime_session_id_rejects_stale_snapshot(monkeypatch):
         },
     )
 
-    assert shared._resolve_hive_runtime_session_id("%42") == (True, None)
+    assert shared._resolve_hive_runtime_session_id("%42", "claude") == (True, None)
+
+
+def test_resolve_hive_runtime_session_id_allows_codex_adapter_when_snapshot_missing(monkeypatch):
+    shared = _import_shared()
+
+    monkeypatch.setattr("hive.tmux.display_value", lambda _pane_id, _fmt: "/tmp/ws")
+    monkeypatch.setattr(
+        "hive.sidecar.request_runtime_snapshot",
+        lambda workspace, *, pane_id: {
+            "ok": True,
+            "pane": pane_id,
+            "snapshot": None,
+        },
+    )
+
+    assert shared._resolve_hive_runtime_session_id("%42", "codex") == (False, None)
+
+
+def test_resolve_hive_runtime_session_id_allows_fallback_on_sidecar_failure(monkeypatch):
+    shared = _import_shared()
+
+    monkeypatch.setattr("hive.tmux.display_value", lambda _pane_id, _fmt: "/tmp/ws")
+    monkeypatch.setattr(
+        "hive.sidecar.request_runtime_snapshot",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("sidecar unavailable")),
+    )
+
+    assert shared._resolve_hive_runtime_session_id("%42", "claude") == (False, None)
+
+
+def test_resolve_transcript_path_for_codex_hive_pane_falls_back_to_adapter_when_snapshot_missing(
+    monkeypatch,
+    tmp_path,
+):
+    shared = _import_shared()
+    transcript = tmp_path / "codex.jsonl"
+    transcript.write_text("")
+
+    class CodexAdapter:
+        def resolve_current_session_id(self, pane_id: str) -> str | None:
+            assert pane_id == "%42"
+            return "sess-codex"
+
+        def find_session_file(self, session_id: str, *, cwd: str | None = None) -> Path | None:
+            assert session_id == "sess-codex"
+            assert cwd == "/repo"
+            return transcript
+
+    monkeypatch.setattr(shared, "_detect_profile_for_pane", lambda pane_id: SimpleNamespace(name="codex"))
+    monkeypatch.setattr(shared, "_get_adapter", lambda name: CodexAdapter() if name == "codex" else None)
+    monkeypatch.setattr(shared, "_resolve_hive_runtime_session_id", lambda _pane_id, _cli_name="": (False, None))
+
+    assert shared.resolve_transcript_path_for_pane(
+        pane_id="%42",
+        cwd="/repo",
+    ) == str(transcript)
 
 
 def test_resolve_transcript_path_for_non_droid_pane_returns_none_without_resume(monkeypatch, tmp_path):
@@ -345,7 +401,7 @@ def test_resolve_transcript_path_for_non_droid_pane_returns_none_without_resume(
 
     monkeypatch.setattr(shared, "_detect_profile_for_pane", lambda pane_id: SimpleNamespace(name="claude"))
     monkeypatch.setattr(shared, "_get_adapter", lambda name: MissingAdapter() if name == "claude" else None)
-    monkeypatch.setattr(shared, "_resolve_hive_runtime_session_id", lambda _pane_id: (True, None))
+    monkeypatch.setattr(shared, "_resolve_hive_runtime_session_id", lambda _pane_id, _cli_name="": (True, None))
     monkeypatch.setattr(
         shared,
         "_resolve_claude_pidfile_session_id",
@@ -375,7 +431,7 @@ def test_resolve_transcript_path_for_claude_uses_validated_pidfile_fallback(monk
 
     monkeypatch.setattr(shared, "_detect_profile_for_pane", lambda pane_id: SimpleNamespace(name="claude"))
     monkeypatch.setattr(shared, "_get_adapter", lambda name: FdMissAdapter() if name == "claude" else None)
-    monkeypatch.setattr(shared, "_resolve_hive_runtime_session_id", lambda _pane_id: (False, None))
+    monkeypatch.setattr(shared, "_resolve_hive_runtime_session_id", lambda _pane_id, _cli_name="": (False, None))
     monkeypatch.setattr(
         shared,
         "_resolve_claude_pidfile_session_id",
@@ -408,7 +464,7 @@ def test_resolve_transcript_path_for_pane_falls_back_to_resume_transcript(monkey
 
     monkeypatch.setattr(shared, "_detect_profile_for_pane", lambda pane_id: SimpleNamespace(name="claude"))
     monkeypatch.setattr(shared, "_get_adapter", lambda name: PartialAdapter() if name == "claude" else None)
-    monkeypatch.setattr(shared, "_resolve_hive_runtime_session_id", lambda _pane_id: (False, None))
+    monkeypatch.setattr(shared, "_resolve_hive_runtime_session_id", lambda _pane_id, _cli_name="": (False, None))
 
     assert shared.resolve_transcript_path_for_pane(
         pane_id="%42",

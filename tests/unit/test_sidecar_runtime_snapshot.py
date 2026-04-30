@@ -206,6 +206,24 @@ def test_runtime_snapshot_tick_does_not_overwrite_existing_snapshot_with_pidfile
     assert store.get("%1") == previous
 
 
+def test_runtime_snapshot_tick_refreshes_existing_pidfile_snapshot(monkeypatch):
+    _patch_team(monkeypatch)
+    store = RuntimeSnapshotStore()
+    store.update_session_id("%1", "sid-pidfile", source="pidfile", observed_at=9.0)
+    monkeypatch.setattr(sidecar, "_probe_session_id_from_open_files", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sidecar, "_pane_has_recent_output", lambda _pane_id: True)
+    monkeypatch.setattr(sidecar, "_probe_session_id_from_pidfile", lambda *_args, **_kwargs: "sid-pidfile")
+
+    sidecar._runtime_snapshot_tick("team-x", store=store, now=10.0)
+
+    snapshot = store.get("%1")
+    assert snapshot is not None
+    assert snapshot.sessionId.value == "sid-pidfile"
+    assert snapshot.sessionId.source == "pidfile"
+    assert snapshot.sessionId.observed_at == 10.0
+    assert snapshot.sessionId.is_fresh(now=10.0) is True
+
+
 def test_runtime_snapshot_tick_skips_codex_capture(monkeypatch):
     _patch_team(monkeypatch, cli="codex")
     store = RuntimeSnapshotStore()
@@ -269,6 +287,133 @@ def test_runtime_snapshot_payload_returns_none_when_snapshot_missing(monkeypatch
         "pane": "%1",
         "snapshot": None,
     }
+
+
+def test_resolve_transcript_path_cached_ignores_stale_snapshot_and_cached_path(
+    monkeypatch,
+    tmp_path,
+):
+    store = RuntimeSnapshotStore()
+    store.update_session_id("%1", "sid-old", source="fd", observed_at=10.0)
+    store.mark_session_stale("%1", observed_at=11.0)
+    old_transcript = tmp_path / "old.jsonl"
+    new_transcript = tmp_path / "new.jsonl"
+    old_transcript.write_text("old")
+    new_transcript.write_text("new")
+
+    class FakeAdapter:
+        def resolve_current_session_id(self, pane_id: str) -> str | None:
+            assert pane_id == "%1"
+            return "sid-new"
+
+        def find_session_file(self, session_id: str, *, cwd: str | None = None):
+            assert session_id == "sid-new"
+            assert cwd == "/repo"
+            return new_transcript
+
+    monkeypatch.setattr(sidecar, "_TRANSCRIPT_PATH_CACHE", {
+        "%1": (str(old_transcript), sidecar.time.monotonic() + 60.0, "sid-old"),
+    })
+    monkeypatch.setattr(sidecar, "_RUNTIME_SNAPSHOTS", store)
+    monkeypatch.setattr("hive.tmux.is_pane_alive", lambda _pane_id: True)
+    monkeypatch.setattr("hive.tmux.display_value", lambda _pane_id, _fmt: "/repo")
+    monkeypatch.setattr(sidecar, "detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="claude"))
+    monkeypatch.setattr("hive.adapters.get", lambda name: FakeAdapter() if name == "claude" else None)
+
+    assert sidecar._resolve_transcript_path_cached("%1") == str(new_transcript)
+
+
+def test_resolve_transcript_path_cached_ignores_stale_snapshot_negative_cache(
+    monkeypatch,
+    tmp_path,
+):
+    store = RuntimeSnapshotStore()
+    store.update_session_id("%1", "sid-old", source="fd", observed_at=10.0)
+    store.mark_session_stale("%1", observed_at=11.0)
+    transcript = tmp_path / "new.jsonl"
+    transcript.write_text("new")
+
+    class FakeAdapter:
+        def resolve_current_session_id(self, pane_id: str) -> str | None:
+            assert pane_id == "%1"
+            return "sid-new"
+
+        def find_session_file(self, session_id: str, *, cwd: str | None = None):
+            assert session_id == "sid-new"
+            assert cwd == "/repo"
+            return transcript
+
+    monkeypatch.setattr(sidecar, "_TRANSCRIPT_PATH_CACHE", {
+        "%1": ("", sidecar.time.monotonic() + 60.0, ""),
+    })
+    monkeypatch.setattr(sidecar, "_RUNTIME_SNAPSHOTS", store)
+    monkeypatch.setattr("hive.tmux.is_pane_alive", lambda _pane_id: True)
+    monkeypatch.setattr("hive.tmux.display_value", lambda _pane_id, _fmt: "/repo")
+    monkeypatch.setattr(sidecar, "detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="claude"))
+    monkeypatch.setattr("hive.adapters.get", lambda name: FakeAdapter() if name == "claude" else None)
+
+    assert sidecar._resolve_transcript_path_cached("%1") == str(transcript)
+
+
+def test_resolve_transcript_path_cached_requires_same_snapshot_session(
+    monkeypatch,
+    tmp_path,
+):
+    store = RuntimeSnapshotStore()
+    store.update_session_id("%1", "sid-new", source="fd", observed_at=sidecar.time.monotonic())
+    old_transcript = tmp_path / "old.jsonl"
+    new_transcript = tmp_path / "new.jsonl"
+    old_transcript.write_text("old")
+    new_transcript.write_text("new")
+
+    class FakeAdapter:
+        def resolve_current_session_id(self, pane_id: str) -> str | None:
+            raise AssertionError("fresh snapshot session should be used")
+
+        def find_session_file(self, session_id: str, *, cwd: str | None = None):
+            assert session_id == "sid-new"
+            assert cwd == "/repo"
+            return new_transcript
+
+    monkeypatch.setattr(sidecar, "_TRANSCRIPT_PATH_CACHE", {
+        "%1": (str(old_transcript), sidecar.time.monotonic() + 60.0, "sid-old"),
+    })
+    monkeypatch.setattr(sidecar, "_RUNTIME_SNAPSHOTS", store)
+    monkeypatch.setattr("hive.tmux.is_pane_alive", lambda _pane_id: True)
+    monkeypatch.setattr("hive.tmux.display_value", lambda _pane_id, _fmt: "/repo")
+    monkeypatch.setattr(sidecar, "detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="claude"))
+    monkeypatch.setattr("hive.adapters.get", lambda name: FakeAdapter() if name == "claude" else None)
+
+    assert sidecar._resolve_transcript_path_cached("%1") == str(new_transcript)
+
+
+def test_resolve_ack_baseline_ignores_stale_snapshot(monkeypatch, tmp_path):
+    store = RuntimeSnapshotStore()
+    store.update_session_id("%1", "sid-old", source="fd", observed_at=10.0)
+    store.mark_session_stale("%1", observed_at=11.0)
+    transcript = tmp_path / "new.jsonl"
+    transcript.write_text("new transcript")
+
+    class FakeAdapter:
+        def resolve_current_session_id(self, pane_id: str) -> str | None:
+            assert pane_id == "%1"
+            return "sid-new"
+
+        def find_session_file(self, session_id: str, *, cwd: str | None = None):
+            assert session_id == "sid-new"
+            assert cwd == "/repo"
+            return transcript
+
+    target = SimpleNamespace(pane_id="%1")
+    monkeypatch.setattr(sidecar, "_RUNTIME_SNAPSHOTS", store)
+    monkeypatch.setattr(sidecar, "detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="claude"))
+    monkeypatch.setattr("hive.adapters.get", lambda name: FakeAdapter() if name == "claude" else None)
+    monkeypatch.setattr("hive.tmux.display_value", lambda _pane_id, _fmt: "/repo")
+
+    path, baseline = sidecar._resolve_ack_baseline(target)
+
+    assert path == transcript
+    assert baseline == transcript.stat().st_size
 
 
 def test_agent_runtime_payload_does_not_consume_stale_snapshot_or_pidfile(monkeypatch):

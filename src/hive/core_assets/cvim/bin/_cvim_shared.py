@@ -38,7 +38,7 @@ def _detect_profile_for_pane(pane_id: str):
     return detect_profile_for_pane(pane_id)
 
 
-def _resolve_hive_runtime_session_id(pane_id: str) -> tuple[bool, str | None]:
+def _resolve_hive_runtime_session_id(pane_id: str, cli_name: str = "") -> tuple[bool, str | None]:
     try:
         from hive import tmux
         from hive.sidecar import request_runtime_snapshot
@@ -53,18 +53,20 @@ def _resolve_hive_runtime_session_id(pane_id: str) -> tuple[bool, str | None]:
         return False, None
 
     try:
-        payload = request_runtime_snapshot(workspace, pane_id=pane_id) or {}
+        payload = request_runtime_snapshot(workspace, pane_id=pane_id)
+        if not isinstance(payload, dict) or payload.get("ok") is False:
+            return False, None
         snapshot = payload.get("snapshot")
         if not isinstance(snapshot, dict):
-            return True, None
+            return cli_name == "claude", None
         if snapshot.get("_sessionIdFresh") is False:
             return True, None
         session_id = snapshot.get("sessionId")
         if isinstance(session_id, str) and session_id and session_id != "unresolved":
             return True, session_id
     except Exception:
-        return True, None
-    return True, None
+        return False, None
+    return cli_name == "claude", None
 
 
 def _resolve_claude_pidfile_session_id(pane_id: str, cwd: str) -> str | None:
@@ -440,7 +442,7 @@ def resolve_transcript_path_for_pane(
         if profile is not None:
             adapter = _get_adapter(profile.name)
             if adapter is not None:
-                hive_managed, session_id = _resolve_hive_runtime_session_id(pane_id)
+                hive_managed, session_id = _resolve_hive_runtime_session_id(pane_id, profile.name)
                 if not hive_managed:
                     try:
                         session_id = adapter.resolve_current_session_id(pane_id)
