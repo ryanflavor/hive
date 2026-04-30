@@ -206,6 +206,36 @@ def test_list_tty_processes_and_commands_strip_dev_prefix_and_parse_output(monke
     ]
 
 
+def test_list_open_files_uses_native_proc_info(monkeypatch):
+    monkeypatch.setattr("hive.proc_info.list_open_files", lambda _pid: ["/tmp/native.jsonl"])
+    monkeypatch.setattr(
+        "hive.tmux.subprocess.run",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("lsof should not run")),
+    )
+
+    assert tmux.list_open_files("123") == ["/tmp/native.jsonl"]
+
+
+def test_list_open_files_falls_back_to_lsof(monkeypatch):
+    from hive import proc_info
+
+    def _native(_pid):
+        raise proc_info.ProcInfoUnavailable("no native backend")
+
+    monkeypatch.setattr("hive.proc_info.list_open_files", _native)
+    monkeypatch.setattr(
+        "hive.tmux.subprocess.run",
+        lambda args, capture_output=True, text=True, check=False, timeout=5: subprocess.CompletedProcess(
+            args,
+            0,
+            "p123\nn/tmp/fallback.jsonl\nn/dev/null\n",
+            "",
+        ),
+    )
+
+    assert tmux.list_open_files("123") == ["/tmp/fallback.jsonl", "/dev/null"]
+
+
 def test_current_window_helpers_return_none_without_tmux_pane(monkeypatch):
     monkeypatch.delenv("TMUX_PANE", raising=False)
 

@@ -50,17 +50,14 @@ class CodexAdapter:
     # --- discovery ---
 
     def resolve_current_session_id(self, pane_id: str) -> str | None:
-        sessions_prefix = str(_codex_home() / "sessions") + "/"
         tty = tmux.get_pane_tty(pane_id) or ""
         for process in tmux.list_tty_processes(tty):
             if not _is_codex_process(process.command, process.argv):
                 continue
             for fpath in tmux.list_open_files(process.pid):
-                if not fpath.startswith(sessions_prefix) or not fpath.endswith(".jsonl"):
-                    continue
-                match = _CODEX_SESSION_UUID_RE.search(fpath)
-                if match:
-                    return match.group(1)
+                session_id = session_id_from_open_file(fpath)
+                if session_id:
+                    return session_id
         return None
 
     def _sessions_root(self) -> Path:
@@ -371,3 +368,11 @@ def _is_codex_process(command: str, argv: str) -> bool:
     if normalize_command_token(command) == "codex":
         return True
     return any(normalize_command_token(token) == "codex" for token in (argv or "").split())
+
+
+def session_id_from_open_file(fpath: str) -> str | None:
+    sessions_prefix = str(_codex_home() / "sessions") + "/"
+    if not fpath.startswith(sessions_prefix) or not fpath.endswith(".jsonl"):
+        return None
+    match = _CODEX_SESSION_UUID_RE.search(fpath)
+    return match.group(1) if match else None

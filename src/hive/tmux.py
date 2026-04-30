@@ -769,7 +769,7 @@ def list_tty_processes(tty: str) -> list[TTYProcessInfo]:
     return processes
 
 
-def list_open_files(pid: str) -> list[str]:
+def _list_open_files_lsof(pid: str) -> list[str]:
     """Return file paths held open by *pid* via ``lsof -p <pid> -Fn``."""
     if not pid:
         return []
@@ -788,6 +788,22 @@ def list_open_files(pid: str) -> list[str]:
         if line.startswith("n") and line[1:].startswith("/"):
             paths.append(line[1:])
     return paths
+
+
+def list_open_files(pid: str) -> list[str]:
+    """Return file paths held open by *pid*.
+
+    Darwin uses the native ``proc_pidinfo`` provider first; other platforms and
+    native failures fall back to ``lsof``.
+    """
+    if not pid:
+        return []
+    try:
+        from . import proc_info
+
+        return proc_info.list_open_files(pid)
+    except Exception:
+        return _list_open_files_lsof(pid)
 
 
 def list_tty_commands(tty: str) -> list[str]:
