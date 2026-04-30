@@ -1,7 +1,17 @@
 """Runtime snapshot primitives used by the sidecar.
 
-Snapshots are intentionally small at first. Later phases can add transcript,
-gate and turn-phase fields under the same generation model.
+Current scope is sessionId-only. This keeps the owner boundary narrow: the
+sidecar maintains current-session identity, and snapshot-only consumers such
+as cvim read that identity without launching their own live probes.
+
+Phase 3+ candidates, intentionally postponed until there is measured demand:
+- cheap pane facts such as profile/model when repeated query cost matters
+- transcript-derived fields such as inputState/turnPhase/gate
+- transcriptPath caching tied atomically to the same session generation
+
+Those fields need explicit invalidation and same-generation semantics before
+they move into this store. Until then, sidecar runtime queries compute them
+on demand.
 """
 
 from __future__ import annotations
