@@ -154,6 +154,11 @@ class ClaudeAdapter:
 
 
 _META_SCAN_LIMIT = 20
+# Calibration from the cvim /clear regression data:
+# - normal Claude idle pidfile/transcript gaps cluster around [-2m, 0s]
+# - stale pidfiles after /clear were 19h+ apart from their transcripts
+# The 15-minute bound sits in that bimodal gap. This is a workaround for
+# Claude binary heartbeat drift, not current-session authority.
 PIDFILE_TRANSCRIPT_STALE_AFTER_SECONDS = 15 * 60
 
 
