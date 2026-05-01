@@ -54,9 +54,14 @@ _FINALIZE_PENDING = "__finalize__"
 BUSY_OUTPUT_THRESHOLD_SECONDS = 3.0
 RUNTIME_SESSION_PROBE_WINDOW_SECONDS = 0.25
 RUNTIME_SESSION_PROBE_INTERVAL_SECONDS = 0.005
+# Session snapshots stay event-invalidated for consumers. This low-rate
+# maintenance probe only bounds sidecar drift without paying per-tick ps/fd
+# cost on the steady fresh path.
+RUNTIME_SESSION_STEADY_PROBE_SECONDS = 60.0
 _TRANSCRIPT_PATH_CACHE_TTL = 60.0
 _OUTPUT_BUSY_MONITOR = None
 _TRANSCRIPT_PATH_CACHE: dict[str, tuple[str, float, str]] = {}
+_RUNTIME_SESSION_LAST_STEADY_PROBE_AT: dict[str, float] = {}
 _AGENT_NOTIFY_ROLES = {"agent", "lead", "orchestrator"}
 _RUNTIME_SNAPSHOTS = RuntimeSnapshotStore()
 
@@ -250,6 +255,21 @@ def _pane_has_recent_output(pane_id: str) -> bool:
         return False
 
 
+def _runtime_session_steady_probe_due(
+    pane_id: str,
+    snapshot: RuntimeSnapshot | None,
+    *,
+    now: float,
+) -> bool:
+    if snapshot is None or not snapshot.sessionId.is_fresh(now=now):
+        return False
+    last_checked_at = max(
+        float(snapshot.sessionId.observed_at),
+        _RUNTIME_SESSION_LAST_STEADY_PROBE_AT.get(pane_id, 0.0),
+    )
+    return (now - last_checked_at) >= RUNTIME_SESSION_STEADY_PROBE_SECONDS
+
+
 def _probe_session_id_from_open_files(
     pane_id: str,
     cli_name: str,
@@ -342,17 +362,26 @@ def _runtime_snapshot_tick(
             continue
         snapshot = snapshot_store.get(pane_id)
         recent_output = _pane_has_recent_output(pane_id)
-        should_sample = cli_name == "claude" and (
+        needs_event_sample = cli_name == "claude" and (
             snapshot is None
             or not snapshot.sessionId.is_fresh(now=observed_at)
             or recent_output
         )
+        steady_probe_due = (
+            cli_name == "claude"
+            and not needs_event_sample
+            and _runtime_session_steady_probe_due(pane_id, snapshot, now=observed_at)
+        )
+        if not needs_event_sample and not steady_probe_due:
+            continue
         probe_kwargs: dict[str, Any] = {
-            "duration_s": RUNTIME_SESSION_PROBE_WINDOW_SECONDS if should_sample else 0.0,
+            "duration_s": RUNTIME_SESSION_PROBE_WINDOW_SECONDS if needs_event_sample else 0.0,
         }
         if workspace:
             probe_kwargs.update(workspace=workspace, team_name=team_name)
         session_id = _probe_session_id_from_open_files(pane_id, cli_name, **probe_kwargs)
+        if steady_probe_due:
+            _RUNTIME_SESSION_LAST_STEADY_PROBE_AT[pane_id] = observed_at
         source = "fd"
         if not session_id and (snapshot is None or snapshot.sessionId.source == "pidfile"):
             session_id = _probe_session_id_from_pidfile(pane_id, cli_name)

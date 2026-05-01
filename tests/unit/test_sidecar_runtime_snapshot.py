@@ -39,12 +39,74 @@ def test_runtime_snapshot_tick_keeps_previous_value_on_miss(monkeypatch):
     _patch_team(monkeypatch)
     store = RuntimeSnapshotStore()
     previous = store.update_session_id("%1", "sid-old", source="fd", observed_at=9.0)
-    monkeypatch.setattr(sidecar, "_probe_session_id_from_open_files", lambda _pane_id, _cli_name, **_kwargs: None)
-    monkeypatch.setattr(sidecar, "_probe_session_id_from_pidfile", lambda _pane_id, _cli_name: None)
+    monkeypatch.setattr(
+        sidecar,
+        "_probe_session_id_from_open_files",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("fresh idle snapshot should not probe")),
+    )
+    monkeypatch.setattr(
+        sidecar,
+        "_probe_session_id_from_pidfile",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("fresh idle snapshot should not probe")),
+    )
     monkeypatch.setattr(sidecar, "_pane_has_recent_output", lambda _pane_id: False)
 
     sidecar._runtime_snapshot_tick("team-x", store=store, now=10.0)
 
+    assert store.get("%1") == previous
+
+
+def test_runtime_snapshot_tick_runs_low_rate_steady_probe(monkeypatch):
+    _patch_team(monkeypatch)
+    store = RuntimeSnapshotStore()
+    store.update_session_id("%1", "sid-old", source="fd", observed_at=10.0)
+    monkeypatch.setattr(sidecar, "_RUNTIME_SESSION_LAST_STEADY_PROBE_AT", {})
+    monkeypatch.setattr(sidecar, "_pane_has_recent_output", lambda _pane_id: False)
+    durations: list[float] = []
+
+    def _probe(pane_id, cli_name, *, duration_s=0.0, **_kwargs):
+        durations.append(duration_s)
+        return "sid-new" if (pane_id, cli_name) == ("%1", "claude") else None
+
+    monkeypatch.setattr(sidecar, "_probe_session_id_from_open_files", _probe)
+
+    sidecar._runtime_snapshot_tick(
+        "team-x",
+        store=store,
+        now=10.0 + sidecar.RUNTIME_SESSION_STEADY_PROBE_SECONDS + 0.1,
+    )
+
+    snapshot = store.get("%1")
+    assert snapshot is not None
+    assert durations == [0.0]
+    assert snapshot.sessionId.value == "sid-new"
+    assert snapshot.sessionId.source == "fd"
+
+
+def test_runtime_snapshot_tick_throttles_steady_probe_misses(monkeypatch):
+    _patch_team(monkeypatch)
+    store = RuntimeSnapshotStore()
+    previous = store.update_session_id("%1", "sid-old", source="fd", observed_at=10.0)
+    monkeypatch.setattr(sidecar, "_RUNTIME_SESSION_LAST_STEADY_PROBE_AT", {})
+    monkeypatch.setattr(sidecar, "_pane_has_recent_output", lambda _pane_id: False)
+    durations: list[float] = []
+
+    def _probe(_pane_id, _cli_name, *, duration_s=0.0, **_kwargs):
+        durations.append(duration_s)
+        return None
+
+    monkeypatch.setattr(sidecar, "_probe_session_id_from_open_files", _probe)
+    monkeypatch.setattr(
+        sidecar,
+        "_probe_session_id_from_pidfile",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("pidfile should not refresh an fd snapshot")),
+    )
+
+    first_due = 10.0 + sidecar.RUNTIME_SESSION_STEADY_PROBE_SECONDS + 0.1
+    sidecar._runtime_snapshot_tick("team-x", store=store, now=first_due)
+    sidecar._runtime_snapshot_tick("team-x", store=store, now=first_due + 1.0)
+
+    assert durations == [0.0]
     assert store.get("%1") == previous
 
 
