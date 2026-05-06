@@ -348,10 +348,12 @@ def _runtime_snapshot_tick(
     store: RuntimeSnapshotStore | None = None,
     now: float | None = None,
     workspace: str = "",
+    members: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     snapshot_store = _RUNTIME_SNAPSHOTS if store is None else store
     observed_at = time.monotonic() if now is None else now
-    for member in _team_member_bindings(team_name).values():
+    bindings = members if members is not None else _team_member_bindings(team_name)
+    for member in bindings.values():
         if member.get("role") not in _AGENT_NOTIFY_ROLES:
             continue
         pane_id = str(member.get("pane") or "")
@@ -1722,6 +1724,7 @@ def _idle_notify_tick(
     now: float,
     workspace: str = "",
     debug_state: dict[str, Any] | None = None,
+    members: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     from . import notify_debug
     from . import plugin_manager
@@ -1735,7 +1738,17 @@ def _idle_notify_tick(
     active_window = tmux.get_most_recent_client_window(session_name) or ""
 
     windows: dict[str, list[str]] = {}
-    for pane_id in _idle_notify_agent_panes(team_name):
+    if members is not None:
+        agent_panes: list[str] = []
+        for member in members.values():
+            if member.get("role") not in _AGENT_NOTIFY_ROLES:
+                continue
+            pane_id = str(member.get("pane") or "")
+            if pane_id and pane_id not in agent_panes and tmux.is_pane_alive(pane_id):
+                agent_panes.append(pane_id)
+    else:
+        agent_panes = _idle_notify_agent_panes(team_name)
+    for pane_id in agent_panes:
         window_target = tmux.get_pane_window_target(pane_id) or ""
         if not window_target:
             continue
@@ -2444,7 +2457,9 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                     on_reexec=_emit_reexec,
                 )
 
-            _runtime_snapshot_tick(team, now=now, workspace=workspace)
+            tick_members = _team_member_bindings(team)
+
+            _runtime_snapshot_tick(team, now=now, workspace=workspace, members=tick_members)
 
             if not _serve_requests(
                 server=server,
@@ -2466,6 +2481,7 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                 now=time.monotonic(),
                 workspace=workspace,
                 debug_state=notify_debug_state,
+                members=tick_members,
             )
 
             for message_id, record in list(pending.items()):
