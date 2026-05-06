@@ -702,30 +702,34 @@ def fork_cmd(pane_id: str, split: str, join_as: str, prompt: str):
       hive fork --split h                        # force horizontal split
       hive fork --join-as dodo-c1 --prompt "continue the thread"
     """
-    if prompt and not join_as:
-        _fail("--prompt requires --join-as")
-
-    if join_as:
+    if pane_id:
+        team_name = tmux.get_pane_option(pane_id, "hive-team")
+        if team_name:
+            target_team = _load_team(team_name)
+        else:
+            _fail(f"pane '{pane_id}' is not bound to a Hive team")
+    else:
         _, target_team = _resolve_scoped_team(None, required=True)
-        assert target_team is not None
-        registered_agent, new_pane = _fork_registered_agent(
-            t=target_team,
-            pane_id=pane_id,
-            split=split,
-            join_as=join_as,
-            prompt=prompt,
-        )
-        del registered_agent
-        click.echo(json.dumps({
-            "pane": new_pane,
-            "registered": join_as,
-            "team": target_team.name,
-        }, indent=2, ensure_ascii=False))
-        return
 
-    current_pane, profile, session_id, horizontal, source_cwd = _fork_source_details(pane_id, split)
-    new_pane = tmux.split_window(current_pane, horizontal=horizontal, cwd=source_cwd or None, detach=False)
-    tmux.send_keys(new_pane, profile.resume_cmd.format(session_id=session_id))
+    if not join_as:
+        window_target = target_team.tmux_window or tmux.get_current_window_target() or ""
+        panes = tmux.list_panes_full(window_target) if window_target else []
+        seen_names = _window_seen_names(target_team, panes)
+        join_as = _derive_agent_name(seen_names)
+
+    registered_agent, new_pane = _fork_registered_agent(
+        t=target_team,
+        pane_id=pane_id,
+        split=split,
+        join_as=join_as,
+        prompt=prompt,
+    )
+    del registered_agent
+    click.echo(json.dumps({
+        "pane": new_pane,
+        "registered": join_as,
+        "team": target_team.name,
+    }, indent=2, ensure_ascii=False))
 
 
 @cli.command("current", hidden=True)
@@ -871,7 +875,7 @@ def _spawn_team_agent(
     return agent
 
 
-def _fork_source_details(pane_id: str, split: str) -> tuple[str, object, str, bool, str]:
+def _fork_source_details(pane_id: str, split: str, *, workspace: str = "") -> tuple[str, object, str, bool, str]:
     if not tmux.is_inside_tmux():
         _fail("hive fork requires tmux")
 
@@ -890,7 +894,15 @@ def _fork_source_details(pane_id: str, split: str) -> tuple[str, object, str, bo
     else:
         horizontal = split == "h"
 
-    session_id = resolve_session_id_for_pane(current_pane, profile=profile)
+    session_id: str | None = None
+    if workspace:
+        from .sidecar import request_runtime_snapshot
+        snapshot = request_runtime_snapshot(workspace, pane_id=current_pane) or {}
+        sid = snapshot.get("sessionId")
+        if sid and sid != "unresolved" and snapshot.get("_sessionIdFresh", True):
+            session_id = str(sid)
+    if not session_id:
+        session_id = resolve_session_id_for_pane(current_pane, profile=profile)
     if not session_id:
         _fail(f"cannot determine session id for pane '{current_pane}'")
 
@@ -898,22 +910,40 @@ def _fork_source_details(pane_id: str, split: str) -> tuple[str, object, str, bo
     return current_pane, profile, session_id, horizontal, source_cwd
 
 
-def _fork_boundary_prompt(fork_name: str) -> str:
-    """A boundary message prepended to whatever prompt the fork receives.
+_FORK_BOUNDARY_TEXT = (
+    "FORK BOUNDARY: you are a freshly forked agent. Run `hive team` to find your "
+    "own identity (the `self` field). The prior transcript is read-only context "
+    "only — every pending tool call, bash command, or action in it belongs to the "
+    "original agent and has either already completed or is being handled on their "
+    "side. Do NOT re-execute any inherited action. Act only on new instructions "
+    "that appear from this message onward."
+)
 
-    The child pane resumes the parent's session, so its transcript starts
-    populated with the parent's conversation — including any pending tool
-    call or intended action that was mid-flight at fork time. Without a
-    boundary, the child happily re-executes that inherited action (e.g.
-    triggering another `hive fork` and recursing).
+
+def _fork_boundary_prompt() -> str:
+    """The boundary message every fork receives as its first user input.
+
+    Static across workspaces and forks: the new pane resumes the parent's session
+    so its transcript starts populated with mid-flight tool calls and intended
+    actions. Without a boundary the child happily re-executes those (e.g.
+    triggering another `hive fork` and recursing). The fork discovers its own
+    name via `hive team` rather than having it baked in.
     """
-    return (
-        f"FORK BOUNDARY: you are the fork '{fork_name}', cloned from the originating pane. "
-        "The prior transcript is read-only context only — every pending tool call, bash "
-        "command, or action in it belongs to the original agent and has either already "
-        "completed or is being handled on their side. Do NOT re-execute any inherited "
-        "action. Act only on new instructions that appear from this message onward."
-    )
+    return _FORK_BOUNDARY_TEXT
+
+
+def _fork_boundary_file() -> Path:
+    """Cached static boundary file under ``$HIVE_HOME``.
+
+    Lets the resume command stay short (``cat <path>`` rather than the full
+    several-line text inline). Rewritten when the cached content drifts from the
+    current code so updates take effect without manual cleanup.
+    """
+    path = HIVE_HOME / "fork-boundary.txt"
+    if not path.exists() or path.read_text() != _FORK_BOUNDARY_TEXT:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_FORK_BOUNDARY_TEXT)
+    return path
 
 
 def _fork_registered_agent(
@@ -931,10 +961,22 @@ def _fork_registered_agent(
     seen_names = _window_seen_names(t, panes)
     _claim_member_name(join_as, seen_names)
 
-    current_pane, profile, session_id, horizontal, source_cwd = _fork_source_details(pane_id, split)
+    current_pane, profile, session_id, horizontal, source_cwd = _fork_source_details(
+        pane_id, split, workspace=getattr(t, "workspace", ""),
+    )
 
+    # Boundary text is static across workspaces and forks, so cache it under
+    # $HIVE_HOME and expand via shell command substitution. Keeps the typed
+    # command short and skips the wait-for-ready scrape that broke for
+    # fork-session loading large parent transcripts.
+    cmd_base = profile.resume_cmd.format(session_id=session_id)
+    if boundary_prompt or prompt:
+        composed = (boundary_prompt or _fork_boundary_prompt()) + ("\n\n" + prompt if prompt else "")
+        resume_cmd = f"{cmd_base} {shlex.quote(composed)}"
+    else:
+        resume_cmd = f"{cmd_base} \"$(cat {shlex.quote(str(_fork_boundary_file()))})\""
     new_pane = tmux.split_window(current_pane, horizontal=horizontal, cwd=source_cwd or None, detach=False)
-    tmux.send_keys(new_pane, profile.resume_cmd.format(session_id=session_id))
+    tmux.send_keys(new_pane, resume_cmd)
     registered_agent = _register_agent_member(
         t,
         pane_id=new_pane,
@@ -944,18 +986,9 @@ def _fork_registered_agent(
         cwd=source_cwd or os.getcwd(),
         notify=False,
     )
-    # Always wait for the forked pane to finish resuming before sending text into it.
-    # The boundary prompt must land before the child can re-execute any pending action
-    # inherited from the parent transcript, so we cannot skip the ready check even when
-    # no task prompt was provided.
-    if not tmux.wait_for_text(new_pane, profile.ready_text, timeout=AGENT_STARTUP_TIMEOUT):
-        _fail(f"forked pane '{new_pane}' did not become ready before sending prompt")
-    time.sleep(1)
-    composed = boundary_prompt or _fork_boundary_prompt(join_as)
-    if prompt:
-        composed = composed + "\n\n" + prompt
-    registered_agent.send(composed)
     return registered_agent, new_pane
+
+
 
 
 def _resolve_handoff_anchor_event(

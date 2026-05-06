@@ -1,44 +1,53 @@
 import json
+import shlex
 
 import pytest
 
 from hive.cli import _choose_fork_split, _fork_boundary_prompt, cli
 
 
-def test_fork_uses_claude_profile_from_runtime_session(runner, configure_hive_home, monkeypatch):
+def test_fork_auto_registers_with_derived_name(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home(current_pane="%99", session_name="dev")
 
+    workspace = tmp_path / "ws"
+    assert runner.invoke(cli, ["create", "team-x", "--workspace", str(workspace)]).exit_code == 0
+
     sent: list[tuple[str, str, bool]] = []
+    prompted: list[tuple[str, str, str]] = []
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%99")
-    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane: type("P", (), {"name": "claude", "resume_cmd": "claude -r {session_id} --fork-session"})())
+    monkeypatch.setattr(
+        "hive.cli.detect_profile_for_pane",
+        lambda _pane: type(
+            "P", (), {"name": "claude", "resume_cmd": "claude -r {session_id} --fork-session", "ready_text": "Claude Code"},
+        )(),
+    )
     monkeypatch.setattr("hive.cli.resolve_session_id_for_pane", lambda _pane, profile=None: "sess-123")
     monkeypatch.setattr("hive.cli.tmux.display_value", lambda _pane, _fmt: "/tmp/work")
     monkeypatch.setattr("hive.cli.tmux.split_window", lambda _pane, horizontal=True, cwd=None, detach=False: "%100")
     monkeypatch.setattr("hive.cli.tmux.send_keys", lambda pane, text, enter=True: sent.append((pane, text, enter)))
+    monkeypatch.setattr("hive.cli.tmux.wait_for_text", lambda _pane, _text, timeout=0, interval=1: True)
+    monkeypatch.setattr("hive.cli.time.sleep", lambda _s: None)
+    monkeypatch.setattr("hive.agent.Agent.send", lambda self, text: prompted.append((self.name, self.pane_id, text)))
+
+    from hive.tmux import PaneInfo
+
+    monkeypatch.setattr(
+        "hive.cli.tmux.list_panes_full",
+        lambda _target: [PaneInfo("%99", "orch", command="claude", role="lead", agent="orch", team="team-x", cli="claude")],
+    )
 
     result = runner.invoke(cli, ["fork", "--pane", "%99", "-s", "h"])
 
     assert result.exit_code == 0
-    assert sent == [("%100", "claude -r sess-123 --fork-session", True)]
-
-
-def test_fork_falls_back_to_codex_resume_command(runner, configure_hive_home, monkeypatch):
-    configure_hive_home(current_pane="%141", session_name="dev")
-
-    sent: list[tuple[str, str, bool]] = []
-    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
-    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%141")
-    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane: type("P", (), {"name": "codex", "resume_cmd": "codex fork {session_id}"})())
-    monkeypatch.setattr("hive.cli.resolve_session_id_for_pane", lambda _pane, profile=None: "sess-codex")
-    monkeypatch.setattr("hive.cli.tmux.display_value", lambda _pane, _fmt: "/tmp/work")
-    monkeypatch.setattr("hive.cli.tmux.split_window", lambda _pane, horizontal=True, cwd=None, detach=False: "%145")
-    monkeypatch.setattr("hive.cli.tmux.send_keys", lambda pane, text, enter=True: sent.append((pane, text, enter)))
-
-    result = runner.invoke(cli, ["fork", "--pane", "%141", "-s", "v"])
-
-    assert result.exit_code == 0
-    assert sent == [("%145", "codex fork sess-codex", True)]
+    payload = json.loads(result.output)
+    assert len(sent) == 1 and sent[0][0] == "%100"
+    assert sent[0][1].startswith("claude -r sess-123 --fork-session \"$(cat ")
+    assert sent[0][1].endswith(")\"")
+    assert payload["pane"] == "%100"
+    assert payload["team"] == "team-x"
+    assert payload["registered"]
+    assert prompted == []
 
 
 def test_fork_join_as_registers_new_agent_in_current_team(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -75,10 +84,12 @@ def test_fork_join_as_registers_new_agent_in_current_team(runner, configure_hive
     result = runner.invoke(cli, ["fork", "--pane", "%99", "-s", "h", "--join-as", "claude-2"])
 
     assert result.exit_code == 0
-    assert sent == [("%100", "claude -r sess-123 --fork-session", True)]
-    # Without --prompt, fork still sends exactly the boundary notice so the child
-    # does not re-execute pending actions inherited from the parent transcript.
-    assert prompted == [("claude-2", "%100", _fork_boundary_prompt("claude-2"))]
+    # Boundary text is static and cached under $HIVE_HOME; the resume command
+    # shell-expands it via `$(cat <path>)` so the typed command stays short.
+    assert len(sent) == 1 and sent[0][0] == "%100"
+    assert sent[0][1].startswith("claude -r sess-123 --fork-session \"$(cat ")
+    assert sent[0][1].endswith(")\"")
+    assert prompted == []
     payload = json.loads(result.output)
     assert payload == {"pane": "%100", "registered": "claude-2", "team": "team-x"}
 
@@ -94,7 +105,7 @@ def test_fork_join_as_registers_new_agent_in_current_team(runner, configure_hive
     assert ctx["agent"] == "claude-2"
 
 
-def test_fork_join_as_prompt_waits_for_ready_then_sends_prompt(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_fork_join_as_prompt_embeds_in_resume_command(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home(current_pane="%99", session_name="dev")
 
     workspace = tmp_path / "ws"
@@ -141,37 +152,26 @@ def test_fork_join_as_prompt_waits_for_ready_then_sends_prompt(runner, configure
     )
 
     assert result.exit_code == 0
-    assert sent == [("%100", "claude -r sess-123 --fork-session", True)]
-    # Fork prepends a boundary notice to the caller-supplied prompt so the child
-    # treats the inherited transcript as read-only context and does not re-execute
-    # any pending action from it (e.g. running `hive fork` again).
+    # With --prompt, the boundary text is inlined together with the user prompt
+    # in the resume command (rather than expanded from the cached file).
     expected_prompt = (
-        _fork_boundary_prompt("claude-2")
+        _fork_boundary_prompt()
         + "\n\n"
         + "先跑 hive thread Veh9 看原始内容，处理完 reply-to lulu"
     )
-    assert prompted == [("claude-2", "%100", expected_prompt)]
+    expected_cmd = f"claude -r sess-123 --fork-session {shlex.quote(expected_prompt)}"
+    assert sent == [("%100", expected_cmd, True)]
+    assert prompted == []
 
 
-def test_fork_boundary_prompt_names_the_fork_and_forbids_inherited_actions():
-    body = _fork_boundary_prompt("kiki-2")
-    assert "kiki-2" in body
+def test_fork_boundary_prompt_is_static_and_directs_to_hive_team():
+    body = _fork_boundary_prompt()
     assert "FORK BOUNDARY" in body
+    assert "hive team" in body
     assert "Do NOT re-execute" in body
     # Boundary must be a single user message (no leading / trailing whitespace drift).
     assert body == body.strip()
 
-
-def test_fork_prompt_requires_join_as(runner, configure_hive_home, monkeypatch):
-    configure_hive_home(current_pane="%99", session_name="dev")
-
-    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
-    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%99")
-
-    result = runner.invoke(cli, ["fork", "--pane", "%99", "--prompt", "do work"])
-
-    assert result.exit_code != 0
-    assert "--prompt requires --join-as" in result.output
 
 
 def test_fork_join_as_rejects_taken_name_before_split(runner, configure_hive_home, monkeypatch, tmp_path):

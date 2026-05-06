@@ -85,6 +85,15 @@ def write_fake_droid(tmp_path: Path) -> Path:
             print("fake droid ready - type 'for help'")
             sys.stdout.flush()
 
+            # Trailing positional args are an inline prompt; echo as RECV.
+            argv_prompt = next(
+                (a for a in sys.argv[1:] if not a.startswith("-") and a != "source-sess"),
+                None,
+            )
+            if argv_prompt is not None:
+                print(f"RECV:{argv_prompt}")
+                sys.stdout.flush()
+
             for line in sys.stdin:
                 text = line.rstrip("\\n")
                 print(f"RECV:{text}")

@@ -95,8 +95,11 @@ def test_e2e_fork_join_as_prompt_registers_agent_and_delivers_prompt(tmp_path: P
             "team": team,
         }
 
+        # The boundary text is prepended ahead of the caller's prompt, so the
+        # `RECV:` line starts with the boundary; the user prompt lands on a later
+        # line within the same payload.
         wait_for(
-            lambda: "droid --fork source-sess" in capture(new_pane) and f"RECV:{prompt}" in capture(new_pane),
+            lambda: "droid --fork source-sess" in capture(new_pane) and prompt in capture(new_pane),
             timeout=10.0,
         )
 
