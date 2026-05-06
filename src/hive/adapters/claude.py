@@ -227,25 +227,6 @@ def _iter_claude_parts(content: Any) -> Iterator[MessagePart]:
             yield MessagePart(kind="unknown", raw=block)
 
 
-def session_id_from_open_file(fpath: str) -> str | None:
-    path = Path(fpath)
-    if path.suffix != ".jsonl":
-        return None
-    try:
-        path.relative_to(_claude_home() / "projects")
-    except ValueError:
-        return None
-    return path.stem or None
-
-
-def resolve_session_id_from_open_files(pid: str | int) -> str | None:
-    for fpath in tmux.list_open_files(str(pid)):
-        session_id = session_id_from_open_file(fpath)
-        if session_id:
-            return session_id
-    return None
-
-
 def resolve_session_id_from_pidfile(pid: str | int, *, cwd: str | None = None) -> str | None:
     payload = _read_json_file(_claude_home() / "sessions" / f"{pid}.json")
     if not payload:

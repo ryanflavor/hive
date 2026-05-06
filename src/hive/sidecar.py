@@ -52,8 +52,6 @@ SEND_REQUEST_TIMEOUT = SEND_GRACE_TIMEOUT + 2.0
 SIDECAR_API_VERSION = 5
 _FINALIZE_PENDING = "__finalize__"
 BUSY_OUTPUT_THRESHOLD_SECONDS = 3.0
-RUNTIME_SESSION_PROBE_WINDOW_SECONDS = 0.25
-RUNTIME_SESSION_PROBE_INTERVAL_SECONDS = 0.005
 # Session snapshots stay event-invalidated for consumers. This low-rate
 # maintenance probe only bounds sidecar drift without paying per-tick ps/fd
 # cost on the steady fresh path.
@@ -222,18 +220,6 @@ def _set_output_busy_monitor(monitor: Any) -> None:
     _OUTPUT_BUSY_MONITOR = monitor
 
 
-def _session_id_from_open_file(cli_name: str, fpath: str) -> str | None:
-    if cli_name == "claude":
-        from .adapters.claude import session_id_from_open_file
-
-        return session_id_from_open_file(fpath)
-    if cli_name == "codex":
-        from .adapters.codex import session_id_from_open_file
-
-        return session_id_from_open_file(fpath)
-    return None
-
-
 def _process_matches_cli(cli_name: str, command: str, argv: str) -> bool:
     from .agent_cli import detect_profile_from_pane_command, detect_profile_from_text
 
@@ -268,59 +254,6 @@ def _runtime_session_steady_probe_due(
         _RUNTIME_SESSION_LAST_STEADY_PROBE_AT.get(pane_id, 0.0),
     )
     return (now - last_checked_at) >= RUNTIME_SESSION_STEADY_PROBE_SECONDS
-
-
-def _probe_session_id_from_open_files(
-    pane_id: str,
-    cli_name: str,
-    *,
-    duration_s: float = 0.0,
-    interval_s: float = RUNTIME_SESSION_PROBE_INTERVAL_SECONDS,
-    workspace: str = "",
-    team_name: str = "",
-) -> str | None:
-    from . import proc_info, tmux as tmux_mod
-
-    tty = tmux_mod.get_pane_tty(pane_id) or ""
-    if not tty:
-        return None
-    processes = [
-        process for process in tmux_mod.list_tty_processes(tty)
-        if _process_matches_cli(cli_name, process.command, process.argv)
-    ]
-    if not processes:
-        return None
-    deadline = time.monotonic() + max(0.0, duration_s)
-    logged_errors: set[tuple[str, str]] = set()
-    while True:
-        for process in processes:
-            try:
-                open_files = proc_info.list_open_files(process.pid)
-            except Exception as exc:
-                error_key = (str(process.pid), exc.__class__.__name__)
-                if workspace and error_key not in logged_errors:
-                    logged_errors.add(error_key)
-                    from . import notify_debug
-
-                    notify_debug.emit(
-                        workspace,
-                        "runtime.fd_probe_error",
-                        team=team_name,
-                        pane=pane_id,
-                        cliName=cli_name,
-                        processPid=str(process.pid),
-                        errorType=exc.__class__.__name__,
-                    )
-                continue
-            for fpath in open_files:
-                session_id = _session_id_from_open_file(cli_name, fpath)
-                if session_id:
-                    return session_id
-        remaining = deadline - time.monotonic()
-        if duration_s <= 0 or remaining <= 0:
-            return None
-        time.sleep(min(max(0.0, interval_s), remaining))
-    return None
 
 
 def _probe_session_id_from_pidfile(pane_id: str, cli_name: str) -> str | None:
