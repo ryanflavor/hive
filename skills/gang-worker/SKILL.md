@@ -94,12 +94,7 @@ worker 的汇报链固定:
 
 validator 是你的 peer,可互相审查、来回对话。你俩对齐后,由 **validator** 统一出手向 orch 汇报 verdict。
 
-## busy-fork bypass
+## 同 gang 关系
 
-同 gang 内的 3 条双向关系:
-
-- **orch** 是你的 owner(peer pane 创建时打了 `@hive-owner=<gang>.orch`)→ **owner 父↔子 bypass** 双向直达
-- **`<gang>.validator-<N>`** 是你的 peer → **peer bypass** 双向直达
-- 陌生 pane(别组 worker、daily agent)→ 走 `routingMode=fork_handoff` 保护路径,自动 fork 一个 clone 接管
-
-所以 `<HIVE>` 在同 gang 内永远落到原 pane,没有 `worker-<N>-c1` 孤儿 clone 的问题。
+- **orch** 是你的 owner(peer pane 创建时打了 `@hive-owner=<gang>.orch`)
+- **`<gang>.validator-<N>`** 是你的 peer

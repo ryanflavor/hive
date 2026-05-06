@@ -107,9 +107,6 @@ Notes:
 - the active-turn branch is what makes idle-notify safe under streaming
   agents (Claude/Codex tool loops): the public `busy` field tracks
   "agent in mid-turn", not just "tmux output in the last 3s"
-- the active-turn set is shared with root-send fork routing
-  (cli.py active_turn_fork) so both layers agree on what counts as
-  "in-flight"
 - known limitation: a CLI that emits visible output for longer than the
   threshold without writing the transcript jsonl AND whose `turnPhase`
   the probe can't recognise can be gated as a false negative; the
@@ -182,15 +179,6 @@ busy.
 
 Hard busy is not currently surfaced as its own public runtime field.
 
-## Consumer Subsets of `turnPhase`
-
-One decision site inside Hive reads `turnPhase` directly:
-
-- Fork selector in root send (`cli._maybe_route_busy_root_send`):
-  - `turnPhase ∈ {task_closed, turn_closed}` → never fork (turn already closed)
-  - `busy=False ∧ turnPhase ∈ {tool_open, user_prompt_pending, tool_result_pending_reply}` → fork (hard unclosed even though pane is idle)
-  - otherwise, fork only when `busy=True`
-
 ## Current CLI-Specific Evidence
 
 Each row maps a transcript/JCL observation to the emitted `turnPhase` value.
@@ -245,33 +233,6 @@ Current root-body hard failures:
 
 This rule applies to root sends. Replies are not subject to these summary-body
 limits.
-
-## Active-Turn Fork Routing
-
-When a root send's target is in an active turn — `busy=true`, or
-`turnPhase ∈ {tool_open, user_prompt_pending, tool_result_pending_reply, input_backlog}`
-even when `busy=false` — Hive automatically forks a clone pane (named
-`<target>-c1`, `-c2`, ...) and routes the message there. The clone is
-spawned with a boundary system block; the original target is never
-interrupted. The same set blocks idle-notify fire so a pane mid-flight
-(or with a queued prompt about to be picked up) is not treated as idle.
-
-Three bypass exemptions skip the fork and deliver to the original target
-directly:
-
-1. peer relationship (`sender.peer == target`, symmetric)
-2. owner parent → child (`sender == target.@hive-owner`)
-3. child → parent owner (`target == sender.@hive-owner`)
-
-When a fork happens, the routing return payload carries:
-
-- `routingMode=fork_handoff`
-- `routingReason=active_turn_fork`
-- `forkedFromPane`
-- `forkedToPane`
-
-`turnPhase ∈ {task_closed, turn_closed}` never forks: the turn is already
-closed, so the message goes straight to the original target.
 
 ## Why There Is Only One Runtime Doc
 

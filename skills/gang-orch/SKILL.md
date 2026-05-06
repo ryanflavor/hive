@@ -96,15 +96,9 @@ cleanup 只 kill peer-N 窗口(worker + validator),主 gang window(orch / skepti
 
 worker ↔ validator 也是 peer 对,他们之间的分歧在 peer 内消化。你收到的永远是"validator 出 verdict 后的结论",不是他们中间的争论。
 
-## busy-fork 路由规则
+## 同 gang 关系
 
-你往其他 gang 成员发 `hive send` 默认**直达、不 fork**,因为你和他们都满足 bypass 关系:
+- **orch ↔ skeptic** — 互为 peer
+- **orch ↔ worker-N / validator-N** — 你 spawn 了他们:`hive gang spawn-peer` 把 `@hive-owner=<gang>.orch` 打在 peer pane 上
 
-- **orch ↔ skeptic** — 互为 peer(对称 **peer bypass**)
-- **orch ↔ worker-N / validator-N** — 你 spawn 了他们:`hive gang spawn-peer` 把 `@hive-owner=<gang>.orch` 打在 peer pane 上,**owner bypass** 双向生效(父→子 / 子→父)
-
-即便 worker / validator 正在 active turn,你派新任务也不会 fork 出 `<name>-c1` 孤儿 clone。
-
-但往**陌生 pane**(其他 gang 的 worker、daily agent 等)发送,仍然会 fork —— 这是跨组保护,bypass 只覆盖同 gang 内。
-
-> **board 不是 send 目标**:board 是 vim pane,走 file autoread(`hive gang board` 直接写文件,vim 自动感知),不走 `hive send`,也没 bypass 概念。要发信号给 board,直接用 Edit 写 `BLACKBOARD.md`。
+> **board 不是 send 目标**:board 是 vim pane,走 file autoread(`hive gang board` 直接写文件,vim 自动感知),不走 `hive send`。要发信号给 board,直接用 Edit 写 `BLACKBOARD.md`。

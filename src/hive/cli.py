@@ -24,7 +24,6 @@ from . import notify_ui
 from . import plugin_manager
 from . import skill_sync
 from . import tmux
-from .activity import ACTIVE_TURN_PHASES
 from .agent import AGENT_STARTUP_TIMEOUT, Agent
 from .agent_cli import AGENT_CLI_NAMES, anti_peer_cli, detect_profile_for_pane, family_for_pane, member_role_for_pane, normalize_command, peer_cli_for_family, resolve_peer_spawn, resolve_session_id_for_pane
 from .team import HIVE_HOME, LEAD_AGENT_NAME, Team, Terminal
@@ -957,102 +956,6 @@ def _fork_registered_agent(
         composed = composed + "\n\n" + prompt
     registered_agent.send(composed)
     return registered_agent, new_pane
-
-
-def _next_busy_fork_name(t: Team, base_name: str) -> str:
-    window_target = t.tmux_window or tmux.get_current_window_target() or ""
-    panes = tmux.list_panes_full(window_target) if window_target else []
-    seen_names = _window_seen_names(t, panes)
-    suffix = 1
-    while True:
-        candidate = f"{base_name}-c{suffix}"
-        if candidate not in seen_names:
-            return candidate
-        suffix += 1
-
-
-def _busy_fork_system_block(*, original_target: str, clone_name: str) -> str:
-    return (
-        f"<HIVE-SYSTEM type=busy-fork target={original_target} clone={clone_name}>\n"
-        f"FORK BOUNDARY: you are the fork '{clone_name}', cloned from '{original_target}' because the original agent is currently busy. "
-        "The prior transcript is read-only context only — every pending tool call, bash command, or action in it belongs to the original agent and has either already completed or is being handled on their side. "
-        "Do not continue or re-execute the original agent's pending work. "
-        "The next inbound HIVE message is the new root you should handle on behalf of the busy target. "
-        "Act only on new instructions that appear from this message onward.\n"
-        "</HIVE-SYSTEM>"
-    )
-
-
-def _maybe_route_busy_root_send(
-    *,
-    t: Team,
-    workspace: str | Path,
-    target_agent: str,
-    sender_agent: str = "",
-) -> tuple[str, dict[str, object]]:
-    from .sidecar import request_team_runtime
-
-    try:
-        target_member = t.get(target_agent)
-    except KeyError:
-        return target_agent, {}
-    if not getattr(target_member, "is_alive", lambda: False)():
-        return target_agent, {}
-    target_pane = getattr(target_member, "pane_id", "") or ""
-    if not target_pane:
-        return target_agent, {}
-    profile = detect_profile_for_pane(target_pane)
-    if not profile:
-        return target_agent, {}
-    if not resolve_session_id_for_pane(target_pane, profile=profile):
-        return target_agent, {}
-
-    _ensure_team_sidecar(t, workspace)
-    runtime_payload = request_team_runtime(str(workspace), team=t.name) or {}
-    members = runtime_payload.get("members")
-    if not isinstance(members, dict):
-        return target_agent, {}
-    runtime = members.get(target_agent)
-    if not isinstance(runtime, dict):
-        return target_agent, {}
-    reason = str(runtime.get("turnPhase") or "")
-    if reason in {"task_closed", "turn_closed"}:
-        return target_agent, {}
-    if sender_agent and t.resolve_peer(target_agent) == sender_agent:
-        return target_agent, {}
-    # Owner/child bypass: sender spawned target (parent -> child),
-    # or target spawned sender (child -> parent). Both are expected
-    # signaling channels, not hostile interrupts.
-    target_owner = tmux.get_pane_option(target_pane, "hive-owner") or ""
-    if sender_agent and sender_agent == target_owner:
-        return target_agent, {}
-    sender_pane = tmux.get_current_pane_id() or ""
-    if sender_pane:
-        sender_owner = tmux.get_pane_option(sender_pane, "hive-owner") or ""
-        if sender_owner and target_agent == sender_owner:
-            return target_agent, {}
-    if not bool(runtime.get("busy")) and reason not in ACTIVE_TURN_PHASES:
-        return target_agent, {}
-
-    clone_name = _next_busy_fork_name(t, target_agent)
-    try:
-        clone_member, clone_pane = _fork_registered_agent(
-            t=t,
-            pane_id=target_pane,
-            split="auto",
-            join_as=clone_name,
-            boundary_prompt=_busy_fork_system_block(original_target=target_agent, clone_name=clone_name),
-        )
-    except SystemExit:
-        return target_agent, {}
-    return clone_name, {
-        "requestedTo": target_agent,
-        "effectiveTarget": clone_name,
-        "routingMode": "fork_handoff",
-        "routingReason": "active_turn_fork",
-        "forkedFromPane": target_pane,
-        "forkedToPane": clone_pane,
-    }
 
 
 def _resolve_handoff_anchor_event(
@@ -3092,18 +2995,12 @@ def send(
     ws = _resolve_workspace(t, required=True)
     _validate_root_send_protocol(body, artifact)
     resolved_artifact = _resolve_artifact_path(artifact, workspace=ws)
-    effective_target, routing = _maybe_route_busy_root_send(
-        t=t,
-        workspace=ws,
-        target_agent=to_agent,
-        sender_agent=sender,
-    )
     try:
         payload = _request_send_payload(
             workspace=ws,
             team=t,
             sender_agent=sender,
-            target_agent=effective_target,
+            target_agent=to_agent,
             body=body,
             artifact=resolved_artifact,
             reply_to="",
@@ -3113,8 +3010,6 @@ def send(
     except RuntimeError as exc:
         _fail(str(exc))
         return
-    if routing:
-        payload.update(routing)
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
     if payload.get("delivery") == "failed":
         sys.exit(2)
