@@ -72,21 +72,11 @@ def test_resolve_session_id_for_pane_dispatches_to_adapter(monkeypatch):
     assert calls == ["%138"]
 
 
-def test_resolve_session_id_for_pane_returns_fd_mapped_session(monkeypatch, tmp_path):
-    """Adapter is a pure open-file mapping reader — newer jsonls in the same
-    project_dir belong to other panes (or other processes) and must not
-    override PID-anchored fd evidence."""
-    projects_dir = tmp_path / "projects" / "-repo"
-    projects_dir.mkdir(parents=True)
-
-    own = projects_dir / "sess-old.jsonl"
-    own.write_text(json.dumps({"sessionId": "sess-old", "cwd": "/repo"}) + "\n")
-    other = projects_dir / "sess-other.jsonl"
-    other.write_text(json.dumps({"sessionId": "sess-other", "cwd": "/repo"}) + "\n")
-    own_ns = 1_700_000_000_000_000_000
-    other_ns = own_ns + 5_000
-    os.utime(own, ns=(own_ns, own_ns))
-    os.utime(other, ns=(other_ns, other_ns))
+def test_resolve_session_id_for_pane_returns_pidfile_session(monkeypatch, tmp_path):
+    """Adapter reads the PID-anchored pidfile to resolve the session."""
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    (sessions_dir / "42424.json").write_text(json.dumps({"sessionId": "sess-pid"}))
 
     monkeypatch.setenv("CLAUDE_HOME", str(tmp_path))
     monkeypatch.setattr("hive.agent_cli.tmux.get_pane_current_command", lambda _pane: "claude")
@@ -97,9 +87,8 @@ def test_resolve_session_id_for_pane_returns_fd_mapped_session(monkeypatch, tmp_
     monkeypatch.setattr("hive.adapters.claude.tmux.list_tty_processes", lambda _tty: [
         tmux.TTYProcessInfo(pid="42424", command="claude", argv="claude --verbose"),
     ])
-    monkeypatch.setattr("hive.adapters.claude.tmux.list_open_files", lambda _pid: [str(own)])
 
-    assert agent_cli.resolve_session_id_for_pane("%138") == "sess-old"
+    assert agent_cli.resolve_session_id_for_pane("%138") == "sess-pid"
 
 
 def test_resolve_session_id_for_pane_returns_none_when_no_profile(monkeypatch):

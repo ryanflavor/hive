@@ -40,11 +40,15 @@ class ClaudeAdapter:
     # --- discovery ---
 
     def resolve_current_session_id(self, pane_id: str) -> str | None:
+        sessions_dir = _claude_home() / "sessions"
         tty = tmux.get_pane_tty(pane_id) or ""
         for process in tmux.list_tty_processes(tty):
             if not _is_claude_process(process.command, process.argv):
                 continue
-            session_id = resolve_session_id_from_open_files(process.pid)
+            payload = _read_json_file(sessions_dir / f"{process.pid}.json")
+            if not payload:
+                continue
+            session_id = str_or_none(payload.get("sessionId"))
             if session_id:
                 return session_id
         return None

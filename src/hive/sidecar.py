@@ -364,35 +364,24 @@ def _runtime_snapshot_tick(
             continue
         snapshot = snapshot_store.get(pane_id)
         recent_output = _pane_has_recent_output(pane_id)
-        needs_event_sample = cli_name == "claude" and (
+        needs_probe = cli_name == "claude" and (
             snapshot is None
             or not snapshot.sessionId.is_fresh(now=observed_at)
             or recent_output
         )
-        steady_probe_due = (
+        if not needs_probe and not (
             cli_name == "claude"
-            and not needs_event_sample
             and _runtime_session_steady_probe_due(pane_id, snapshot, now=observed_at)
-        )
-        if not needs_event_sample and not steady_probe_due:
+        ):
             continue
-        probe_kwargs: dict[str, Any] = {
-            "duration_s": RUNTIME_SESSION_PROBE_WINDOW_SECONDS if needs_event_sample else 0.0,
-        }
-        if workspace:
-            probe_kwargs.update(workspace=workspace, team_name=team_name)
-        session_id = _probe_session_id_from_open_files(pane_id, cli_name, **probe_kwargs)
-        if steady_probe_due:
+        if not needs_probe:
             _RUNTIME_SESSION_LAST_STEADY_PROBE_AT[pane_id] = observed_at
-        source = "fd"
-        if not session_id and (snapshot is None or snapshot.sessionId.source == "pidfile"):
-            session_id = _probe_session_id_from_pidfile(pane_id, cli_name)
-            source = "pidfile"
+        session_id = _probe_session_id_from_pidfile(pane_id, cli_name)
         if session_id:
             snapshot_store.update_session_id(
                 pane_id,
                 session_id,
-                source=source,
+                source="pidfile",
                 observed_at=observed_at,
             )
         elif snapshot is not None and recent_output:
@@ -1544,21 +1533,9 @@ def _agent_runtime_payload(
         runtime.update(runtime_snapshot.to_runtime_fields())
         session_id = str(runtime_snapshot.sessionId.value)
     else:
-        probe_window = (
-            RUNTIME_SESSION_PROBE_WINDOW_SECONDS
-            if profile.name == "claude" and bool(runtime.get("busy"))
-            else 0.0
-        )
-        session_id = _probe_session_id_from_open_files(
-            pane_id,
-            profile.name,
-            duration_s=probe_window,
-        )
-        source = "fd" if session_id else ""
+        session_id = adapter.resolve_current_session_id(pane_id)
+        source = "adapter" if session_id else ""
         if not session_id:
-            session_id = adapter.resolve_current_session_id(pane_id)
-            source = "adapter" if session_id else ""
-        if not session_id and runtime_snapshot is None:
             session_id = _probe_session_id_from_pidfile(pane_id, profile.name)
             source = "pidfile"
         runtime["sessionId"] = session_id or "unresolved"

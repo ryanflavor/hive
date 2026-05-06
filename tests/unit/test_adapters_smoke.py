@@ -67,141 +67,86 @@ def test_droid_adapter_scans_latest_session_in_cwd_when_args_have_no_session(mon
     assert adapter.resolve_current_session_id("%10") == "sess-new"
 
 
-def test_claude_adapter_reads_open_jsonl_handle(monkeypatch):
-    import tempfile
-    from pathlib import Path
+def test_claude_adapter_reads_pidfile_session(monkeypatch, tmp_path):
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    (sessions_dir / "98989.json").write_text(json.dumps({"sessionId": "sess-claude"}))
 
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        transcript = root / "projects" / "-repo" / "sess-claude.jsonl"
-        transcript.parent.mkdir(parents=True)
-        transcript.write_text("")
+    monkeypatch.setenv("CLAUDE_HOME", str(tmp_path))
+    monkeypatch.setattr("hive.adapters.claude.tmux.get_pane_tty", lambda _pane: "/dev/ttys012")
+    monkeypatch.setattr("hive.adapters.claude.tmux.list_tty_processes", lambda _tty: [
+        tmux.TTYProcessInfo(pid="98989", command="claude", argv="claude --verbose"),
+    ])
 
-        monkeypatch.setenv("CLAUDE_HOME", str(root))
-        monkeypatch.setattr("hive.adapters.claude.tmux.get_pane_tty", lambda _pane: "/dev/ttys012")
-        monkeypatch.setattr("hive.adapters.claude.tmux.list_tty_processes", lambda _tty: [
-            tmux.TTYProcessInfo(pid="98989", command="claude", argv="claude --verbose"),
-        ])
-        monkeypatch.setattr("hive.adapters.claude.tmux.list_open_files", lambda _pid: [str(transcript)])
-
-        adapter = adapters.get("claude")
-        assert adapter.resolve_current_session_id("%138") == "sess-claude"
+    adapter = adapters.get("claude")
+    assert adapter.resolve_current_session_id("%138") == "sess-claude"
 
 
-def test_claude_adapter_reads_open_jsonl_when_claude_runs_under_node(monkeypatch):
-    import tempfile
-    from pathlib import Path
+def test_claude_adapter_reads_pidfile_when_claude_runs_under_node(monkeypatch, tmp_path):
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    (sessions_dir / "99907.json").write_text(json.dumps({"sessionId": "sess-claude-node"}))
 
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        transcript = root / "projects" / "-repo" / "sess-claude-node.jsonl"
-        transcript.parent.mkdir(parents=True)
-        transcript.write_text("")
+    monkeypatch.setenv("CLAUDE_HOME", str(tmp_path))
+    monkeypatch.setattr("hive.adapters.claude.tmux.get_pane_tty", lambda _pane: "/dev/ttys001")
+    monkeypatch.setattr("hive.adapters.claude.tmux.list_tty_processes", lambda _tty: [
+        tmux.TTYProcessInfo(
+            pid="99907",
+            command="node",
+            argv="node /opt/homebrew/bin/claude --verbose --resume 74e0fe8d-3278-436a-98f1-7dd32c817571",
+        ),
+    ])
 
-        monkeypatch.setenv("CLAUDE_HOME", str(root))
-        monkeypatch.setattr("hive.adapters.claude.tmux.get_pane_tty", lambda _pane: "/dev/ttys001")
-        monkeypatch.setattr("hive.adapters.claude.tmux.list_tty_processes", lambda _tty: [
-            tmux.TTYProcessInfo(
-                pid="99907",
-                command="node",
-                argv="node /opt/homebrew/bin/claude --verbose --resume 74e0fe8d-3278-436a-98f1-7dd32c817571",
-            ),
-        ])
-        monkeypatch.setattr("hive.adapters.claude.tmux.list_open_files", lambda _pid: [str(transcript)])
-
-        adapter = adapters.get("claude")
-        assert adapter.resolve_current_session_id("%1070") == "sess-claude-node"
+    adapter = adapters.get("claude")
+    assert adapter.resolve_current_session_id("%1070") == "sess-claude-node"
 
 
-def test_claude_adapter_reads_open_jsonl_when_argv_is_claude_exe(monkeypatch):
-    import tempfile
-    from pathlib import Path
+def test_claude_adapter_reads_pidfile_when_argv_is_claude_exe(monkeypatch, tmp_path):
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    (sessions_dir / "20473.json").write_text(json.dumps({"sessionId": "sess-claude-exe"}))
 
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        transcript = root / "projects" / "-repo" / "sess-claude-exe.jsonl"
-        transcript.parent.mkdir(parents=True)
-        transcript.write_text("")
+    monkeypatch.setenv("CLAUDE_HOME", str(tmp_path))
+    monkeypatch.setattr("hive.adapters.claude.tmux.get_pane_tty", lambda _pane: "/dev/ttys001")
+    monkeypatch.setattr("hive.adapters.claude.tmux.list_tty_processes", lambda _tty: [
+        tmux.TTYProcessInfo(
+            pid="20473",
+            command="/opt/homebrew/li",
+            argv="/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe --resume 2315094b-1bac-4719-9111-2ef29b04d43a",
+        ),
+    ])
 
-        monkeypatch.setenv("CLAUDE_HOME", str(root))
-        monkeypatch.setattr("hive.adapters.claude.tmux.get_pane_tty", lambda _pane: "/dev/ttys001")
-        monkeypatch.setattr("hive.adapters.claude.tmux.display_value", lambda _pane, _fmt: "/repo")
-        monkeypatch.setattr("hive.adapters.claude.tmux.list_tty_processes", lambda _tty: [
-            tmux.TTYProcessInfo(
-                pid="20473",
-                command="/opt/homebrew/li",
-                argv="/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe --resume 2315094b-1bac-4719-9111-2ef29b04d43a",
-            ),
-        ])
-        monkeypatch.setattr("hive.adapters.claude.tmux.list_open_files", lambda _pid: [str(transcript)])
-
-        adapter = adapters.get("claude")
-        assert adapter.resolve_current_session_id("%479") == "sess-claude-exe"
+    adapter = adapters.get("claude")
+    assert adapter.resolve_current_session_id("%479") == "sess-claude-exe"
 
 
-def test_claude_adapter_returns_fd_session_even_when_other_jsonl_is_newer(monkeypatch):
-    """Open jsonl handles are the PID-bound source of truth.
+def test_claude_adapter_returns_pidfile_session_for_matched_pid(monkeypatch, tmp_path):
+    """Each PID reads its own pidfile; other transcripts in the same project
+    directory do not interfere."""
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    (sessions_dir / "42424.json").write_text(json.dumps({"sessionId": "sess-own"}))
+    (sessions_dir / "55555.json").write_text(json.dumps({"sessionId": "sess-other"}))
 
-    The previous mtime-based "find newer jsonl in same project_dir"
-    heuristic crossed PID boundaries: with multiple Claude panes sharing a
-    cwd, one pane's resolution would steal another pane's jsonl, breaking
-    the phantom-redraw gate. Adapter resolution now ignores cwd mtime and only
-    accepts PID-anchored open file evidence."""
-    import tempfile
-    from pathlib import Path
+    monkeypatch.setenv("CLAUDE_HOME", str(tmp_path))
+    monkeypatch.setattr("hive.adapters.claude.tmux.get_pane_tty", lambda _pane: "/dev/ttys001")
+    monkeypatch.setattr("hive.adapters.claude.tmux.list_tty_processes", lambda _tty: [
+        tmux.TTYProcessInfo(pid="42424", command="claude", argv="claude --verbose"),
+    ])
 
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        projects_dir = root / "projects" / "-repo"
-        projects_dir.mkdir(parents=True)
-
-        own = projects_dir / "sess-old.jsonl"
-        own.write_text(json.dumps({"sessionId": "sess-old", "cwd": "/repo"}) + "\n")
-        other = projects_dir / "sess-other.jsonl"
-        other.write_text(json.dumps({"sessionId": "sess-other", "cwd": "/repo"}) + "\n")
-        own_ns = 1_700_000_000_000_000_000
-        other_ns = own_ns + 5_000
-        os.utime(own, ns=(own_ns, own_ns))
-        os.utime(other, ns=(other_ns, other_ns))
-
-        monkeypatch.setenv("CLAUDE_HOME", str(root))
-        monkeypatch.setattr("hive.adapters.claude.tmux.get_pane_tty", lambda _pane: "/dev/ttys001")
-        monkeypatch.setattr("hive.adapters.claude.tmux.display_value", lambda _pane, _fmt: "/repo")
-        monkeypatch.setattr("hive.adapters.claude.tmux.list_tty_processes", lambda _tty: [
-            tmux.TTYProcessInfo(
-                pid="42424",
-                command="claude",
-                argv="claude --verbose",
-            ),
-        ])
-        monkeypatch.setattr("hive.adapters.claude.tmux.list_open_files", lambda _pid: [str(own)])
-
-        adapter = adapters.get("claude")
-        assert adapter.resolve_current_session_id("%1070") == "sess-old"
+    adapter = adapters.get("claude")
+    assert adapter.resolve_current_session_id("%1070") == "sess-own"
 
 
-def test_claude_adapter_ignores_stale_pidfile_without_open_jsonl(monkeypatch):
-    import tempfile
-    from pathlib import Path
+def test_claude_adapter_returns_none_when_no_pidfile(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_HOME", str(tmp_path))
+    monkeypatch.setattr("hive.adapters.claude.tmux.get_pane_tty", lambda _pane: "/dev/ttys001")
+    monkeypatch.setattr("hive.adapters.claude.tmux.list_tty_processes", lambda _tty: [
+        tmux.TTYProcessInfo(pid="43434", command="claude", argv="claude --verbose"),
+    ])
 
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        sessions_dir = root / "sessions"
-        projects_dir = root / "projects" / "-repo"
-        sessions_dir.mkdir(parents=True)
-        projects_dir.mkdir(parents=True)
-        (sessions_dir / "43434.json").write_text(json.dumps({"sessionId": "sess-old"}))
-        (projects_dir / "sess-old.jsonl").write_text(json.dumps({"sessionId": "sess-old", "cwd": "/repo"}) + "\n")
-
-        monkeypatch.setenv("CLAUDE_HOME", str(root))
-        monkeypatch.setattr("hive.adapters.claude.tmux.get_pane_tty", lambda _pane: "/dev/ttys001")
-        monkeypatch.setattr("hive.adapters.claude.tmux.list_tty_processes", lambda _tty: [
-            tmux.TTYProcessInfo(pid="43434", command="claude", argv="claude --verbose"),
-        ])
-        monkeypatch.setattr("hive.adapters.claude.tmux.list_open_files", lambda _pid: [])
-
-        adapter = adapters.get("claude")
-        assert adapter.resolve_current_session_id("%1070") is None
+    adapter = adapters.get("claude")
+    assert adapter.resolve_current_session_id("%1070") is None
 
 
 def test_claude_validated_pidfile_returns_session_when_transcript_is_current(monkeypatch, tmp_path):
@@ -246,40 +191,6 @@ def test_claude_validated_pidfile_rejects_stale_session(monkeypatch, tmp_path):
     monkeypatch.setenv("CLAUDE_HOME", str(claude_home))
 
     assert resolve_session_id_from_pidfile("43434", cwd="/repo") is None
-
-
-def test_claude_adapter_keeps_fd_mapping_when_newer_project_transcript_has_no_meta(monkeypatch):
-    import tempfile
-    from pathlib import Path
-
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        projects_dir = root / "projects" / "-repo"
-        projects_dir.mkdir(parents=True)
-
-        stale = projects_dir / "sess-old.jsonl"
-        stale.write_text(json.dumps({"sessionId": "sess-old", "cwd": "/repo"}) + "\n")
-        unreadable_meta = projects_dir / "sess-broken.jsonl"
-        unreadable_meta.write_text(json.dumps({"cwd": "/repo"}) + "\n")
-        stale_ns = 1_700_000_000_000_000_000
-        fresh_ns = stale_ns + 5_000
-        os.utime(stale, ns=(stale_ns, stale_ns))
-        os.utime(unreadable_meta, ns=(fresh_ns, fresh_ns))
-
-        monkeypatch.setenv("CLAUDE_HOME", str(root))
-        monkeypatch.setattr("hive.adapters.claude.tmux.get_pane_tty", lambda _pane: "/dev/ttys001")
-        monkeypatch.setattr("hive.adapters.claude.tmux.display_value", lambda _pane, _fmt: "/repo")
-        monkeypatch.setattr("hive.adapters.claude.tmux.list_tty_processes", lambda _tty: [
-            tmux.TTYProcessInfo(
-                pid="43434",
-                command="claude",
-                argv="claude --verbose",
-            ),
-        ])
-        monkeypatch.setattr("hive.adapters.claude.tmux.list_open_files", lambda _pid: [str(stale)])
-
-        adapter = adapters.get("claude")
-        assert adapter.resolve_current_session_id("%1070") == "sess-old"
 
 
 def test_codex_adapter_resolves_via_lsof(monkeypatch, configure_hive_home):
